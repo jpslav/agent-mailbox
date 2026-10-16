@@ -1,0 +1,61 @@
+#!/bin/sh
+# Launcher for the mailbox CLI: finds a Node.js >= 18 and runs ../dist/mbox.mjs.
+# Needed because monitors and hooks may run with a minimal PATH (no fnm/nvm shims).
+
+# Resolve our own location through symlinks.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+dir=$(cd "$(dirname "$self")" && pwd -P)
+entry="$dir/../dist/mbox.mjs"
+
+node_ok() {
+  [ -x "$1" ] && "$1" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)' >/dev/null 2>&1
+}
+
+# First usable node among <root>/v*/<suffix>, newest version first (sort -V, then reversed).
+newest_ok() {
+  ls -1d "$1"/v*/"$2" 2>/dev/null | sort -V 2>/dev/null | sed '1!G;h;$!d' | while IFS= read -r c; do
+    if node_ok "$c"; then echo "$c"; break; fi
+  done
+}
+
+xdg_data=${XDG_DATA_HOME:-}
+case $xdg_data in /*) ;; *) xdg_data=$HOME/.local/share ;; esac
+
+found=
+if p=$(command -v node 2>/dev/null) && node_ok "$p"; then
+  found=$p
+fi
+# Well-known fixed locations: fnm default alias (Linux/macOS XDG layouts), Homebrew (macOS and
+# Linuxbrew), system packages, Volta.
+if [ -z "$found" ]; then
+  for c in \
+    "$xdg_data/fnm/aliases/default/bin/node" \
+    "$HOME/.local/share/fnm/aliases/default/bin/node" \
+    "$HOME/.volta/bin/node" \
+    /opt/homebrew/bin/node \
+    /home/linuxbrew/.linuxbrew/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node; do
+    if node_ok "$c"; then found=$c; break; fi
+  done
+fi
+# Version managers (no default alias): newest install first.
+for root in "${NVM_DIR:-$HOME/.nvm}/versions/node:bin/node" \
+  "$xdg_data/fnm/node-versions:installation/bin/node" \
+  "$HOME/.local/share/fnm/node-versions:installation/bin/node"; do
+  [ -z "$found" ] || break
+  found=$(newest_ok "${root%%:*}" "${root#*:}")
+done
+
+if [ -z "$found" ]; then
+  echo "mbox: Node.js >= 18 not found (looked on PATH, fnm, Homebrew, /usr/local, /usr/bin, Volta, nvm). Install Node.js or add it to PATH." >&2
+  exit 127
+fi
+exec "$found" "$entry" "$@"

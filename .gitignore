@@ -1,0 +1,16 @@
+node_modules/
+vendor/
+*.log
+npm-debug.log*
+.DS_Store
+# local scratch / test leftovers
+.tmp/
+tmp/
+.env
+.env.*
+# a client or server config that holds real credentials must never be committed
+config.json
+admin.creds
+users.conf
+users.d/
+.claude/settings.local.json

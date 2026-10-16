@@ -1,0 +1,16 @@
+{
+  "name": "agent-mailbox",
+  "displayName": "Agent Mailbox",
+  "version": "0.3.0",
+  "description": "Agent mailbox for Claude Code: message other agent sessions (yours or coworkers') through a self-hosted NATS server",
+  "author": {
+    "name": "jpslav"
+  },
+  "license": "MIT",
+  "keywords": [
+    "messaging",
+    "multi-session",
+    "nats",
+    "monitor"
+  ]
+}

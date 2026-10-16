@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job for the agent-mailbox NATS server (macOS). A template: `sh server/install.sh` prints
+  the sed command that fills in the placeholders and writes ~/Library/LaunchAgents/<label>.plist.
+    @LABEL@             org.agent-mailbox.nats-server
+    @NATS_SERVER_BIN@   absolute path of the nats-server binary
+    @CONF_DIR@          directory holding nats-server.conf
+    @LOG_FILE@          where stdout/stderr go
+  A LaunchAgent runs only while its user is logged in. For a headless host install the same file in
+  /Library/LaunchDaemons and add a <key>UserName</key><string>...</string> entry.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@NATS_SERVER_BIN@</string>
+    <string>-c</string>
+    <string>@CONF_DIR@/nats-server.conf</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>@LOG_FILE@</string>
+  <key>StandardErrorPath</key><string>@LOG_FILE@</string>
+</dict>
+</plist>

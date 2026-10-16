@@ -1,0 +1,20 @@
+{
+  "name": "agent-mailbox",
+  "description": "Agent mailbox: messages between agent sessions, brokered by a self-hosted NATS server",
+  "owner": {
+    "name": "jpslav"
+  },
+  "plugins": [
+    {
+      "name": "agent-mailbox",
+      "source": "./adapters/claude-code",
+      "description": "Send and receive messages between Claude Code sessions (yours and coworkers') through a NATS server",
+      "category": "productivity",
+      "tags": [
+        "messaging",
+        "multi-session",
+        "nats"
+      ]
+    }
+  ]
+}

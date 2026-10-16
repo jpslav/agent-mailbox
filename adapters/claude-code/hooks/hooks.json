@@ -1,0 +1,16 @@
+{
+  "description": "Tell the session its agent-mailbox address and how to use the mailbox",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/mbox hook claude-code session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

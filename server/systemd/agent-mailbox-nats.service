@@ -1,0 +1,57 @@
+# systemd unit for the agent-mailbox NATS server (Linux). Install with `sh server/install.sh`
+# (prints the commands) or copy to /etc/systemd/system/agent-mailbox-nats.service.
+#
+# Assumes: a system user and group `agent-mailbox`; config in /etc/agent-mailbox (nats-server.conf,
+# users.conf, owned by that user); JetStream store in /var/lib/agent-mailbox; the pid file at
+# /run/agent-mailbox/nats-server.pid (the directory is created by RuntimeDirectory= below); and
+# nats-server in /usr/local/bin (use /usr/bin for a distro package). Edit the paths if yours differ.
+[Unit]
+Description=agent-mailbox NATS server (JetStream)
+Documentation=https://github.com/jpslav/agent-mailbox
+# If the server binds a Tailscale address, it must exist before nats-server starts.
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=agent-mailbox
+Group=agent-mailbox
+ExecStartPre=/usr/local/bin/nats-server -c /etc/agent-mailbox/nats-server.conf -t
+ExecStart=/usr/local/bin/nats-server -c /etc/agent-mailbox/nats-server.conf
+# SIGHUP re-reads the config (users.conf) without dropping connections; mbox-admin.sh also
+# sends it via the pid file.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+UMask=0077
+
+RuntimeDirectory=agent-mailbox
+RuntimeDirectoryMode=0755
+
+# Hardening: the server only needs to read its config and write its store and pid file.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-mailbox /run/agent-mailbox
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

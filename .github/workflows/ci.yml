@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NATS_SERVER_VERSION: v2.15.1
+  NATSCLI_VERSION: v0.5.0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # Release binaries from GitHub, pinned by version and verified against SHA-256 digests
+      # (taken from the GitHub release assets). Linux runners are x64, macOS runners are arm64.
+      - name: Install nats-server and nats CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64)
+              platform=linux-amd64
+              server_sha=bf5edc7b1ce98e885c368cb43a886eb148dc5d0551d99f3cf6141fb5e1954c70
+              cli_sha=d9fc93e9e9ab0310deff7e719a8a0da6f9d66f26d473f039aaee70155507aecc ;;
+            macOS-ARM64)
+              platform=darwin-arm64
+              server_sha=ed0fe39222ec2e317c4d0e1a9cdc16c63ec523d94f9355d24a902a4db2655ffd
+              cli_sha=37a6f924bc42c72a38856d9c6125c38885732b2a13387b8bc15d1ff80987520b ;;
+            *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          bin="$RUNNER_TEMP/nats-bin"
+          dl="$RUNNER_TEMP/nats-dl"
+          mkdir -p "$bin" "$dl"
+
+          server_file="nats-server-${NATS_SERVER_VERSION}-${platform}.tar.gz"
+          curl -fsSL --retry 3 -o "$dl/$server_file" \
+            "https://github.com/nats-io/nats-server/releases/download/${NATS_SERVER_VERSION}/${server_file}"
+          echo "${server_sha}  $dl/$server_file" | shasum -a 256 -c -
+          tar -xzf "$dl/$server_file" -C "$dl"
+          install -m 755 "$(find "$dl" -type f -name nats-server | head -n 1)" "$bin/nats-server"
+
+          cli_file="nats-${NATSCLI_VERSION#v}-${platform}.zip"
+          curl -fsSL --retry 3 -o "$dl/$cli_file" \
+            "https://github.com/nats-io/natscli/releases/download/${NATSCLI_VERSION}/${cli_file}"
+          echo "${cli_sha}  $dl/$cli_file" | shasum -a 256 -c -
+          unzip -q "$dl/$cli_file" -d "$dl"
+          install -m 755 "$(find "$dl" -type f -name nats | head -n 1)" "$bin/nats"
+
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/nats-server" --version
+          "$bin/nats" --version
+
+      - run: npm ci
+
+      - name: Shell syntax
+        run: |
+          for f in adapters/claude-code/bin/mbox server/*.sh; do sh -n "$f"; done
+
+      - run: npm test
+
+      # The plugin ships dist/mbox.mjs as a committed build: it must match src/.
+      - name: dist is up to date
+        run: |
+          npm run build
+          git diff --exit-code adapters/claude-code/dist

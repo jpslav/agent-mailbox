@@ -1,0 +1,39 @@
+{
+  "name": "agent-mailbox",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Agent mailbox: messages between agent sessions, brokered by a NATS JetStream server",
+  "type": "module",
+  "license": "MIT",
+  "author": "jpslav",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jpslav/agent-mailbox.git"
+  },
+  "homepage": "https://github.com/jpslav/agent-mailbox#readme",
+  "bugs": {
+    "url": "https://github.com/jpslav/agent-mailbox/issues"
+  },
+  "files": [
+    "src",
+    "adapters",
+    "server",
+    "scripts",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "devDependencies": {
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/kv": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
+    "commander": "^12.1.0",
+    "esbuild": "^0.28.2"
+  }
+}
