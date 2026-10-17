@@ -75,9 +75,12 @@ The source is strict TypeScript (`src/`, `test/`); `esbuild` bundles it, `tsc` o
 - **Never squash-merge.** Merge PRs with a merge commit (`gh pr merge --merge`); never recommend
   squash. Squash and rebase are disabled in the repository settings.
 - **Never push to `main` directly.** The `protect-main` ruleset requires a pull request.
-- **Tests must hold under load.** CI runners are slow. No timing-based assertions: assert on
-  totals and order, pause what you inspect, wait for conditions, use generous timeouts. Run the
-  suite with every core busy when touching delivery code; loaded runs found two real bugs.
+- **Tests must hold on slow machines.** CI runners are slow. No timing-based assertions: assert
+  on totals and order, pause what you inspect, wait for conditions, use generous timeouts. To
+  test a race, force the ordering with a test-only fault-injection knob (`AGENT_MAILBOX_FAULT`,
+  `slow-open:<ms>` and the like) instead of hoping load produces it, and run the suite on Node 22
+  as well as the newest Node. **Never load a maintainer's machine** (no `yes` per core or other
+  CPU-burning runs): CI's slow runners are the load signal (docs/DECISIONS.md).
 
 ## The change workflow
 
@@ -148,7 +151,8 @@ Dependabot opens weekly PRs for npm and GitHub Actions (minor and patch updates 
   `dist/` needs a patch version bump** and a rebuilt `dist/` (CI rejects it otherwise). A bump
   that does not change `dist/` (devDependencies that are not bundled) needs none.
 - Every dependency is a devDependency (the bundle carries what it needs) and is **pinned to an
-  exact version**, no `^` or `~`. Pick a version published at least two weeks ago
+  exact version**, no `^` or `~`. Pick a version published at least two weeks ago (Dependabot's
+  `cooldown` enforces the same 14 days for the updates it proposes)
   (`npm view <pkg> time --json`). The tooling pairs constrain each other: `typescript-eslint`
   supports only some TypeScript versions, and `eslint`, `lint-staged` and `tsx` have Node
   engine floors (CI runs Node 20 and 22), so check peer dependencies before bumping one.

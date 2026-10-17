@@ -69,7 +69,7 @@ with your branch name throughout.
 
    - On a failure, read the log (`gh run view <run-id> --log-failed`), fix on the same branch,
      push, and wait again. A failure that only shows on a slow runner is a real bug (see
-     CLAUDE.md, "Tests must hold under load"): fix the test or the code, never add a sleep.
+     CLAUDE.md, "Tests must hold on slow machines"): fix the test or the code, never add a sleep.
    - If the PR says it is behind `main` ("branch must be up to date"), merge `main` in and wait
      again: `gh pr update-branch <n>` (a merge commit, not a rebase).
    - No checks appearing at all usually means a merge conflict with `main`; resolve it.

@@ -153,3 +153,18 @@ context, decision, why.
   every message but may show one that was in flight that long a second time, or out of order. And a message
   the server hands the old daemon in the instant it stops listening comes back only after the
   60 s redelivery interval.
+
+## No CPU-load testing on maintainers' machines; fault injection instead
+
+- **Date:** 2026-10
+- **Context:** "Tests must hold under load" (above) had maintainers run the suite with every core
+  busy. That found real bugs, but it pegged the repo owner's working machine for minutes at a
+  time, repeatedly.
+- **Decision:** Supersedes the "run the suite under load" part of that entry. Never load a
+  maintainer's machine. Races are tested by forcing the ordering with test-only fault-injection
+  knobs (`AGENT_MAILBOX_FAULT=...`), and the suite runs on Node 22 as well as the newest Node.
+  CI's slow runners provide the real-load signal; if more is ever needed, add a separate,
+  non-required stress workflow on CI runners.
+- **Why:** Deterministic fault injection reproduces a race every time, where load only makes it
+  likely, and it costs nobody their machine. The two-week rule for new dependency versions is
+  likewise enforced by Dependabot's `cooldown` (14 days) rather than by memory.
