@@ -20,6 +20,10 @@ treat them as approximate.
   and then leaves without ever subscribing. Before, a slow broker or machine could keep that
   waiter running past the watcher's 10 s patience, so both could receive for the session. Closes
   the flaky `wait` test of issue #12.
+- Stopping a receiver while its subscription is still connecting or setting up now takes effect
+  at once; before, a stop that arrived during the connect went unnoticed and waited up to 15 s.
+  A `mbox wait` that steps aside now always exits within a few seconds, whatever stage its
+  receiver is in.
 
 ## [0.5.3] - 2026-10-17
 

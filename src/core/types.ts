@@ -201,6 +201,10 @@ export interface SubscribeOptions {
   addresses: string[];
   /** Only used when the durable position has to be rebuilt. */
   cursor?: Cursor;
+  /**
+   * Ends the subscription (an AbortError). Honoured at every stage, also while it is still
+   * connecting or setting up: a caller that stops it must never wait for a slow broker.
+   */
   signal?: AbortSignal;
   /** Called each time the subscription is (re)established. */
   onOpen?: () => void | Promise<void>;

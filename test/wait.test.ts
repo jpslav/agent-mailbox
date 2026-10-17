@@ -174,6 +174,32 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     await watcher.stop();
   });
 
+  // A superseded waiter must exit before the newer one stops waiting for it (10 s), whatever stage
+  // its receiver is in; the newer one then receives alone.
+  const supersededWhile = async (session: string, fault: string, opened: boolean) => {
+    const dir = projectDir(session);
+    const addr = sessionAddr(bobEnv, session, dir);
+    const w1 = waiter({ ...bobEnv, AGENT_MAILBOX_FAULT: fault }, session, dir);
+    await waitForWaiter(bobEnv, session, w1.proc.pid);
+    if (opened) await waitListed(addr); // announced: the receiver is open, its subscription starting
+    const w2 = waiter(bobEnv, session, dir);
+    await waitForWaiter(bobEnv, session, w2.proc.pid);
+    assert.equal(await w1.result(10000), 0);
+    assert.equal(w1.err, '');
+    mail(addr, 'for the newer one');
+    assert.equal(await w2.result(), 2, w2.err);
+    assert.deepEqual(bodies(w2), ['for the newer one']);
+    assert.equal(w1.err, '');
+  };
+
+  it('a waiter superseded while its receiver is still opening exits 0 at once; mail is delivered once', () =>
+    // Fault injection (test-only): the waiter's presence announcement takes 30 s.
+    supersededWhile('w-sso', 'slow-open:30000', false));
+
+  it('a waiter superseded right after its receiver opened exits 0 promptly; mail is delivered once', () =>
+    // Fault injection (test-only): its subscription starts 30 s late and cannot be stopped before.
+    supersededWhile('w-ssub', 'slow-subscribe:30000', true));
+
   it('killed after writing but before acking: the next waiter delivers it again', async () => {
     const dir = projectDir('crash');
     const env = { ...bobEnv, AGENT_MAILBOX_REDELIVER_MS: '1500' };

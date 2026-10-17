@@ -526,18 +526,6 @@ export function createTransport(
       t: given?.t ?? new Date().toISOString(),
     };
 
-    let nc: NatsConnection;
-    let mux: Shared | null = null; // the shared connection's record, in multiplex mode
-    try {
-      if (multiplex) {
-        mux = await conn();
-        nc = mux.nc;
-      } else {
-        nc = await connect(connOpts({ pingInterval: 20000, maxPingOut: 2 }));
-      }
-    } catch (e) {
-      throw tag(e);
-    }
     let stopped = false;
     let fail!: (reason: unknown) => void;
     const failed = new Promise<never>((_, rej) => (fail = rej));
@@ -546,7 +534,32 @@ export function createTransport(
       stopped = true; // at once: from here on, what onMessage hands back is collected (handBack)
       fail(Object.assign(new Error('aborted'), { name: 'AbortError' }));
     };
+    // Listen before connecting: an abort while the connection or the consumer is still being set
+    // up ends the subscription at once (a listener added after the abort would never fire).
     signal?.addEventListener('abort', onAbort, { once: true });
+    /** A setup step that an abort (or a failure) cuts short. */
+    const step = <T>(p: Promise<T>): Promise<T> => Promise.race([p, failed]);
+
+    let nc: NatsConnection;
+    let mux: Shared | null = null; // the shared connection's record, in multiplex mode
+    try {
+      if (multiplex) {
+        mux = await step(conn());
+        nc = mux.nc;
+      } else {
+        const connecting = connect(connOpts({ pingInterval: 20000, maxPingOut: 2 }));
+        try {
+          nc = await step(connecting);
+        } catch (e) {
+          // Left before the connection was up: close it once it is.
+          void connecting.then((c) => c.close()).catch(() => {});
+          throw e;
+        }
+      }
+    } catch (e) {
+      signal?.removeEventListener('abort', onAbort);
+      throw tag(e);
+    }
     if (mux) {
       mux.subs.add(fail);
       if (nc.isClosed()) fail(new Error('connection closed'));
@@ -588,13 +601,13 @@ export function createTransport(
 
     try {
       const js = jetstream(nc, { checkAPI: false, timeout: 10000 });
-      const jsm = await jetstreamManager(nc, { checkAPI: false, timeout: 10000 });
+      const jsm = await step(jetstreamManager(nc, { checkAPI: false, timeout: 10000 }));
 
       // Durable consumer: reuse (re-targeting its filter if aliases changed), or (re)create it at
       // the remembered position.
       let info: ConsumerInfo | null = null;
       try {
-        info = await jsm.consumers.info(ownStream, name);
+        info = await step(jsm.consumers.info(ownStream, name));
       } catch (e) {
         if (!isNotFound(e)) throw tag(e);
       }
@@ -604,30 +617,34 @@ export function createTransport(
             (info.config.filter_subject ? [info.config.filter_subject] : [])),
         ].sort();
         if (JSON.stringify(have) !== JSON.stringify(filters) || info.config.ack_wait !== ackWait) {
-          await jsm.consumers.update(ownStream, name, {
-            filter_subjects: filters,
-            ack_wait: ackWait,
-          });
+          await step(
+            jsm.consumers.update(ownStream, name, {
+              filter_subjects: filters,
+              ack_wait: ackWait,
+            }),
+          );
         }
       } else {
         const start: Partial<ConsumerConfig> =
           cur.u !== null && cur.u !== undefined
             ? { deliver_policy: 'by_start_sequence', opt_start_seq: Number(cur.u) + 1 }
             : { deliver_policy: 'by_start_time', opt_start_time: cur.t };
-        await jsm.consumers.add(ownStream, {
-          name,
-          durable_name: name,
-          description: `mailbox session ${String(session).slice(0, 64)}`,
-          filter_subjects: filters,
-          ack_policy: 'explicit',
-          ack_wait: ackWait,
-          max_deliver: -1,
-          inactive_threshold: INACTIVE_NS,
-          replay_policy: 'instant',
-          ...start,
-        });
+        await step(
+          jsm.consumers.add(ownStream, {
+            name,
+            durable_name: name,
+            description: `mailbox session ${String(session).slice(0, 64)}`,
+            filter_subjects: filters,
+            ack_policy: 'explicit',
+            ack_wait: ackWait,
+            max_deliver: -1,
+            inactive_threshold: INACTIVE_NS,
+            replay_policy: 'instant',
+            ...start,
+          }),
+        );
       }
-      const consumer = await js.consumers.get(ownStream, name);
+      const consumer = await step(js.consumers.get(ownStream, name));
       messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
 
       directLoop = (async () => {
@@ -729,8 +746,8 @@ export function createTransport(
           }
         };
         wakeSub = nc.subscribe(`${PREFIX}.all.*`, { callback: () => void catchUp(3) });
-        await nc.flush();
-        await catchUp();
+        await step(nc.flush());
+        await step(catchUp());
         const iv = setInterval(() => void catchUp(), broadcastPollMs);
         iv.unref?.();
         failed.catch(() => clearInterval(iv));

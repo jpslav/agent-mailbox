@@ -287,7 +287,8 @@ program
             process.stderr.write(text, (err) => (err ? reject(err) : resolve())),
           ),
       });
-      await closeTransports();
+      // Bounded: a waiter that stepped aside must exit before the one it yielded to gives up on it.
+      await Promise.race([closeTransports(), new Promise((r) => setTimeout(r, 2000).unref())]);
       process.exit(result === 'mail' ? 2 : 0);
     } catch (e) {
       quit(explainError(e));
