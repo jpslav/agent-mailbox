@@ -31,6 +31,8 @@ treat them as approximate.
 - A receiver that stops (`mbox wait`, `mbox watch`, the daemon) now hands unacknowledged mail back
   at once and oldest first, instead of after a delay or the 60 s redelivery interval, so the
   session's next reader gets it in order.
+- Dependabot no longer proposes commander 13 and later: commander 15 needs Node >= 22.12, and
+  the runtime target is Node >= 18.
 
 ### Fixed
 - The daemon's lock file is created complete or not at all, and a stale lock is removed only if it
