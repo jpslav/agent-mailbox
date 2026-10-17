@@ -15,6 +15,8 @@ concurrency:
 env:
   NATS_SERVER_VERSION: v2.15.1
   NATSCLI_VERSION: v0.5.0
+  # simple-git-hooks installs the git hooks on `npm ci`; a CI checkout has no use for them.
+  SKIP_INSTALL_SIMPLE_GIT_HOOKS: '1'
 
 jobs:
   test:
@@ -93,6 +95,15 @@ jobs:
       - name: Shell syntax
         run: |
           for f in adapters/claude-code/bin/mbox server/*.sh; do sh -n "$f"; done
+
+      - name: Formatting (Prettier)
+        run: npm run format:check
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Type check (tsc)
+        run: npm run typecheck
 
       - run: npm test
 
