@@ -6,7 +6,11 @@
 // Single waiter per session: <sid>.wait.lock names the current one. A newer waiter rewrites it;
 // the older one notices within AGENT_MAILBOX_WAIT_POLL_MS and exits quietly, and the newer one
 // waits for that exit before it subscribes (so the two never deliver the same message). A live
-// `mbox watch` for the session (a monitor) takes precedence in both directions.
+// `mbox watch` for the session (a monitor) takes precedence in both directions. The older waiter
+// notices from the moment it holds the lock, also while its receiver is still opening (a slow
+// broker must not keep it, and so the watcher waiting for its exit, waiting): an opening that is
+// abandoned never subscribes. Stepping aside is bounded (LEAVE_MS) whatever stage the receiver
+// is in, so it exits well before the one it yields to stops waiting for it.
 //
 // Delivery is at-least-once, as in watch: messages are written, then recorded in the session's
 // cursor file, then acknowledged. A waiter killed after writing but before acknowledging leaves
@@ -30,6 +34,21 @@ import type { Config, Delivery, DeliveryResult, Env, Message, Transport } from '
 
 /** Longest a timer can wait (setTimeout's limit). */
 export const MAX_WAIT_MS = 2 ** 31 - 1;
+
+/**
+ * Longest a waiter that steps aside waits for its receiver to stop (and its connection to close).
+ * The newer waiter or the watcher it yields to waits 10 s for it to exit, so it must be gone well
+ * before that, whatever stage its receiver is in. It has written nothing, so cutting the stop short
+ * loses nothing: what it held is offered again after the redelivery delay.
+ */
+export const LEAVE_MS = 5000;
+
+/** `p`, or nothing after `ms` (the timer does not keep the process alive). */
+async function within(p: Promise<unknown> | undefined, ms: number): Promise<void> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([p, new Promise((r) => (t = setTimeout(r, ms)))]);
+  clearTimeout(t);
+}
 
 const handled = (e: Error): Promise<never> => {
   const p = Promise.reject(e);
@@ -83,14 +102,26 @@ export async function runWait({
     lockPollMs: Number(env.AGENT_MAILBOX_WAIT_POLL_MS) || 250,
     drainMs: Number(env.AGENT_MAILBOX_DRAIN_MS) || 300,
     maxChars: Number(env.AGENT_MAILBOX_WAIT_MAX_CHARS) || 8000,
-    fault: env.AGENT_MAILBOX_FAULT || '', // test-only: "crash-after-write"
+    // Test-only fault injection (AGENT_MAILBOX_FAULT), never set in production:
+    // "crash-after-write"; "slow-open:<ms>" (the receiver's presence announcement takes <ms>
+    // longer, so the waiter is superseded while its receiver is still opening); "slow-subscribe:<ms>"
+    // (the receiver's subscription starts <ms> late, deaf to the stop, so the waiter is superseded
+    // with a receiver that is open but cannot stop promptly).
+    fault: env.AGENT_MAILBOX_FAULT || '',
   };
+  const faultMs = (name: string): number =>
+    Number(new RegExp(`^${name}:(\\d+)$`).exec(opt.fault)?.[1]) || 0;
+  const slowOpenMs = faultMs('slow-open');
+  const slowSubscribeMs = faultMs('slow-subscribe');
   const st = await ensureSession({ sid, cfg, transport, cwd, hostPid, env });
   // Claim first, then look for a watcher (watch does the reverse), so one of us always sees the other.
   const lock = claimWaitLock(sid, env);
   const yielded = async (): Promise<'idle'> => {
     lock.release();
-    await transport.close?.().catch(() => {});
+    await within(
+      transport.close?.().catch(() => {}),
+      LEAVE_MS,
+    );
     return 'idle';
   };
   if (watcherPid(sid, env)) return yielded();
@@ -105,6 +136,8 @@ export async function runWait({
   let doneResolve!: (result: WaitResult) => void;
   const done = new Promise<WaitResult>((r) => (doneResolve = r));
   let rx: Receiver | null = null; // set before any delivery can arrive; callbacks below rely on it
+  const opening = new AbortController(); // aborted when we leave before the receiver is open
+  let opened: Promise<Receiver> | null = null;
 
   function finish(
     result: WaitResult,
@@ -114,11 +147,15 @@ export async function runWait({
     finishing = (async () => {
       clearTimeout(drainTimer);
       timers.forEach((t) => clearTimeout(t));
-      // Stop taking messages first (synchronous), then hand the batch back: in order, at once, to
-      // the next waiter.
-      const receiving = rx?.stop({ depart });
+      opening.abort(); // a receiver still opening gives up without ever subscribing
+      // Stop taking messages first (synchronous once open), then hand the batch back: in order,
+      // at once, to the next waiter.
+      const receiving = (rx ?? (await opened?.catch(() => null)))?.stop({ depart });
       for (const b of batch.splice(0)) b.reject(new Error('not delivered'));
-      await receiving;
+      // Stepping aside is bounded (see LEAVE_MS); after a delivery, the stop also settles its
+      // acknowledgements, so it takes as long as it needs.
+      if (result === 'idle') await within(receiving, LEAVE_MS);
+      else await receiving;
       lock.release();
       doneResolve(result);
     })();
@@ -179,24 +216,54 @@ export async function runWait({
   const signals = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
   for (const sig of signals) process.on(sig, onSignal);
 
-  rx = await openReceiver({
-    cfg,
-    transport,
-    sid,
-    st,
-    agent,
-    hostPid,
-    env,
-    onMessage,
-    onHostGone: () => yieldNow({ depart: true }),
-  });
-  // Superseded, or a watcher started: step aside. Also keeps our lock fresh.
+  // Superseded, or a watcher started: step aside. Also keeps our lock fresh. Armed before the
+  // receiver opens, so we step aside even while that takes long.
   const poll = setInterval(() => {
     if (!lock.mine() || watcherPid(sid, env)) yieldNow();
     else lock.touch();
   }, opt.lockPollMs);
   poll.unref?.();
   timers.push(setTimeout(() => yieldNow(), Math.min(Math.max(1, maxWaitMs), MAX_WAIT_MS)));
+
+  const late = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const slowTransport: Transport =
+    slowOpenMs || slowSubscribeMs
+      ? {
+          ...transport,
+          presence: {
+            ...transport.presence,
+            announce: async (...args) => {
+              await late(slowOpenMs);
+              return transport.presence.announce(...args);
+            },
+          },
+          subscribe: async (...args) => {
+            await late(slowSubscribeMs);
+            return transport.subscribe(...args);
+          },
+        }
+      : transport;
+  opened = openReceiver({
+    cfg,
+    transport: slowTransport,
+    sid,
+    st,
+    agent,
+    hostPid,
+    env,
+    signal: opening.signal,
+    onMessage,
+    onHostGone: () => yieldNow({ depart: true }),
+  });
+  try {
+    rx = await opened;
+  } catch (e) {
+    clearInterval(poll);
+    for (const sig of signals) process.off(sig, onSignal);
+    timers.forEach((t) => clearTimeout(t));
+    lock.release();
+    throw e;
+  }
 
   const result = await done;
   clearInterval(poll);
