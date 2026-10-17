@@ -45,7 +45,7 @@ adapter id (lowercase, for example `codex`).
    `instructions`) and `test/hook.test.ts` (the hooks through the real CLI, with a temp
    `AGENT_MAILBOX_CONFIG` and `AGENT_MAILBOX_STATE_DIR`). For push delivery, add a fake endpoint
    like `FakeInbox` in `test/helpers.ts` and a daemon test like `test/deliverd.test.ts`. Tests must
-   not depend on timing (CLAUDE.md, "Tests must hold under load").
+   not depend on timing (CLAUDE.md, "Tests must hold on slow machines").
 7. **Build and verify**:
 
    ```sh
