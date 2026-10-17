@@ -281,14 +281,16 @@ export interface MboxOptions {
   cwd?: string;
   input?: string;
   timeoutMs?: number;
+  /** Run this copy of the bundle instead of the repository's (another install path). */
+  bundle?: string;
 }
 
 /** Run an mbox command to completion. */
 export function mbox(
   args: string[],
-  { env, cwd, input, timeoutMs = 20000 }: MboxOptions = {},
+  { env, cwd, input, timeoutMs = 20000, bundle = MBOX }: MboxOptions = {},
 ): MboxResult {
-  const r = spawnSync(process.execPath, [MBOX, ...args], {
+  const r = spawnSync(process.execPath, [bundle, ...args], {
     env,
     cwd,
     input,
@@ -534,8 +536,8 @@ export class FakeInbox {
   readonly sessionId: string | null;
   readonly token: string | null;
   readonly firstLineMs: number;
-  /** How long to keep a connection open after reading it (a slow session). */
-  readonly closeDelayMs: number;
+  /** How long to keep a connection open after reading it (a slow session); may be changed. */
+  closeDelayMs: number;
   readonly delivered: InboxDelivery[] = [];
   readonly dropped: InboxDrop[] = [];
   connections = 0;

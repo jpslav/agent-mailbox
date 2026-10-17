@@ -14,6 +14,7 @@ import { ResolveError, resolveTarget } from '../src/core/registry.js';
 import { configPath } from '../src/core/config.js';
 import { stateDir } from '../src/core/state.js';
 import type { Delivery, PresenceEntry } from '../src/core/types.js';
+import { BUILD_VERSION, compareVersions, isVersion, ownVersion } from '../src/core/version.js';
 import { describe, it } from './suite.js';
 
 describe('XDG paths', () => {
@@ -310,5 +311,38 @@ describe('peer resolution', () => {
     const r = resolveTarget('bob.h.zzz', peers);
     assert.equal(r.live, false);
     assert.equal(resolveTarget('all', peers).to, 'all');
+  });
+});
+
+describe('versions (daemon takeover)', () => {
+  it('compares as semantic versions, numerically, not as strings', () => {
+    assert.ok(compareVersions('0.10.0', '0.9.9') > 0);
+    assert.ok(compareVersions('1.10.0', '1.9.2') > 0);
+    assert.ok(compareVersions('0.5.3', '0.5.2') > 0);
+    assert.ok(compareVersions('0.5.2', '0.5.3') < 0);
+    assert.equal(compareVersions('0.5.3', '0.5.3'), 0);
+    assert.equal(compareVersions('0.5.3', '0.5.3+build.7'), 0, 'build metadata does not count');
+    assert.ok(compareVersions('2.0.0', '1.99.99') > 0);
+  });
+  it('orders prereleases below their release, by semver rules', () => {
+    assert.ok(compareVersions('1.0.0-rc.1', '1.0.0') < 0);
+    assert.ok(compareVersions('1.0.0-alpha', '1.0.0-alpha.1') < 0);
+    assert.ok(compareVersions('1.0.0-alpha.2', '1.0.0-alpha.10') < 0);
+    assert.ok(compareVersions('1.0.0-1', '1.0.0-alpha') < 0, 'numeric below alphanumeric');
+    assert.ok(compareVersions('1.0.0-beta', '1.0.0-alpha') > 0);
+  });
+  it('sorts a missing or garbled version (a daemon from before 0.5.3) below every version', () => {
+    assert.ok(compareVersions('0.0.1', null) > 0);
+    assert.ok(compareVersions(undefined, '0.0.1') < 0);
+    assert.ok(compareVersions('0.5.3', 'garbage') > 0);
+    assert.equal(compareVersions(null, 'garbage'), 0);
+    assert.equal(isVersion('0.5.3'), true);
+    assert.equal(isVersion('0.5'), false);
+    assert.equal(isVersion('01.2.3'), false);
+  });
+  it('runs as the injected build version unless the test-only knob says otherwise', () => {
+    assert.equal(ownVersion({ AGENT_MAILBOX_FAKE_VERSION: '9.9.9' }), '9.9.9');
+    assert.equal(ownVersion({}), BUILD_VERSION);
+    assert.equal(BUILD_VERSION, '0.0.0-dev', 'run from source, nothing is injected');
   });
 });

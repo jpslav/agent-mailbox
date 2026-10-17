@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { after, before } from 'node:test';
 import { jetstream, jetstreamManager, type JetStreamManager } from '@nats-io/jetstream';
@@ -13,6 +14,7 @@ import {
   Broker,
   FakeInbox,
   MBOX,
+  ROOT,
   Watcher,
   at,
   findServer,
@@ -31,6 +33,19 @@ import { describe, it } from './suite.js';
 
 const SERVER = findServer();
 const TOKEN = 'tok-5e1d9b0c7a3f4e2d8c6b';
+/** The release the bundle was built as (scripts/build.mjs injects it from package.json). */
+const VERSION = parseJson<{ version: string }>(
+  fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+).version;
+// Daemon versions for the takeover tests (AGENT_MAILBOX_FAKE_VERSION, a test-only knob). 1.10.0 is
+// newer than 1.9.2 only when compared as numbers, not as strings.
+const OLD = '1.9.2';
+const NEW = '1.10.0';
+const as = <E extends Env>(env: E, version: string): E => ({
+  ...env,
+  AGENT_MAILBOX_FAKE_VERSION: version,
+});
+const re = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 describe('mbox deliverd', { skip: SERVER.skip }, () => {
   let b: Broker;
@@ -109,36 +124,72 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     return p;
   };
   /** The SessionStart hook as Claude Code runs it, with the inbox socket in its environment. */
+  interface HookOptions {
+    socket?: string;
+    token?: string;
+    hostPid?: number;
+    /** Run the hook from this copy of the bundle (another install path). */
+    bundle?: string;
+  }
+  const hookEnv = (env: MachineEnv, { socket, token = TOKEN, hostPid }: HookOptions): Env => ({
+    ...env,
+    CLAUDECODE: '1',
+    ...(socket ? { CLAUDE_CODE_MESSAGING_SOCKET: socket } : {}),
+    ...(token ? { CLAUDE_CODE_MESSAGING_TOKEN: token } : {}),
+    ...(hostPid ? { CLAUDE_PID: String(hostPid) } : {}),
+  });
+  const hookInput = (sid: string, dir: string): string =>
+    JSON.stringify({
+      session_id: sid,
+      cwd: dir,
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+    });
+  const hookResult = (stdout: string): { ctx: string; address: string } => {
+    const ctx = parseJson<HookOutput>(stdout).hookSpecificOutput.additionalContext;
+    const address = /address is (\S+?)\. /.exec(ctx)?.[1];
+    assert.ok(address, ctx);
+    return { ctx, address };
+  };
   const sessionStart = (
     env: MachineEnv,
     sid: string,
     dir: string,
-    { socket, token = TOKEN, hostPid }: { socket?: string; token?: string; hostPid?: number } = {},
+    opts: HookOptions = {},
   ): { ctx: string; ms: number; address: string } => {
-    const e = {
-      ...env,
-      CLAUDECODE: '1',
-      ...(socket ? { CLAUDE_CODE_MESSAGING_SOCKET: socket } : {}),
-      ...(token ? { CLAUDE_CODE_MESSAGING_TOKEN: token } : {}),
-      ...(hostPid ? { CLAUDE_PID: String(hostPid) } : {}),
-    };
     const t0 = Date.now();
     const r = mbox(['hook', 'claude-code', 'session-start'], {
-      env: e,
-      input: JSON.stringify({
-        session_id: sid,
-        cwd: dir,
-        hook_event_name: 'SessionStart',
-        source: 'startup',
-      }),
+      env: hookEnv(env, opts),
+      input: hookInput(sid, dir),
+      ...(opts.bundle ? { bundle: opts.bundle } : {}),
     });
     const ms = Date.now() - t0;
     assert.equal(r.code, 0, r.stderr);
-    const ctx = parseJson<HookOutput>(r.stdout).hookSpecificOutput.additionalContext;
-    const address = /address is (\S+?)\. /.exec(ctx)?.[1];
-    assert.ok(address, ctx);
-    return { ctx, ms, address };
+    return { ...hookResult(r.stdout), ms };
   };
+  /** The SessionStart hook as a child process that is not waited for (sessions starting together). */
+  const sessionStartAsync = (
+    env: MachineEnv,
+    sid: string,
+    dir: string,
+    opts: HookOptions = {},
+  ): Promise<{ ctx: string; address: string }> =>
+    new Promise((resolve, reject) => {
+      const p = spawn(process.execPath, [MBOX, 'hook', 'claude-code', 'session-start'], {
+        env: hookEnv(env, opts),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let out = '';
+      let err = '';
+      p.stdout.setEncoding('utf8').on('data', (d: string) => (out += d));
+      p.stderr.setEncoding('utf8').on('data', (d: string) => (err += d));
+      p.on('error', reject);
+      p.on('exit', (code) => {
+        if (code !== 0) reject(new Error(`hook exited ${code}: ${err}`));
+        else resolve(hookResult(out));
+      });
+      p.stdin.end(hookInput(sid, dir));
+    });
   const sessionEnd = (env: MachineEnv, sid: string): void => {
     const r = mbox(['hook', 'claude-code', 'session-end'], {
       env: { ...env, CLAUDECODE: '1' },
@@ -307,7 +358,12 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.match(logOf(env), /another deliverd is running \(pid \d+\); exiting/);
     // --status shows the session, never the token.
     const st = mbox(['deliverd', '--status'], { env });
-    assert.match(st.stdout, new RegExp(`deliverd running \\(pid ${daemonPid(env)}\\)`));
+    assert.match(
+      st.stdout,
+      new RegExp(
+        `deliverd running \\(pid ${daemonPid(env)}, version ${VERSION.replace(/\./g, '\\.')}\\)`,
+      ),
+    );
     assert.ok(st.stdout.includes(address));
     for (const text of [
       st.stdout,
@@ -608,5 +664,389 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       mbox(['deliverd', '--status'], { env }).stdout.split('\n')[0],
       'deliverd not running',
     );
+  });
+
+  // ---------------------------------------------------------------- version takeover
+  /** The daemon's lock file: {pid, startedAt, version, exe}. */
+  const lockOf = (env: MachineEnv): { pid: number; version?: string; exe?: string } =>
+    parseJson(fs.readFileSync(statePath(env, 'deliverd.lock'), 'utf8'));
+  /** Publish straight to the stream, one connection, in order (fast, whatever the machine). */
+  const publish = async (address: string, ids: string[]): Promise<void> => {
+    const nc = await b.conn('alice');
+    const js = jetstream(nc, { checkAPI: false });
+    for (const id of ids)
+      await js.publish(
+        `mbx.${address}.alice`,
+        JSON.stringify({ v: 1, id, from: 'alice.laptop.x', to: address, body: id }),
+        { msgID: id },
+      );
+    await nc.close();
+  };
+  /** The log lines matching `pattern`. */
+  const logLines = (env: MachineEnv, pattern: RegExp): string[] =>
+    logOf(env)
+      .split('\n')
+      .filter((l) => pattern.test(l));
+  /** Asserts that the log holds lines matching each pattern, in this order. */
+  const assertLogOrder = (env: MachineEnv, patterns: RegExp[]): void => {
+    const lines = logOf(env).split('\n');
+    let from = 0;
+    for (const p of patterns) {
+      const i = lines.findIndex((l, n) => n >= from && p.test(l));
+      assert.ok(i >= 0, `log: no ${p} after line ${from}:\n${lines.join('\n')}`);
+      from = i + 1;
+    }
+  };
+  /** A copy of the bundle in its own directory (another install path, e.g. an older plugin cache). */
+  const bundleCopy = (): string => {
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'amb-bundle-'));
+    const file = path.join(dir, 'mbox.mjs');
+    fs.copyFileSync(MBOX, file);
+    return file;
+  };
+
+  it('--status and --version show the version the bundle was built as', async () => {
+    assert.match(VERSION, /^\d+\.\d+\.\d+/);
+    assert.equal(mbox(['--version']).stdout.trim(), VERSION);
+    const env = bobMachine();
+    const sid = 'd-ver-0001';
+    const fake = await inbox(sid);
+    sessionStart(env, sid, projectDir('ver'), { socket: fake.path, hostPid: fakeHost().pid });
+    await until(() => alive(daemonPid(env)), 'daemon started');
+    const lock = lockOf(env);
+    assert.equal(lock.version, VERSION);
+    assert.equal(lock.exe, MBOX);
+    const st = mbox(['deliverd', '--status'], { env }).stdout;
+    assert.match(
+      st,
+      new RegExp(`^deliverd running \\(pid ${lock.pid}, version ${re(VERSION)}\\)$`, 'm'),
+    );
+    assert.match(st, new RegExp(`^executable: ${re(MBOX)}$`, 'm'));
+    assert.doesNotMatch(st, /this mbox is/);
+  });
+
+  it('a newer session-start hook takes delivery over: the old daemon hands over and exits, the new one serves; mail before, during and after arrives exactly once and in order', async () => {
+    const env = bobMachine();
+    const sid = 'd-take-1001';
+    // A busy session: a delivery stays in flight for 8 s, so the handover finds one in flight.
+    const fake = await inbox(sid, { closeDelayMs: 8000 });
+    const host = fakeHost();
+    const { address } = sessionStart(as(env, OLD), sid, projectDir('take'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
+    await until(() => alive(daemonPid(env)), 'old daemon started');
+    const oldPid = lockOf(env).pid;
+    assert.equal(lockOf(env).version, OLD);
+    await until(() => peers().includes(address), 'announced');
+
+    await publish(address, ['b1', 'b2']);
+    await fake.waitFor((f) => f.delivered.length === 1); // in flight now
+    await publish(address, ['b3', 'b4']); // wait in the old daemon behind the delivery in flight
+    await until(async () => (await heldCount(sid)) === 4, 'all four held by the old daemon');
+
+    const { ms } = sessionStart(as(env, NEW), sid, projectDir('take'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
+    assert.ok(ms < 3000, `the hook took ${ms} ms: it must not wait for the handover`);
+    fake.closeDelayMs = 0; // later deliveries are quick
+    await publish(address, ['d1', 'd2']); // during the handover
+    await until(() => !alive(oldPid), 'old daemon exited', 30000);
+    await until(
+      () => logLines(env, new RegExp(`started \\(pid \\d+, version ${re(NEW)}\\)`)).length === 1,
+      'new daemon started',
+      20000,
+    );
+    await until(
+      () => logLines(env, new RegExp(`^\\S+ serving ${re(address)}$`)).length === 2,
+      'new daemon serving',
+      20000,
+    );
+    await publish(address, ['a1', 'a2']); // after
+    await fake.waitFor((f) => f.messages().length === 8, 30000);
+    await until(async () => (await ackPending(sid)) === 0, 'all acknowledged', 20000);
+    await sleep(2500); // past the redelivery interval: still exactly once
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ['b1', 'b2', 'b3', 'b4', 'd1', 'd2', 'a1', 'a2'],
+      'every message once, in order',
+    );
+    const lock = lockOf(env);
+    assert.notEqual(lock.pid, oldPid);
+    assert.equal(lock.version, NEW);
+    assert.ok(alive(lock.pid));
+    // Each step is in the log, and the delivery in flight finished after the handover began.
+    assertLogOrder(env, [
+      new RegExp(`handover requested: deliverd ${re(OLD)} \\(pid ${oldPid}\\) -> ${re(NEW)}$`),
+      new RegExp(`stopping \\(SIGTERM; handing over to ${re(NEW)}\\)$`),
+      /delivered \d+ messages? to /,
+      new RegExp(`stopped \\(pid ${oldPid}, version ${re(OLD)}\\)$`),
+      new RegExp(`deliverd ${re(OLD)} \\(pid ${oldPid}\\) exited; taking over$`),
+      new RegExp(`started \\(pid ${lock.pid}, version ${re(NEW)}\\)$`),
+      new RegExp(`serving ${re(address)}$`),
+    ]);
+    assert.equal(logLines(env, /handover requested/).length, 1);
+    assert.equal(logLines(env, /another deliverd is running/).length, 0);
+  });
+
+  it('same version: no takeover, also when the hook runs from a bundle at another path', async () => {
+    const env = bobMachine();
+    const s1 = 'd-same-1002';
+    const s2 = 'd-same-1003';
+    const f1 = await inbox(s1);
+    const f2 = await inbox(s2);
+    sessionStart(env, s1, projectDir('same-a'), { socket: f1.path, hostPid: fakeHost().pid });
+    await until(() => alive(daemonPid(env)), 'daemon started');
+    const pid = daemonPid(env);
+    const copy = bundleCopy();
+    const { address } = sessionStart(env, s2, projectDir('same-b'), {
+      socket: f2.path,
+      hostPid: fakeHost().pid,
+      bundle: copy,
+    });
+    await until(() => peers().includes(address), 'second session served');
+    await publish(address, ['s1']);
+    await f2.waitFor((f) => f.messages().length === 1);
+    assert.equal(daemonPid(env), pid, 'the same daemon serves both');
+    assert.equal(lockOf(env).exe, MBOX);
+    assert.equal(logLines(env, /handover requested|waiting for deliverd|started \(/).length, 1);
+    const st = mbox(['deliverd', '--status'], { env, bundle: copy }).stdout;
+    assert.match(st, new RegExp(`deliverd running \\(pid ${pid}, version ${re(VERSION)}\\)`));
+    assert.doesNotMatch(st, /this mbox is/);
+  });
+
+  it('an older session-start hook never downgrades the daemon', async () => {
+    const env = bobMachine();
+    const s1 = 'd-down-1004';
+    const s2 = 'd-down-1005';
+    const f1 = await inbox(s1);
+    const f2 = await inbox(s2);
+    sessionStart(as(env, NEW), s1, projectDir('down-a'), {
+      socket: f1.path,
+      hostPid: fakeHost().pid,
+    });
+    await until(() => alive(daemonPid(env)), 'daemon started');
+    const pid = daemonPid(env);
+    const { address } = sessionStart(as(env, OLD), s2, projectDir('down-b'), {
+      socket: f2.path,
+      hostPid: fakeHost().pid,
+    });
+    await until(() => peers().includes(address), 'served by the newer daemon');
+    await publish(address, ['n1']);
+    await f2.waitFor((f) => f.messages().length === 1);
+    assert.equal(daemonPid(env), pid);
+    assert.equal(lockOf(env).version, NEW);
+    assert.equal(logLines(env, /handover requested|waiting for deliverd/).length, 0);
+    // A daemon started by hand from the older version leaves too.
+    const r = spawnSync(process.execPath, [MBOX, 'deliverd'], {
+      env: as(env, OLD),
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    assert.equal(r.status, 0);
+    assert.equal(daemonPid(env), pid);
+    assert.match(logOf(env), /another deliverd is running \(pid \d+\); exiting/);
+    assert.match(
+      mbox(['deliverd', '--status'], { env: as(env, OLD) }).stdout,
+      new RegExp(`this mbox is ${re(OLD)} \\(older\\): it leaves the daemon alone`),
+    );
+  });
+
+  it('a daemon that will not hand over is terminated after the timeout, and no mail is lost', async () => {
+    const env = bobMachine({ AGENT_MAILBOX_HANDOVER_MS: '3000' });
+    const sid = 'd-stuck-1006';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const { address } = sessionStart(
+      { ...as(env, OLD), AGENT_MAILBOX_FAULT: 'ignore-sigterm' },
+      sid,
+      projectDir('stuck'),
+      { socket: fake.path, hostPid: host.pid },
+    );
+    await until(() => alive(daemonPid(env)), 'old daemon started');
+    const oldPid = lockOf(env).pid;
+    await until(() => peers().includes(address), 'announced');
+    await publish(address, ['k1']);
+    await fake.waitFor((f) => f.messages().length === 1);
+    // Two more, held unacknowledged by the old daemon when it is killed.
+    await pauseAndWait(env, address);
+    await publish(address, ['k2', 'k3']);
+    await until(async () => (await heldCount(sid)) === 2, 'both held by the old daemon');
+
+    sessionStart(as(env, NEW), sid, projectDir('stuck'), { socket: fake.path, hostPid: host.pid });
+    await until(() => !alive(oldPid), 'old daemon killed', 30000);
+    await until(() => alive(daemonPid(env)) && lockOf(env).version === NEW, 'new daemon', 20000);
+    assert.equal(mbox(['resume'], { env }).code, 0);
+    await fake.waitFor((f) => f.messages().length === 3, 30000);
+    await publish(address, ['k4']);
+    await fake.waitFor((f) => f.messages().length === 4, 20000);
+    await until(async () => (await ackPending(sid)) === 0, 'all acknowledged', 20000);
+    await sleep(2500);
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ['k1', 'k2', 'k3', 'k4'],
+    );
+    assertLogOrder(env, [
+      /handover requested: /,
+      /ignoring SIGTERM \(test fault\)/,
+      new RegExp(
+        `deliverd ${re(OLD)} \\(pid ${oldPid}\\) did not exit within 3 s; terminating it \\(SIGKILL\\)$`,
+      ),
+      new RegExp(`deliverd ${re(OLD)} \\(pid ${oldPid}\\) was terminated; taking over$`),
+      new RegExp(`started \\(pid \\d+, version ${re(NEW)}\\)$`),
+    ]);
+  });
+
+  it('two sessions starting together with a newer version start one new daemon', async () => {
+    const env = bobMachine();
+    const ids = ['d-pair-1007', 'd-pair-1008', 'd-pair-1009'];
+    const fakes = await Promise.all(ids.map((sid) => inbox(sid)));
+    const [s0, s1, s2] = ids as [string, string, string];
+    const [f0, f1, f2] = fakes as [FakeInbox, FakeInbox, FakeInbox];
+    sessionStart(as(env, OLD), s0, projectDir('pair-0'), {
+      socket: f0.path,
+      hostPid: fakeHost().pid,
+    });
+    await until(() => alive(daemonPid(env)), 'old daemon started');
+    const oldPid = lockOf(env).pid;
+    const [r1, r2] = await Promise.all([
+      sessionStartAsync(as(env, NEW), s1, projectDir('pair-1'), {
+        socket: f1.path,
+        hostPid: fakeHost().pid,
+      }),
+      sessionStartAsync(as(env, NEW), s2, projectDir('pair-2'), {
+        socket: f2.path,
+        hostPid: fakeHost().pid,
+      }),
+    ]);
+    await until(() => !alive(oldPid), 'old daemon exited', 30000);
+    await until(() => alive(daemonPid(env)) && lockOf(env).version === NEW, 'new daemon', 20000);
+    await until(
+      () => peers().includes(r1.address) && peers().includes(r2.address),
+      'both served',
+      20000,
+    );
+    for (const [sid, f] of [
+      [s0, f0],
+      [s1, f1],
+      [s2, f2],
+    ] as const) {
+      const address = parseJson<{ address: string }>(
+        fs.readFileSync(statePath(env, 'registrations', `${sid}.json`), 'utf8'),
+      ).address;
+      await publish(address, [`p-${sid}`]);
+      await f.waitFor((x) => x.messages().length === 1, 20000);
+    }
+    await sleep(1000);
+    assert.deepEqual(
+      fakes.map((f) => f.messages().map((m) => m.id)),
+      ids.map((sid) => [`p-${sid}`]),
+    );
+    assert.equal(logLines(env, /handover requested/).length, 1, logOf(env));
+    assert.equal(
+      logLines(env, new RegExp(`started \\(pid \\d+, version ${re(NEW)}\\)`)).length,
+      1,
+      logOf(env),
+    );
+    assert.equal(
+      logLines(env, /another deliverd is running|waiting for the lock/).length,
+      0,
+      logOf(env),
+    );
+  });
+
+  it('a stale lock (a crashed daemon) is replaced, and a daemon from before 0.5.3 (no version) is taken over', async () => {
+    const env = bobMachine();
+    // Crashed: a dead pid in a freshly touched lock.
+    const dead = spawnSync('true').pid;
+    fs.mkdirSync(env.AGENT_MAILBOX_STATE_DIR, { recursive: true });
+    fs.writeFileSync(
+      statePath(env, 'deliverd.lock'),
+      JSON.stringify({ pid: dead, startedAt: Date.now(), version: NEW }) + '\n',
+    );
+    const s1 = 'd-stale-1010';
+    const f1 = await inbox(s1);
+    const a1 = sessionStart(env, s1, projectDir('stale'), {
+      socket: f1.path,
+      hostPid: fakeHost().pid,
+    }).address;
+    await until(() => alive(daemonPid(env)) && lockOf(env).pid !== dead, 'daemon started');
+    await until(() => peers().includes(a1), 'served');
+    await publish(a1, ['x1']);
+    await f1.waitFor((f) => f.messages().length === 1);
+    assert.equal(logLines(env, /handover requested/).length, 0, 'a dead daemon is not asked');
+    await stopDaemon(env);
+
+    // Before 0.5.3: a live holder whose lock records no version (a stand-in process).
+    const old = spawn('sleep', ['600'], { stdio: 'ignore' });
+    hosts.push(old);
+    const oldPid = old.pid ?? 0;
+    fs.writeFileSync(
+      statePath(env, 'deliverd.lock'),
+      JSON.stringify({ pid: oldPid, startedAt: Date.now() }) + '\n',
+    );
+    assert.match(
+      mbox(['deliverd', '--status'], { env }).stdout,
+      new RegExp(`deliverd running \\(pid ${oldPid}, version \\(before 0\\.5\\.3\\)\\)`),
+    );
+    const s2 = 'd-stale-1011';
+    const f2 = await inbox(s2);
+    const a2 = sessionStart(env, s2, projectDir('stale2'), {
+      socket: f2.path,
+      hostPid: fakeHost().pid,
+    }).address;
+    await until(() => !alive(oldPid), 'asked to stop (SIGTERM)');
+    await until(() => alive(daemonPid(env)) && lockOf(env).version === VERSION, 'new daemon');
+    await until(() => peers().includes(a2), 'served');
+    await publish(a2, ['x2']);
+    await f2.waitFor((f) => f.messages().length === 1);
+    assert.match(
+      logOf(env),
+      new RegExp(
+        `handover requested: deliverd \\(before 0\\.5\\.3\\) \\(pid ${oldPid}\\) -> ${re(VERSION)}`,
+      ),
+    );
+  });
+
+  it('a daemon whose bundle has been deleted (an old plugin cache) is still taken over', async () => {
+    const env = bobMachine();
+    const sid = 'd-gone-1012';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const copy = bundleCopy();
+    const first = sessionStart(as(env, OLD), sid, projectDir('gone'), {
+      socket: fake.path,
+      hostPid: host.pid,
+      bundle: copy,
+    });
+    await until(() => alive(daemonPid(env)), 'old daemon started');
+    await until(() => peers().includes(first.address), 'served by the old daemon');
+    const oldPid = lockOf(env).pid;
+    assert.equal(lockOf(env).exe, copy);
+    fs.rmSync(path.dirname(copy), { recursive: true, force: true });
+    const st = mbox(['deliverd', '--status'], { env: as(env, NEW) }).stdout;
+    assert.match(
+      st,
+      new RegExp(`executable: ${re(copy)} \\(no longer exists; it runs from memory\\)`),
+    );
+    assert.match(
+      st,
+      new RegExp(`this mbox is ${re(NEW)}: the next session start hands delivery over to it`),
+    );
+    const { address } = sessionStart(as(env, NEW), sid, projectDir('gone'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
+    await until(() => !alive(oldPid), 'old daemon exited', 30000);
+    await until(() => alive(daemonPid(env)) && lockOf(env).version === NEW, 'new daemon', 20000);
+    await until(
+      () => logLines(env, new RegExp(`serving ${re(address)}$`)).length === 2,
+      'new daemon serving',
+      20000,
+    );
+    await publish(address, ['g1']);
+    await fake.waitFor((f) => f.messages().length === 1);
+    assert.equal(lockOf(env).exe, MBOX);
   });
 });

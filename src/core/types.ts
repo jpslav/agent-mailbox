@@ -210,6 +210,12 @@ export interface SubscribeOptions {
   redeliverAfterMs?: number;
   /** Safety-net poll for broadcasts (default 30 s). */
   broadcastPollMs?: number;
+  /**
+   * Ending the subscription stops taking deliveries, waits up to this long for the ones already
+   * handed out to be acknowledged or handed back (default 3 s), then hands back the rest, oldest
+   * first, so the session's next subscriber gets them before anything newer.
+   */
+  settleMs?: number;
 }
 
 export interface PollOptions {

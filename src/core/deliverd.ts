@@ -16,7 +16,15 @@
 //   - Runaway guard: at most maxPerMin messages per session per minute; the excess stays
 //     unacknowledged and follows in the next window, with one notice line in the delivery that held
 //     it back. `mbox pause` holds delivery entirely (pause.ts) until `mbox resume`.
-//   - Exits after idleExitMs without registrations. A second instance exits at once (pidfile lock).
+//   - Exits after idleExitMs without registrations. A second instance of the same or an older
+//     version exits at once (pidfile lock, which records each daemon's version and bundle path).
+//   - Version takeover: a newer daemon (started by a newer session-start hook, see ensureDeliverd)
+//     waits for the older one to hand over, and terminates it after handoverMs if it does not. The
+//     old one hands over gracefully on SIGTERM: it stops taking messages, finishes the delivery in
+//     flight and its acknowledgement, hands back everything else unacknowledged and in order (so
+//     the new daemon's receivers, on the same durable per-session positions, get it first),
+//     releases the lock and exits. Delivered ids are on disk before they are acknowledged, so the
+//     new daemon never shows one again.
 //
 // Agent-neutral: everything agent-specific comes in through `deliveryFor(agentId)`.
 import fs from 'node:fs';
@@ -25,12 +33,17 @@ import { isPaused, pausePath, readPause } from './pause.js';
 import { openReceiver } from './receiver.js';
 import type { Receiver } from './receiver.js';
 import {
+  deliverdInfo,
   deliverdLockPath,
   deregister,
   listRegistrations,
   registrationsDir,
   sameRegistration,
+  settleStartClaim,
+  startClaim,
+  versionName,
 } from './registrations.js';
+import type { DaemonInfo } from './registrations.js';
 import {
   acquireFileLock,
   acquireLock,
@@ -43,6 +56,7 @@ import {
   waiterPid,
 } from './state.js';
 import type { HeldLock } from './state.js';
+import { compareVersions } from './version.js';
 import type {
   Config,
   Delivery,
@@ -65,6 +79,7 @@ export interface DeliverdOptions {
   maxPerMin: number;
   rateWindowMs: number;
   pausePollMs: number;
+  handoverMs: number;
   fault: string;
 }
 
@@ -80,7 +95,12 @@ export function deliverdOptions(env: Env = process.env): DeliverdOptions {
     maxPerMin: Number(env.AGENT_MAILBOX_MAX_PER_MIN) || 30,
     rateWindowMs: Number(env.AGENT_MAILBOX_RATE_WINDOW_MS) || 60000, // test hook; "per minute"
     pausePollMs: Number(env.AGENT_MAILBOX_PAUSE_POLL_MS) || 1000,
-    fault: env.AGENT_MAILBOX_FAULT || '', // test-only: "crash-after-deliver" | "crash-after-commit"
+    // How long a newer daemon waits for an older one to hand over before killing it: above the
+    // receivers' settle time (receiver.ts), so a delivery in flight can finish.
+    handoverMs: Number(env.AGENT_MAILBOX_HANDOVER_MS) || 20000,
+    // test-only: "crash-after-deliver" | "crash-after-commit" | "ignore-sigterm" (a daemon that
+    // will not hand over)
+    fault: env.AGENT_MAILBOX_FAULT || '',
   };
 }
 
@@ -107,6 +127,7 @@ const handled = (e: Error): Promise<never> => {
   return p;
 };
 const plural = (n: number, w: string): string => `${n} ${w}${n === 1 ? '' : 's'}`;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const errCode = (e: unknown): string => {
   const x = e as { code?: unknown; message?: unknown } | null | undefined;
   return String(x?.code || x?.message || e).slice(0, 120);
@@ -137,6 +158,9 @@ export interface RunDeliverdInput {
   /** Should be created with `multiplex: true`: all sessions share its connection. */
   transport: Transport;
   deliveryFor: (agentId: string) => DeliveryCapability | null;
+  /** This daemon's version and the bundle it runs from, recorded in the lock file. */
+  version: string;
+  exe: string;
   env?: Env;
   /** One concise line per event; never given endpoints or other secrets. */
   log?: (line: string) => void;
@@ -151,19 +175,21 @@ export async function runDeliverd({
   cfg,
   transport,
   deliveryFor,
+  version,
+  exe,
   env = process.env,
   log = () => {},
 }: RunDeliverdInput): Promise<number> {
   const opt = deliverdOptions(env);
   mkdirp(stateDir(env));
-  const acquired = acquireFileLock(deliverdLockPath(env));
-  if (!acquired.ok) {
-    log(`another deliverd is running (pid ${acquired.pid}); exiting`);
+  const acquired = await acquireDaemonLock({ version, exe, env, log, handoverMs: opt.handoverMs });
+  if (!acquired) {
     await transport.close?.().catch(() => {});
     return 0;
   }
   const lock = acquired; // narrowed to the held lock, which function declarations below rely on
-  log(`started (pid ${process.pid})`);
+  settleStartClaim(version, env);
+  log(`started (pid ${process.pid}, version ${version})`);
   mkdirp(registrationsDir(env));
 
   const workers = new Map<string, Worker>();
@@ -433,9 +459,13 @@ export async function runDeliverd({
       stopped = (async () => {
         clearTimeout(drainTimer);
         clearTimeout(retryTimer);
-        if (!flushing) for (const p of pending.splice(0)) p.reject(new Error('not delivered')); // stays on the server
+        // Take no more messages (synchronous), then hand back what waits: it stays on the server,
+        // in order, for whoever serves the session next. A delivery in flight finishes first and
+        // is acknowledged; flush() then hands back what came after it.
+        const receiving = rx?.stop({ depart });
+        if (!flushing) for (const p of pending.splice(0)) p.reject(new Error('not delivered'));
         lost.delete(sid);
-        await rx?.stop({ depart });
+        await receiving;
         sessLock?.release();
         if (workers.get(sid) === w) workers.delete(sid);
         if (rx) log(`stopped serving ${addr()}${depart ? '' : ' (still registered)'}`);
@@ -560,7 +590,8 @@ export async function runDeliverd({
   async function shutdown(why: string): Promise<void> {
     if (stopping) return;
     stopping = true;
-    log(`stopping (${why})`);
+    const next = handoverTarget(version, env);
+    log(`stopping (${why}${next ? `; handing over to ${next}` : ''})`);
     if (scanTimer) clearTimeout(scanTimer);
     timers.forEach((t) => clearInterval(t));
     try {
@@ -571,6 +602,7 @@ export async function runDeliverd({
     await Promise.all([...workers.values()].map((w) => w.stop({ depart: false })));
     lock.release();
     await transport.close?.().catch(() => {});
+    log(`stopped (pid ${process.pid}, version ${version})`);
     doneResolve(0);
   }
 
@@ -622,7 +654,111 @@ export async function runDeliverd({
       Math.max(50, Math.min(5000, Math.floor(opt.idleExitMs / 4))),
     ),
   );
-  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => void shutdown(sig));
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'])
+    process.on(sig, () => {
+      if (sig === 'SIGTERM' && opt.fault === 'ignore-sigterm') {
+        log('ignoring SIGTERM (test fault)');
+        return;
+      }
+      void shutdown(sig);
+    });
   scan();
   return done;
+}
+
+/** The version of a newer daemon that is about to take over from this one, else null. */
+function handoverTarget(version: string, env: Env): string | null {
+  const next = startClaim(env);
+  return next && next.pid !== process.pid && compareVersions(next.version, version) > 0
+    ? next.version
+    : null;
+}
+
+interface AcquireDaemonLockInput {
+  version: string;
+  exe: string;
+  env: Env;
+  log: (line: string) => void;
+  handoverMs: number;
+}
+
+/**
+ * The daemon lock, or null when this daemon should exit. A daemon of the same or a newer version
+ * keeps it (this one exits). An older one is asked to hand over (SIGTERM; the hook that started
+ * this daemon usually asked already) and waited for; if it has not exited after handoverMs, it is
+ * killed and its abandoned lock taken. SIGTERM while waiting ends the wait.
+ */
+async function acquireDaemonLock({
+  version,
+  exe,
+  env,
+  log,
+  handoverMs,
+}: AcquireDaemonLockInput): Promise<HeldLock | null> {
+  const file = deliverdLockPath(env);
+  // The daemon the starting hook asked to hand over (it may be gone before this one looks).
+  const claim = startClaim(env);
+  const askedFrom = claim?.version === version ? claim.from : null;
+  let interrupted = '';
+  const onSignal = (sig: string): void => {
+    interrupted = sig;
+  };
+  const sigs = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
+  const handlers = sigs.map((sig) => [sig, () => onSignal(sig)] as const);
+  for (const [sig, h] of handlers) process.on(sig, h);
+  let waitingFor: DaemonInfo | null = null;
+  let since = 0;
+  let killed = false;
+  try {
+    for (;;) {
+      if (interrupted) {
+        log(`not started (${interrupted} while waiting for the lock)`);
+        return null;
+      }
+      const got = acquireFileLock(file, { version, exe });
+      if (got.ok) {
+        const prev = waitingFor ?? askedFrom;
+        if (prev)
+          log(
+            `deliverd ${versionName(prev.version)} (pid ${prev.pid}) ${killed ? 'was terminated' : 'exited'}; taking over`,
+          );
+        return got;
+      }
+      const holder = deliverdInfo(env);
+      if (!holder) {
+        await sleep(50); // released in between: try again
+        continue;
+      }
+      if (compareVersions(version, holder.version) <= 0) {
+        log(`another deliverd is running (pid ${holder.pid}); exiting`);
+        return null;
+      }
+      if (waitingFor?.pid !== holder.pid) {
+        waitingFor = holder;
+        since = Date.now();
+        killed = false;
+        log(
+          `waiting for deliverd ${versionName(holder.version)} (pid ${holder.pid}) to hand over to ${version}`,
+        );
+        signal(holder.pid, 'SIGTERM'); // idempotent: the starting hook normally asked already
+      } else if (!killed && Date.now() - since >= handoverMs) {
+        log(
+          `deliverd ${versionName(holder.version)} (pid ${holder.pid}) did not exit within ${Math.round(handoverMs / 1000)} s; terminating it (SIGKILL)`,
+        );
+        signal(holder.pid, 'SIGKILL');
+        killed = true;
+      }
+      await sleep(100);
+    }
+  } finally {
+    for (const [sig, h] of handlers) process.off(sig, h);
+  }
+}
+
+function signal(pid: number, sig: NodeJS.Signals): void {
+  try {
+    process.kill(pid, sig);
+  } catch {
+    /* already gone */
+  }
 }

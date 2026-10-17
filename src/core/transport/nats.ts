@@ -20,8 +20,13 @@
 //       onMessage calls never overlap. Deferred acknowledgement: if onMessage resolves to
 //       {ackAfter: Promise}, the next delivery is offered right away and this one is
 //       acknowledged when ackAfter resolves; if it rejects, the delivery is handed back for
-//       redelivery (soon, not after redeliverAfterMs). Ending the subscription waits briefly for
-//       outstanding acknowledgements. Broadcasts have no server-side acknowledgement: the
+//       redelivery (soon, not after redeliverAfterMs). Ending the subscription (signal) first
+//       stops taking deliveries, then waits up to `settleMs` (default 3 s) for the ones already
+//       handed to onMessage to be acknowledged or handed back, then hands back everything not
+//       acknowledged at once and oldest first, so the session's next subscriber (a new delivery
+//       daemon after a handover) gets it in order, before anything newer. One gap remains: a
+//       delivery the server sends in the instant the subscription ends is seen by nobody and
+//       comes back after redeliverAfterMs. Broadcasts have no server-side acknowledgement: the
 //       caller's saved cursor is their position. onOpen() is called each time the subscription is
 //       (re)established. The promise never resolves: it rejects when the connection ends, or
 //       with an AbortError when `signal` aborts. Errors with `.authProblem === true` mean
@@ -74,6 +79,7 @@ import type {
   ConsumerInfo,
   ConsumerMessages,
   DirectBatchOptions,
+  JsMsg,
   JetStreamClient,
   JetStreamManager,
 } from '@nats-io/jetstream';
@@ -500,6 +506,7 @@ export function createTransport(
     onMessage,
     redeliverAfterMs = 60000,
     broadcastPollMs = 30000,
+    settleMs = 3000,
   }: SubscribeOptions): Promise<never> {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const name = consumerName(session);
@@ -535,7 +542,10 @@ export function createTransport(
     let fail!: (reason: unknown) => void;
     const failed = new Promise<never>((_, rej) => (fail = rej));
     failed.catch(() => {});
-    const onAbort = () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    const onAbort = () => {
+      stopped = true; // at once: from here on, what onMessage hands back is collected (handBack)
+      fail(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    };
     signal?.addEventListener('abort', onAbort, { once: true });
     if (mux) {
       mux.subs.add(fail);
@@ -550,9 +560,24 @@ export function createTransport(
     }
     let messages: ConsumerMessages | null = null;
     let wakeSub: Subscription | null = null;
+    let directLoop: Promise<never> | null = null;
 
     // Deferred acknowledgements still in flight (see the interface: {ackAfter}).
     const pendingAcks = new Set<Promise<unknown>>();
+    // Ending: deliveries not acknowledged, handed back together and oldest first (see `finally`).
+    const handBack: JsMsg[] = [];
+    let handedBack = false;
+    const giveBack = (m: JsMsg): void => {
+      if (!handedBack) {
+        handBack.push(m);
+        return;
+      }
+      try {
+        m.nak();
+      } catch {
+        /* connection gone: redelivered after ack_wait */
+      }
+    };
     // Serialise every onMessage call (direct + broadcast) through one chain.
     let chain: Promise<unknown> = Promise.resolve();
     const serial = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -605,9 +630,13 @@ export function createTransport(
       const consumer = await js.consumers.get(ownStream, name);
       messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
 
-      const directLoop = (async () => {
+      directLoop = (async () => {
         for await (const m of messages) {
-          if (stopped) break;
+          // Ending: what the client had already received goes back unseen.
+          if (stopped) {
+            giveBack(m);
+            continue;
+          }
           // What onMessage resolved to: nothing, or {ackAfter} to defer the acknowledgement.
           const res = (await serial(async () => {
             cur.u = m.seq;
@@ -631,11 +660,13 @@ export function createTransport(
             res.ackAfter &&
             typeof res.ackAfter.then === 'function'
           ) {
-            // Deferred: ack once the caller has delivered it; on rejection hand it back (nak with
-            // a short delay, so a closing subscription does not get it straight back).
+            // Deferred: ack once the caller has delivered it; on rejection hand it back (while
+            // running, with a short delay, so this subscription does not get it straight back;
+            // while ending, with the rest, in order).
             const settled = res.ackAfter.then(
               () => m.ackAck({ timeout: 5000 }).catch(() => {}),
               () => {
+                if (stopped) return giveBack(m);
                 try {
                   m.nak(1000);
                 } catch {
@@ -676,6 +707,7 @@ export function createTransport(
                 next_by_subj: `${PREFIX}.all.*`,
               });
               for (const m of batch) {
+                if (stopped) return; // the saved cursor is the position: nothing to hand back
                 await serial(async () => {
                   cur.a = m.seq;
                   await onMessage(delivery(m, { ...cur }));
@@ -713,26 +745,38 @@ export function createTransport(
       stopped = true;
       signal?.removeEventListener('abort', onAbort);
       fail(new Error('closed'));
-      if (pendingAcks.size && !nc.isClosed()) {
-        await Promise.race([
-          Promise.allSettled([...pendingAcks]),
-          new Promise((r) => setTimeout(r, 3000).unref?.()),
-        ]);
+      // 1. Take nothing new. What the client already holds still runs through directLoop, which
+      //    collects it for handing back; the loop ends after it.
+      try {
+        messages?.stop();
+      } catch {
+        /* already ended */
       }
-      if (mux) {
-        // Shared connection: end only this subscription's pieces.
-        mux.subs.delete(fail);
-        try {
-          messages?.stop();
-        } catch {
-          /* already ended */
+      try {
+        wakeSub?.unsubscribe();
+      } catch {
+        /* already ended */
+      }
+      if (!nc.isClosed()) {
+        // 2. Let the deliveries already handed out settle: acknowledged, or handed back.
+        const settle = new Promise((r) => setTimeout(r, settleMs).unref?.());
+        await Promise.race([directLoop ? directLoop.catch(() => {}) : null, settle]);
+        if (pendingAcks.size) await Promise.race([Promise.allSettled([...pendingAcks]), settle]);
+        // 3. Hand back the rest at once, oldest first, and make sure the server has it before the
+        //    caller lets the session's next subscriber in.
+        handedBack = true;
+        for (const m of handBack.sort((a, b) => a.seq - b.seq)) {
+          try {
+            m.nak();
+          } catch {
+            /* connection gone: redelivered after ack_wait */
+          }
         }
-        try {
-          wakeSub?.unsubscribe();
-        } catch {
-          /* already ended */
-        }
-      } else if (!nc.isClosed()) await nc.close().catch(() => {});
+        if (handBack.length) await nc.flush().catch(() => {});
+      }
+      if (mux)
+        mux.subs.delete(fail); // shared connection: this subscription's pieces are ended
+      else if (!nc.isClosed()) await nc.close().catch(() => {});
     }
   }
 
