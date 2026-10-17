@@ -77,6 +77,19 @@ jobs:
 
       - run: npm ci
 
+      # Required checks name this job ("test (os, node N)"): add steps here, never new or renamed jobs.
+      - name: Versions agree (package.json, package-lock.json, plugin.json)
+        run: node scripts/check-versions.mjs
+
+      # Installed plugin copies update only when the version changes: a changed dist/ needs a bump.
+      - name: Version bumped when dist/ changed (pull requests)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          node scripts/check-versions.mjs --base "$BASE_SHA"
+
       - name: Shell syntax
         run: |
           for f in adapters/claude-code/bin/mbox server/*.sh; do sh -n "$f"; done
