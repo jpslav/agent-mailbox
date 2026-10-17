@@ -12,6 +12,8 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-17
+
 ### Added
 - Version takeover for the delivery daemon. A running `mbox deliverd` used to keep delivering with
   its old code after a plugin update, for as long as any session stayed open. It now records its
