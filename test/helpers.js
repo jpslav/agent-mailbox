@@ -68,6 +68,7 @@ export class Broker {
       NATS_URL: this.url,
       MBOX_PUBLIC_URL: this.url,
       MBOX_PRESENCE_TTL: this.presenceTtl,
+      MBOX_RELOAD_SETTLE: '0.2', // production waits 1 s after a reload; tests need not
       ...(this.maxAge ? { MBOX_MAX_AGE: this.maxAge } : {}),
       NATS_BIN: this.server.natsBin,
       NATS_SERVER_BIN: this.server.serverBin,
@@ -99,11 +100,10 @@ export class Broker {
     fs.writeFileSync(this.configFile, conf);
     this.admin(['init']); // server not running yet: writes users.conf + admin creds
     await this.start();
-    // Now creates MBX_ALL and the presence bucket. Without the reload `init` would otherwise do
-    // (nothing changed since the server started): a stream created while the server is still applying
-    // a reload can be lost when the reload finishes, which happens on a busy machine (nats-server
-    // 2.15). Pointing the pid file nowhere makes the script skip the reload.
-    this.admin(['init'], { env: { MBOX_PID_FILE: path.join(this.dir, 'no-such.pid') } });
+    // Now creates MBX_ALL and the presence bucket. users.conf is unchanged since the first run, so the
+    // script must not reload the server (a stream created while the server is still applying a
+    // reload could be lost when it finishes); test/isolation.test.js proves it does not.
+    this.admin(['init']);
     for (const u of users) this.addUser(u);
   }
 
