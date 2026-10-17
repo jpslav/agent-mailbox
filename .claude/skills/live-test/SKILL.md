@@ -69,6 +69,10 @@ cd "$LT/ping" && claude --plugin-dir "$REPO/adapters/claude-code"      # termina
 
 The directory name becomes the session's label, so the addresses look like `alice.<host>.ping-xxxx`.
 
+Expect two one-time prompts in each new session, and let the human answer them: Claude Code's
+workspace trust dialog (the scratch folders are new, so "Yes, I trust this folder" is needed) and,
+on machines with the Claude in Chrome extension, a browser-tools prompt (keep them off).
+
 Paste this as the first message of terminal 1 (PING). The wording matters, copy it exactly:
 
 > Mailbox ping-pong test (session PING). Do not edit any files or do anything else. Tell me your mailbox address in one line, then stop. Whenever a [mailbox] message arrives: if its body is just a number N below 40, reply to its sender with mbox send, with the body being only N+1, then stop. If N is 40 or more, reply with the word done and stop. If the body is an instruction from the orchestrator to send a number to an address, do exactly that once, then stop.
