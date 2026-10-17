@@ -343,7 +343,7 @@ mbox show <id>                    the whole message (when a delivered one was cu
 mbox guide [section]              short help: overview, send, reply, peers, names, inbox,
                                   security, fallback, troubleshooting
 mbox pause [--all|<address>]      emergency stop for push delivery on this machine; mbox resume
-mbox deliverd --status            is the delivery daemon running, which sessions it serves
+mbox deliverd --status            is the delivery daemon running (version), which sessions it serves
 ```
 
 Each message reaches the session as one block:
@@ -370,7 +370,8 @@ per session: no waiter, no running hook, no background task, nothing for the mod
 - **SessionStart** (`mbox hook claude-code session-start`, synchronous, well under a second): tells
   Claude its address, writes a registration `$AGENT_MAILBOX_STATE_DIR/registrations/<session>.json`
   (mode 0600: socket path, token, the Claude Code pid, cwd), and starts `mbox deliverd` if it is
-  not running (detached, own process group, not waited for).
+  not running (detached, own process group, not waited for). If the running daemon is an older
+  version (after a plugin update), it takes delivery over; see the daemon item below.
 - **`mbox deliverd`**: one per user and machine, on one server connection. It watches the
   registrations, runs each session's receiver (its server-side position, broadcasts, presence and
   heartbeats), collects what arrives within about 300 ms and posts it to the session's socket as
@@ -382,6 +383,14 @@ per session: no waiter, no running hook, no background task, nothing for the mod
   removes the registration and the session's presence entry. It exits 10 minutes after the last
   registration is gone; any `mbox` command, or the next session start, brings it back if it died.
   Its concise log is `$AGENT_MAILBOX_STATE_DIR/deliverd.log` (rotated at 256 KiB; never tokens).
+  **Updates:** the daemon records its version and bundle path in `deliverd.lock`, and
+  `mbox deliverd --status` shows them. A session start running a newer version asks an older
+  daemon to hand over and starts the new one, which waits for the old one to exit (and kills it
+  after 20 s if it does not). The old daemon stops taking mail, finishes the delivery in flight,
+  hands everything else back to the server in order and exits; the new one delivers it, each
+  message once. The same version from another install path, or an older version, leaves the
+  running daemon alone. The steps are logged (`handover requested`, `... exited; taking over`,
+  `started (pid ..., version ...)`).
 - **SessionEnd** (`mbox hook claude-code session-end`, also run by `/clear`): removes the
   registration; the daemon stops serving the session and removes its presence entry.
 
@@ -462,7 +471,8 @@ bucket, and ignore records whose address does not belong to the user that wrote 
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/`: `<id>.json` (address, aliases, cwd),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
-(the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock`,
+(the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
+daemon's pid, version and bundle path), `deliverd.starting` (a daemon being started),
 `deliverd.log`, `deliverd.out` (crash traces) and `paused.json`.
 
 ## Security model and limits

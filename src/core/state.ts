@@ -76,7 +76,7 @@ export function atomicWriteJson(file: string, data: unknown): void {
 
 /** Create-if-absent without ever exposing a half-written file. */
 function createExclusive(file: string, data: unknown): boolean {
-  const tmp = `${file}.${process.pid}.${Date.now()}.new`;
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.new`;
   fs.writeFileSync(tmp, JSON.stringify(data) + '\n', { mode: 0o600 });
   try {
     fs.linkSync(tmp, file);
@@ -235,15 +235,35 @@ export function acquireLock(sid: string, env: Env = process.env): LockResult {
 }
 
 /**
- * A pidfile lock at `file` (its directory must exist): {ok:true, release, touch} or {ok:false, pid}.
- * The holder must touch() it at least every LOCK_FRESH_MS, or it counts as abandoned.
+ * Remove an abandoned lock file, but only the one that was judged abandoned (inode `ino`): if
+ * another process replaced it with a fresh lock in the meantime, that one is put back.
  */
-export function acquireFileLock(file: string): LockResult {
+function removeAbandoned(file: string, ino: number): void {
+  const aside = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.stale`;
+  try {
+    fs.renameSync(file, aside);
+  } catch {
+    return; // already gone
+  }
+  try {
+    if (fs.statSync(aside).ino !== ino) fs.linkSync(aside, file); // not the abandoned one: restore it
+  } catch {
+    /* restored by someone else, or a newer lock is in place */
+  } finally {
+    fs.rmSync(aside, { force: true });
+  }
+}
+
+/**
+ * A pidfile lock at `file` (its directory must exist): {ok:true, release, touch} or {ok:false, pid}.
+ * The file holds {pid, startedAt, ...info}. The holder must touch() it at least every
+ * LOCK_FRESH_MS, or it counts as abandoned.
+ */
+export function acquireFileLock(file: string, info: Record<string, unknown> = {}): LockResult {
+  const content = { ...info, pid: process.pid, startedAt: Date.now() };
   for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const fd = fs.openSync(file, 'wx', 0o600);
-      fs.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }) + '\n');
-      fs.closeSync(fd);
+    // Created complete or not at all: a reader must never see an empty lock and call it abandoned.
+    if (createExclusive(file, content))
       return {
         ok: true,
         touch() {
@@ -263,22 +283,22 @@ export function acquireFileLock(file: string): LockResult {
           }
         },
       };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    }
     // Held? A lock is live only if the pid is alive AND the file was touched recently
     // (guards against pid reuse after a crash).
     let pid: unknown = null;
     let fresh = false;
+    let ino = 0;
     try {
+      const st = fs.statSync(file);
+      ino = st.ino;
+      fresh = Date.now() - st.mtimeMs < LOCK_FRESH_MS;
       pid = readJson(file)?.pid ?? null;
-      fresh = Date.now() - fs.statSync(file).mtimeMs < LOCK_FRESH_MS;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
     }
     if (typeof pid === 'number' && pid && pid !== process.pid && pidAlive(pid) && fresh)
       return { ok: false, pid };
-    fs.rmSync(file, { force: true });
+    removeAbandoned(file, ino);
   }
   const last = readJson(file)?.pid;
   return { ok: false, pid: typeof last === 'number' ? last : 0 };
@@ -306,6 +326,17 @@ function liveHolder(file: string): number | null {
 
 /** pid of the live holder of a pidfile lock (other than this process), else null. */
 export const lockHolder = (file: string): number | null => liveHolder(file);
+
+/**
+ * What a live holder (other than this process) wrote into a pidfile lock: {pid, startedAt, ...info}
+ * as untrusted JSON (the caller checks the fields it uses), else null.
+ */
+export function lockInfo(file: string): Record<string, unknown> | null {
+  const pid = liveHolder(file);
+  if (pid === null) return null;
+  const info = readJson(file);
+  return info && typeof info === 'object' && info.pid === pid ? info : null;
+}
 
 /** pid of a live `watch` for the session (other than this process), else null. */
 export const watcherPid = (sid: string, env: Env = process.env): number | null =>

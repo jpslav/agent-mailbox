@@ -11,12 +11,14 @@ import { fileLog, runDeliverd } from './core/deliverd.js';
 import { GUIDE_SECTIONS, guideText } from './core/guide.js';
 import { pause, readPause, resume } from './core/pause.js';
 import {
+  deliverdInfo,
   deliverdLogPath,
   deliverdPid,
   deregister,
   ensureDeliverd,
   listRegistrations,
   register,
+  versionName,
 } from './core/registrations.js';
 import { ResolveError, presenceRecord, resolveTarget } from './core/registry.js';
 import { NoSessionError, ensureSession, pidAlive, readState, updateState } from './core/state.js';
@@ -29,6 +31,7 @@ import type {
   TransportOptions,
 } from './core/types.js';
 import type { PauseState } from './core/pause.js';
+import { compareVersions, ownVersion } from './core/version.js';
 import { MAX_WAIT_MS, endSession, runWait } from './core/wait.js';
 import { runWatch } from './core/watch.js';
 
@@ -44,13 +47,19 @@ function launcherPath(): string {
 }
 
 // The delivery daemon: `node <this bundle> deliverd`, started detached when sessions need it.
-const deliverdArgv = (): string[] => [process.execPath, fileURLToPath(import.meta.url), 'deliverd'];
+const bundlePath = fileURLToPath(import.meta.url);
+const deliverdArgv = (): string[] => [process.execPath, bundlePath, 'deliverd'];
 const sessionEnvVars = (): string[] => [
   'AGENT_MAILBOX_SESSION',
   ...adapters.flatMap((a) => a.delivery?.sessionEnv || []),
 ];
+/** Start the daemon unless one of this version or a newer one runs; an older one hands over. */
 const startDeliverd = () =>
-  ensureDeliverd(deliverdArgv(), process.env, { dropEnv: sessionEnvVars() });
+  ensureDeliverd(deliverdArgv(), process.env, {
+    dropEnv: sessionEnvVars(),
+    version: ownVersion(),
+    log: fileLog(deliverdLogPath()),
+  });
 /** Bring the daemon back if sessions are registered but it is not running (it may have crashed). */
 function reviveDeliverd(): void {
   try {
@@ -105,6 +114,7 @@ const globalOpts = (): GlobalOptions => program.opts<GlobalOptions>();
 program
   .name('mbox')
   .description('Agent mailbox: messages between agent sessions (broker-backed)')
+  .version(ownVersion(), '-V, --version', 'print the version')
   .option(
     '--session <id>',
     'agent session id (default: $AGENT_MAILBOX_SESSION, then the detected agent adapter)',
@@ -290,11 +300,26 @@ program
   .description(
     'the delivery daemon: pushes mail into registered agent sessions (started automatically by the session-start hook)',
   )
-  .option('--status', 'print whether it runs and which sessions are registered, then exit')
+  .option(
+    '--status',
+    'print whether it runs (its version and bundle) and which sessions are registered, then exit',
+  )
   .action(async (opts: { status?: boolean }) => {
     if (opts.status) {
-      const pid = deliverdPid();
-      console.log(pid ? `deliverd running (pid ${pid})` : 'deliverd not running');
+      const d = deliverdInfo();
+      const mine = ownVersion();
+      if (!d) console.log('deliverd not running');
+      else {
+        console.log(`deliverd running (pid ${d.pid}, version ${versionName(d.version)})`);
+        if (d.exe)
+          console.log(
+            `executable: ${oneLine(d.exe, 300)}${fs.existsSync(d.exe) ? '' : ' (no longer exists; it runs from memory)'}`,
+          );
+        const cmp = compareVersions(mine, d.version);
+        if (cmp > 0)
+          console.log(`this mbox is ${mine}: the next session start hands delivery over to it`);
+        else if (cmp < 0) console.log(`this mbox is ${mine} (older): it leaves the daemon alone`);
+      }
       const regs = listRegistrations();
       if (!regs.length) console.log('no registered sessions');
       for (const r of regs) {
@@ -329,6 +354,8 @@ program
       cfg,
       transport,
       deliveryFor: (id) => getAdapter(id)?.delivery || null,
+      version: ownVersion(),
+      exe: bundlePath,
       log,
     });
     process.exit(code);

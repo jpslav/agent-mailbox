@@ -12,6 +12,35 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-17
+
+### Added
+- Version takeover for the delivery daemon. A running `mbox deliverd` used to keep delivering with
+  its old code after a plugin update, for as long as any session stayed open. It now records its
+  version and bundle path in its lock file, and a session start running a newer version takes
+  delivery over: it asks the old daemon to hand over and starts the new one without waiting
+  (the hook stays well under a second). The old daemon stops taking mail, finishes the delivery
+  in flight, hands everything else back to the server in order and exits; the new one delivers
+  it, each message once. A daemon that does not exit within 20 s is killed (logged). The same
+  version from another install path, or an older version, leaves the running daemon alone, and
+  sessions starting together start one daemon. Daemons from before 0.5.3 are taken over too
+  (they stop on SIGTERM), but without the in-order handover: nothing is lost, yet a delivery in
+  flight for several seconds at that moment may be shown twice, and mail they held may arrive
+  late or out of order.
+- `mbox deliverd --status` shows the daemon's version and bundle path (and whether this `mbox` is
+  newer); `mbox --version` prints the version.
+
+### Changed
+- A receiver that stops (`mbox wait`, `mbox watch`, the daemon) now hands unacknowledged mail back
+  at once and oldest first, instead of after a delay or the 60 s redelivery interval, so the
+  session's next reader gets it in order.
+- Dependabot no longer proposes commander 13 and later: commander 15 needs Node >= 22.12, and
+  the runtime target is Node >= 18.
+
+### Fixed
+- The daemon's lock file is created complete or not at all, and a stale lock is removed only if it
+  is still the stale one, so two daemons starting together are far less likely to both take it.
+
 ## [0.5.2] - 2026-10-17
 
 ### Added

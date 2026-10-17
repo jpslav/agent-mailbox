@@ -41,6 +41,8 @@ export interface ReceiverOptions {
   stableAfterMs: number;
   maxBackoffMs: number;
   redeliverAfterMs: number;
+  /** How long stopping waits for deliveries already handed out (see SubscribeOptions.settleMs). */
+  settleMs: number;
 }
 
 export function receiverOptions(env: Env = process.env): ReceiverOptions {
@@ -52,6 +54,9 @@ export function receiverOptions(env: Env = process.env): ReceiverOptions {
     stableAfterMs: Number(env.AGENT_MAILBOX_STABLE_AFTER_MS) || 60000,
     maxBackoffMs: Number(env.AGENT_MAILBOX_MAX_BACKOFF_MS) || 60000,
     redeliverAfterMs: Number(env.AGENT_MAILBOX_REDELIVER_MS) || 60000,
+    // Long enough for a delivery in flight to finish (an inbox post gives up after 10 s) and be
+    // acknowledged, so stopping (a daemon handing over) neither drops nor repeats it.
+    settleMs: 12000,
   };
 }
 
@@ -224,6 +229,7 @@ export async function openReceiver({
           cursor,
           signal: ac.signal,
           redeliverAfterMs: opt.redeliverAfterMs,
+          settleMs: opt.settleMs,
           onOpen() {
             clearTimeout(restoredTimer);
             clearTimeout(stableTimer);
@@ -269,14 +275,17 @@ export async function openReceiver({
     }
   })();
 
-  /** Stop receiving; `depart` also removes the presence entry. Waits briefly for pending acks. */
+  /**
+   * Stop receiving; `depart` also removes the presence entry. Stops taking messages at once (the
+   * abort is synchronous), then waits for the ones handed out to be acknowledged or handed back.
+   */
   function stopReceiver({ depart = false }: { depart?: boolean } = {}): Promise<void> {
     if (stopping) return stopping;
     stopping = (async () => {
       stop.abort();
       streamAc?.abort();
       timers.forEach((t) => clearInterval(t));
-      await Promise.race([loop, sleep(4000)]);
+      await Promise.race([loop, sleep(opt.settleMs + 3000)]);
       if (depart) await post('depart', 2000);
       if (!keepTransport) await transport.close?.().catch(() => {});
     })();

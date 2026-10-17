@@ -16,10 +16,10 @@ and `docs/PROTOCOL.md` (wire details). The human repo owner approves security-se
 The source is strict TypeScript (`src/`, `test/`); `esbuild` bundles it, `tsc` only type-checks.
 
 - `src/core/`: agent- and broker-neutral logic (addr, config, state, envelope, registry, guide,
-  and the receiving side: receiver, used by deliverd, watch and wait; registrations and pause
-  for the push daemon `deliverd`). `src/core/types.ts` holds the shared contracts: the config,
-  envelope v1, deliveries and messages, session state, registrations, presence entries and the
-  `Transport` interface.
+  version, and the receiving side: receiver, used by deliverd, watch and wait; registrations and
+  pause for the push daemon `deliverd`, which a newer version takes over, see DECISIONS.md).
+  `src/core/types.ts` holds the shared contracts: the config, envelope v1, deliveries and
+  messages, session state, registrations, presence entries and the `Transport` interface.
 - `src/core/transport/nats.ts`: the transport seam, the only file that knows the broker.
 - `src/agents/`: one plain object per agent (`claude-code.ts`), registered in `agents/index.ts`;
   `adapter.ts` defines the `Adapter` interface (`delivery`, `hooks`, `canWait`, `hookInput`, ...);

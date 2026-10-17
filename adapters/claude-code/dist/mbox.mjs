@@ -1960,10 +1960,10 @@ Expecting one of '${allowedValues.join("', '")}'`);
         }
         if (!proc.killed) {
           const signals = ["SIGUSR1", "SIGUSR2", "SIGTERM", "SIGINT", "SIGHUP"];
-          signals.forEach((signal) => {
-            process2.on(signal, () => {
+          signals.forEach((signal2) => {
+            process2.on(signal2, () => {
               if (proc.killed === false && proc.exitCode === null) {
-                proc.kill(signal);
+                proc.kill(signal2);
               }
             });
           });
@@ -9357,7 +9357,7 @@ var require_authenticator = __commonJS({
     }
     function credsAuthenticator(creds) {
       const fn = typeof creds !== "function" ? () => creds : creds;
-      const parse = () => {
+      const parse2 = () => {
         const CREDS = /\s*(?:(?:[-]{3,}[^\n]*[-]{3,}\n)(.+)(?:\n\s*[-]{3,}[^\n]*[-]{3,}\n))/ig;
         const s = encoders_1.TD.decode(fn());
         let m = CREDS.exec(s);
@@ -9373,11 +9373,11 @@ var require_authenticator = __commonJS({
         return { jwt, seed };
       };
       const jwtFn = () => {
-        const { jwt } = parse();
+        const { jwt } = parse2();
         return jwt;
       };
       const nkeyFn = () => {
-        const { seed } = parse();
+        const { seed } = parse2();
         return seed;
       };
       return jwtAuthenticator(jwtFn, nkeyFn);
@@ -17896,7 +17896,7 @@ function atomicWriteJson(file, data) {
   fs2.renameSync(tmp, file);
 }
 function createExclusive(file, data) {
-  const tmp = `${file}.${process.pid}.${Date.now()}.new`;
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.new`;
   fs2.writeFileSync(tmp, JSON.stringify(data) + "\n", { mode: 384 });
   try {
     fs2.linkSync(tmp, file);
@@ -17996,12 +17996,24 @@ function acquireLock(sid, env = process.env) {
   mkdirp(sessionsDir(env));
   return acquireFileLock(lockPath(sid, env));
 }
-function acquireFileLock(file) {
+function removeAbandoned(file, ino) {
+  const aside = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.stale`;
+  try {
+    fs2.renameSync(file, aside);
+  } catch {
+    return;
+  }
+  try {
+    if (fs2.statSync(aside).ino !== ino) fs2.linkSync(aside, file);
+  } catch {
+  } finally {
+    fs2.rmSync(aside, { force: true });
+  }
+}
+function acquireFileLock(file, info = {}) {
+  const content = { ...info, pid: process.pid, startedAt: Date.now() };
   for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const fd = fs2.openSync(file, "wx", 384);
-      fs2.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }) + "\n");
-      fs2.closeSync(fd);
+    if (createExclusive(file, content))
       return {
         ok: true,
         touch() {
@@ -18019,20 +18031,20 @@ function acquireFileLock(file) {
           }
         }
       };
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-    }
     let pid = null;
     let fresh = false;
+    let ino = 0;
     try {
+      const st = fs2.statSync(file);
+      ino = st.ino;
+      fresh = Date.now() - st.mtimeMs < LOCK_FRESH_MS;
       pid = readJson(file)?.pid ?? null;
-      fresh = Date.now() - fs2.statSync(file).mtimeMs < LOCK_FRESH_MS;
     } catch (e) {
       if (e.code === "ENOENT") continue;
     }
     if (typeof pid === "number" && pid && pid !== process.pid && pidAlive(pid) && fresh)
       return { ok: false, pid };
-    fs2.rmSync(file, { force: true });
+    removeAbandoned(file, ino);
   }
   const last = readJson(file)?.pid;
   return { ok: false, pid: typeof last === "number" ? last : 0 };
@@ -18047,6 +18059,12 @@ function liveHolder(file) {
   }
 }
 var lockHolder = (file) => liveHolder(file);
+function lockInfo(file) {
+  const pid = liveHolder(file);
+  if (pid === null) return null;
+  const info = readJson(file);
+  return info && typeof info === "object" && info.pid === pid ? info : null;
+}
 var watcherPid = (sid, env = process.env) => liveHolder(lockPath(sid, env));
 var waiterPid = (sid, env = process.env) => liveHolder(waitLockPath(sid, env));
 async function awaitExit(pid, timeoutMs) {
@@ -18603,9 +18621,9 @@ Use a longer prefix or the full address.`
 }
 
 // src/core/receiver.ts
-var sleep = (ms, signal) => new Promise((resolve) => {
+var sleep = (ms, signal2) => new Promise((resolve) => {
   const t = setTimeout(resolve, ms);
-  signal?.addEventListener(
+  signal2?.addEventListener(
     "abort",
     () => {
       clearTimeout(t);
@@ -18624,7 +18642,10 @@ function receiverOptions(env = process.env) {
     restoredAfterMs: Number(env.AGENT_MAILBOX_RESTORED_AFTER_MS) || 3e3,
     stableAfterMs: Number(env.AGENT_MAILBOX_STABLE_AFTER_MS) || 6e4,
     maxBackoffMs: Number(env.AGENT_MAILBOX_MAX_BACKOFF_MS) || 6e4,
-    redeliverAfterMs: Number(env.AGENT_MAILBOX_REDELIVER_MS) || 6e4
+    redeliverAfterMs: Number(env.AGENT_MAILBOX_REDELIVER_MS) || 6e4,
+    // Long enough for a delivery in flight to finish (an inbox post gives up after 10 s) and be
+    // acknowledged, so stopping (a daemon handing over) neither drops nor repeats it.
+    settleMs: 12e3
   };
 }
 async function openReceiver({
@@ -18734,6 +18755,7 @@ async function openReceiver({
           cursor,
           signal: ac.signal,
           redeliverAfterMs: opt.redeliverAfterMs,
+          settleMs: opt.settleMs,
           onOpen() {
             clearTimeout(restoredTimer);
             clearTimeout(stableTimer);
@@ -18782,7 +18804,7 @@ async function openReceiver({
       stop.abort();
       streamAc?.abort();
       timers.forEach((t) => clearInterval(t));
-      await Promise.race([loop, sleep(4e3)]);
+      await Promise.race([loop, sleep(opt.settleMs + 3e3)]);
       if (depart) await post("depart", 2e3);
       if (!keepTransport) await transport.close?.().catch(() => {
       });
@@ -18796,11 +18818,53 @@ async function openReceiver({
 import { spawn } from "node:child_process";
 import fs5 from "node:fs";
 import path5 from "node:path";
+
+// src/core/version.ts
+var BUILD_VERSION = true ? "0.5.3" : "0.0.0-dev";
+function ownVersion(env = process.env) {
+  return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
+}
+var SEMVER_RE = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/;
+function parse(v) {
+  if (typeof v !== "string") return null;
+  const m = SEMVER_RE.exec(v.trim());
+  if (!m) return null;
+  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split(".") : [] };
+}
+var isNum = (s) => /^\d+$/.test(s);
+function comparePre(a, b) {
+  if (!a.length || !b.length) return (a.length ? -1 : 0) + (b.length ? 1 : 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === void 0) return -1;
+    if (y === void 0) return 1;
+    if (x === y) continue;
+    if (isNum(x) && isNum(y)) return Number(x) < Number(y) ? -1 : 1;
+    if (isNum(x)) return -1;
+    if (isNum(y)) return 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
+}
+function compareVersions(a, b) {
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return (x ? 1 : 0) - (y ? 1 : 0);
+  for (let i = 0; i < 3; i++) {
+    const d = x.core[i] - y.core[i];
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return comparePre(x.pre, y.pre);
+}
+
+// src/core/registrations.ts
 var registrationsDir = (env = process.env) => path5.join(stateDir(env), "registrations");
 var registrationPath = (sid, env = process.env) => path5.join(registrationsDir(env), `${validateSessionId(sid)}.json`);
 var deliverdLockPath = (env = process.env) => path5.join(stateDir(env), "deliverd.lock");
 var deliverdLogPath = (env = process.env) => path5.join(stateDir(env), "deliverd.log");
 var deliverdOutPath = (env) => path5.join(stateDir(env), "deliverd.out");
+var startClaimPath = (env) => path5.join(stateDir(env), "deliverd.starting");
 function privateDir(dir) {
   mkdirp(dir);
   try {
@@ -18866,27 +18930,105 @@ function listRegistrations(env = process.env) {
   return out;
 }
 var deliverdPid = (env = process.env) => lockHolder(deliverdLockPath(env));
-function ensureDeliverd(argv, env = process.env, { dropEnv = [] } = {}) {
-  const running = deliverdPid(env);
-  if (running) return null;
+function deliverdInfo(env = process.env) {
+  const info = lockInfo(deliverdLockPath(env));
+  if (!info || typeof info.pid !== "number") return null;
+  return {
+    pid: info.pid,
+    version: typeof info.version === "string" ? info.version : null,
+    exe: typeof info.exe === "string" ? info.exe : null
+  };
+}
+var versionName = (v) => v ?? "(before 0.5.3)";
+var START_CLAIM_MS = 6e4;
+function startClaim(env = process.env) {
+  const c = readJson(startClaimPath(env));
+  if (!c || typeof c.pid !== "number" || typeof c.at !== "number") return null;
+  const f = c.from;
+  return {
+    pid: c.pid,
+    version: typeof c.version === "string" ? c.version : null,
+    at: c.at,
+    from: f && typeof f.pid === "number" ? { pid: f.pid, version: typeof f.version === "string" ? f.version : null } : null
+  };
+}
+function claimStart(env, version, from) {
+  const file = startClaimPath(env);
+  const mine = {
+    pid: process.pid,
+    version,
+    at: Date.now(),
+    from: from && { pid: from.pid, version: from.version }
+  };
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.new`;
+  fs5.writeFileSync(tmp, JSON.stringify(mine) + "\n", { mode: 384 });
+  try {
+    fs5.linkSync(tmp, file);
+    return true;
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  } finally {
+    fs5.rmSync(tmp, { force: true });
+  }
+  const cur = startClaim(env);
+  if (cur && pidAlive(cur.pid) && Date.now() - cur.at < START_CLAIM_MS && compareVersions(cur.version, version) >= 0)
+    return false;
+  atomicWriteJson(file, mine);
+  return true;
+}
+function passStartClaim(env, pid) {
+  const cur = startClaim(env);
+  if (cur?.pid === process.pid) atomicWriteJson(startClaimPath(env), { ...cur, pid });
+}
+function dropStartClaim(env) {
+  if (startClaim(env)?.pid === process.pid) fs5.rmSync(startClaimPath(env), { force: true });
+}
+function settleStartClaim(version, env = process.env) {
+  const cur = startClaim(env);
+  if (cur && compareVersions(cur.version, version) <= 0)
+    fs5.rmSync(startClaimPath(env), { force: true });
+}
+function ensureDeliverd(argv, env = process.env, { dropEnv = [], version, log = () => {
+} }) {
+  const running = deliverdInfo(env);
+  if (running && compareVersions(version, running.version) <= 0) return null;
   const [command, ...args] = argv;
   if (!command) throw new TypeError("ensureDeliverd: argv must start with the executable");
   privateDir(stateDir(env));
-  const outFile = deliverdOutPath(env);
-  const fd = fs5.openSync(outFile, "w", 384);
+  if (!claimStart(env, version, running)) return null;
   try {
-    const childEnv = { ...env };
-    for (const k of dropEnv) delete childEnv[k];
-    const child = spawn(command, args, {
-      detached: true,
-      stdio: ["ignore", fd, fd],
-      env: childEnv,
-      cwd: stateDir(env)
-    });
-    child.unref();
-    return child.pid ?? null;
-  } finally {
-    fs5.closeSync(fd);
+    if (running) {
+      log(
+        `handover requested: deliverd ${versionName(running.version)} (pid ${running.pid}) -> ${version}`
+      );
+      try {
+        process.kill(running.pid, "SIGTERM");
+      } catch {
+      }
+    }
+    const outFile = deliverdOutPath(env);
+    const fd = fs5.openSync(outFile, "w", 384);
+    try {
+      const childEnv = { ...env };
+      for (const k of dropEnv) delete childEnv[k];
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: ["ignore", fd, fd],
+        env: childEnv,
+        cwd: stateDir(env)
+      });
+      child.on("error", () => {
+      });
+      child.unref();
+      if (child.pid) passStartClaim(env, child.pid);
+      else dropStartClaim(env);
+      return child.pid ?? null;
+    } finally {
+      fs5.closeSync(fd);
+    }
+  } catch (e) {
+    dropStartClaim(env);
+    throw e;
   }
 }
 
@@ -18905,8 +19047,12 @@ function deliverdOptions(env = process.env) {
     rateWindowMs: Number(env.AGENT_MAILBOX_RATE_WINDOW_MS) || 6e4,
     // test hook; "per minute"
     pausePollMs: Number(env.AGENT_MAILBOX_PAUSE_POLL_MS) || 1e3,
+    // How long a newer daemon waits for an older one to hand over before killing it: above the
+    // receivers' settle time (receiver.ts), so a delivery in flight can finish.
+    handoverMs: Number(env.AGENT_MAILBOX_HANDOVER_MS) || 2e4,
+    // test-only: "crash-after-deliver" | "crash-after-commit" | "ignore-sigterm" (a daemon that
+    // will not hand over)
     fault: env.AGENT_MAILBOX_FAULT || ""
-    // test-only: "crash-after-deliver" | "crash-after-commit"
   };
 }
 function fileLog(file, maxBytes = 256 * 1024) {
@@ -18930,6 +19076,7 @@ var handled = (e) => {
   return p;
 };
 var plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 var errCode = (e) => {
   const x = e;
   return String(x?.code || x?.message || e).slice(0, 120);
@@ -18938,21 +19085,23 @@ async function runDeliverd({
   cfg,
   transport,
   deliveryFor,
+  version,
+  exe,
   env = process.env,
   log = () => {
   }
 }) {
   const opt = deliverdOptions(env);
   mkdirp(stateDir(env));
-  const acquired = acquireFileLock(deliverdLockPath(env));
-  if (!acquired.ok) {
-    log(`another deliverd is running (pid ${acquired.pid}); exiting`);
+  const acquired = await acquireDaemonLock({ version, exe, env, log, handoverMs: opt.handoverMs });
+  if (!acquired) {
     await transport.close?.().catch(() => {
     });
     return 0;
   }
   const lock = acquired;
-  log(`started (pid ${process.pid})`);
+  settleStartClaim(version, env);
+  log(`started (pid ${process.pid}, version ${version})`);
   mkdirp(registrationsDir(env));
   const workers = /* @__PURE__ */ new Map();
   const noted = /* @__PURE__ */ new Set();
@@ -19206,9 +19355,10 @@ async function runDeliverd({
       stopped = (async () => {
         clearTimeout(drainTimer);
         clearTimeout(retryTimer);
+        const receiving = rx?.stop({ depart });
         if (!flushing) for (const p of pending.splice(0)) p.reject(new Error("not delivered"));
         lost.delete(sid);
-        await rx?.stop({ depart });
+        await receiving;
         sessLock?.release();
         if (workers.get(sid) === w) workers.delete(sid);
         if (rx) log(`stopped serving ${addr()}${depart ? "" : " (still registered)"}`);
@@ -19325,7 +19475,8 @@ async function runDeliverd({
   async function shutdown(why) {
     if (stopping) return;
     stopping = true;
-    log(`stopping (${why})`);
+    const next = handoverTarget(version, env);
+    log(`stopping (${why}${next ? `; handing over to ${next}` : ""})`);
     if (scanTimer) clearTimeout(scanTimer);
     timers.forEach((t) => clearInterval(t));
     try {
@@ -19336,6 +19487,7 @@ async function runDeliverd({
     lock.release();
     await transport.close?.().catch(() => {
     });
+    log(`stopped (pid ${process.pid}, version ${version})`);
     doneResolve(0);
   }
   let watcher = null;
@@ -19376,9 +19528,91 @@ async function runDeliverd({
       Math.max(50, Math.min(5e3, Math.floor(opt.idleExitMs / 4)))
     )
   );
-  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => void shutdown(sig));
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"])
+    process.on(sig, () => {
+      if (sig === "SIGTERM" && opt.fault === "ignore-sigterm") {
+        log("ignoring SIGTERM (test fault)");
+        return;
+      }
+      void shutdown(sig);
+    });
   scan();
   return done;
+}
+function handoverTarget(version, env) {
+  const next = startClaim(env);
+  return next && next.pid !== process.pid && pidAlive(next.pid) && compareVersions(next.version, version) > 0 ? next.version : null;
+}
+async function acquireDaemonLock({
+  version,
+  exe,
+  env,
+  log,
+  handoverMs
+}) {
+  const file = deliverdLockPath(env);
+  const claim = startClaim(env);
+  const askedFrom = claim?.version === version ? claim.from : null;
+  let interrupted = "";
+  const onSignal = (sig) => {
+    interrupted = sig;
+  };
+  const sigs = ["SIGTERM", "SIGINT", "SIGHUP"];
+  const handlers = sigs.map((sig) => [sig, () => onSignal(sig)]);
+  for (const [sig, h] of handlers) process.on(sig, h);
+  let waitingFor = null;
+  let since = 0;
+  let killed = false;
+  try {
+    for (; ; ) {
+      if (interrupted) {
+        log(`not started (${interrupted} while waiting for the lock)`);
+        return null;
+      }
+      const got = acquireFileLock(file, { version, exe });
+      if (got.ok) {
+        const prev = waitingFor ?? askedFrom;
+        if (prev)
+          log(
+            `deliverd ${versionName(prev.version)} (pid ${prev.pid}) ${killed ? "was terminated" : "exited"}; taking over`
+          );
+        return got;
+      }
+      const holder = deliverdInfo(env);
+      if (!holder) {
+        await sleep2(50);
+        continue;
+      }
+      if (compareVersions(version, holder.version) <= 0) {
+        log(`another deliverd is running (pid ${holder.pid}); exiting`);
+        return null;
+      }
+      if (waitingFor?.pid !== holder.pid) {
+        waitingFor = holder;
+        since = Date.now();
+        killed = false;
+        log(
+          `waiting for deliverd ${versionName(holder.version)} (pid ${holder.pid}) to hand over to ${version}`
+        );
+        signal(holder.pid, "SIGTERM");
+      } else if (!killed && Date.now() - since >= handoverMs) {
+        log(
+          `deliverd ${versionName(holder.version)} (pid ${holder.pid}) did not exit within ${Math.round(handoverMs / 1e3)} s; terminating it (SIGKILL)`
+        );
+        signal(holder.pid, "SIGKILL");
+        killed = true;
+      }
+      await sleep2(100);
+    }
+  } finally {
+    for (const [sig, h] of handlers) process.off(sig, h);
+  }
+}
+function signal(pid, sig) {
+  try {
+    process.kill(pid, sig);
+  } catch {
+  }
 }
 
 // src/core/guide.ts
@@ -19748,13 +19982,14 @@ function createTransport(cfg, { multiplex = false } = {}) {
     session,
     addresses,
     cursor,
-    signal,
+    signal: signal2,
     onOpen,
     onMessage,
     redeliverAfterMs = 6e4,
-    broadcastPollMs = 3e4
+    broadcastPollMs = 3e4,
+    settleMs = 3e3
   }) {
-    if (signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    if (signal2?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
     const name = consumerName(session);
     const own = addresses.filter((a) => a !== "all");
     for (const a of own)
@@ -19786,8 +20021,11 @@ function createTransport(cfg, { multiplex = false } = {}) {
     const failed = new Promise((_, rej) => fail2 = rej);
     failed.catch(() => {
     });
-    const onAbort = () => fail2(Object.assign(new Error("aborted"), { name: "AbortError" }));
-    signal?.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => {
+      stopped = true;
+      fail2(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    };
+    signal2?.addEventListener("abort", onAbort, { once: true });
     if (mux) {
       mux.subs.add(fail2);
       if (nc.isClosed()) fail2(new Error("connection closed"));
@@ -19802,7 +20040,20 @@ function createTransport(cfg, { multiplex = false } = {}) {
     }
     let messages = null;
     let wakeSub = null;
+    let directLoop = null;
     const pendingAcks = /* @__PURE__ */ new Set();
+    const handBack = [];
+    let handedBack = false;
+    const giveBack = (m) => {
+      if (!handedBack) {
+        handBack.push(m);
+        return;
+      }
+      try {
+        m.nak();
+      } catch {
+      }
+    };
     let chain = Promise.resolve();
     const serial = (fn) => {
       const p = chain.then(fn);
@@ -19846,9 +20097,12 @@ function createTransport(cfg, { multiplex = false } = {}) {
       }
       const consumer = await js.consumers.get(ownStream, name);
       messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
-      const directLoop = (async () => {
+      directLoop = (async () => {
         for await (const m of messages) {
-          if (stopped) break;
+          if (stopped) {
+            giveBack(m);
+            continue;
+          }
           const res = await serial(async () => {
             cur.u = m.seq;
             return onMessage(
@@ -19870,6 +20124,7 @@ function createTransport(cfg, { multiplex = false } = {}) {
               () => m.ackAck({ timeout: 5e3 }).catch(() => {
               }),
               () => {
+                if (stopped) return giveBack(m);
                 try {
                   m.nak(1e3);
                 } catch {
@@ -19904,6 +20159,7 @@ function createTransport(cfg, { multiplex = false } = {}) {
                 next_by_subj: `${PREFIX}.all.*`
               });
               for (const m of batch) {
+                if (stopped) return;
                 await serial(async () => {
                   cur.a = m.seq;
                   await onMessage(delivery(m, { ...cur }));
@@ -19939,25 +20195,38 @@ function createTransport(cfg, { multiplex = false } = {}) {
       throw tag(e);
     } finally {
       stopped = true;
-      signal?.removeEventListener("abort", onAbort);
+      signal2?.removeEventListener("abort", onAbort);
       fail2(new Error("closed"));
-      if (pendingAcks.size && !nc.isClosed()) {
-        await Promise.race([
-          Promise.allSettled([...pendingAcks]),
-          new Promise((r) => setTimeout(r, 3e3).unref?.())
-        ]);
+      try {
+        messages?.stop();
+      } catch {
       }
-      if (mux) {
+      try {
+        wakeSub?.unsubscribe();
+      } catch {
+      }
+      if (!nc.isClosed()) {
+        const settle = new Promise((r) => setTimeout(r, settleMs).unref?.());
+        await Promise.race([directLoop ? directLoop.catch(() => {
+        }) : null, settle]);
+        if (pendingAcks.size) await Promise.race([Promise.allSettled([...pendingAcks]), settle]);
+        handedBack = true;
+        for (const m of handBack.sort((a, b) => a.seq - b.seq)) {
+          try {
+            m.nak();
+          } catch {
+          }
+        }
+        if (handBack.length)
+          await Promise.race([
+            nc.flush().catch(() => {
+            }),
+            new Promise((r) => setTimeout(r, 5e3).unref?.())
+          ]);
+      }
+      if (mux)
         mux.subs.delete(fail2);
-        try {
-          messages?.stop();
-        } catch {
-        }
-        try {
-          wakeSub?.unsubscribe();
-        } catch {
-        }
-      } else if (!nc.isClosed()) await nc.close().catch(() => {
+      else if (!nc.isClosed()) await nc.close().catch(() => {
       });
     }
   }
@@ -20194,8 +20463,9 @@ async function runWait({
     finishing = (async () => {
       clearTimeout(drainTimer);
       timers.forEach((t) => clearTimeout(t));
+      const receiving = rx?.stop({ depart });
       for (const b of batch.splice(0)) b.reject(new Error("not delivered"));
-      await rx?.stop({ depart });
+      await receiving;
       lock.release();
       doneResolve(result2);
     })();
@@ -20382,12 +20652,17 @@ function launcherPath() {
   }
   return "mbox";
 }
-var deliverdArgv = () => [process.execPath, fileURLToPath(import.meta.url), "deliverd"];
+var bundlePath = fileURLToPath(import.meta.url);
+var deliverdArgv = () => [process.execPath, bundlePath, "deliverd"];
 var sessionEnvVars = () => [
   "AGENT_MAILBOX_SESSION",
   ...adapters.flatMap((a) => a.delivery?.sessionEnv || [])
 ];
-var startDeliverd = () => ensureDeliverd(deliverdArgv(), process.env, { dropEnv: sessionEnvVars() });
+var startDeliverd = () => ensureDeliverd(deliverdArgv(), process.env, {
+  dropEnv: sessionEnvVars(),
+  version: ownVersion(),
+  log: fileLog(deliverdLogPath())
+});
 function reviveDeliverd() {
   try {
     if (!deliverdPid() && listRegistrations().length) startDeliverd();
@@ -20415,7 +20690,7 @@ async function fail(e) {
 }
 var program2 = new Command();
 var globalOpts = () => program2.opts();
-program2.name("mbox").description("Agent mailbox: messages between agent sessions (broker-backed)").option(
+program2.name("mbox").description("Agent mailbox: messages between agent sessions (broker-backed)").version(ownVersion(), "-V, --version", "print the version").option(
   "--session <id>",
   "agent session id (default: $AGENT_MAILBOX_SESSION, then the detected agent adapter)"
 ).option(
@@ -20551,10 +20826,25 @@ program2.command("wait").description(
 });
 program2.command("deliverd").description(
   "the delivery daemon: pushes mail into registered agent sessions (started automatically by the session-start hook)"
-).option("--status", "print whether it runs and which sessions are registered, then exit").action(async (opts) => {
+).option(
+  "--status",
+  "print whether it runs (its version and bundle) and which sessions are registered, then exit"
+).action(async (opts) => {
   if (opts.status) {
-    const pid = deliverdPid();
-    console.log(pid ? `deliverd running (pid ${pid})` : "deliverd not running");
+    const d = deliverdInfo();
+    const mine = ownVersion();
+    if (!d) console.log("deliverd not running");
+    else {
+      console.log(`deliverd running (pid ${d.pid}, version ${versionName(d.version)})`);
+      if (d.exe)
+        console.log(
+          `executable: ${oneLine(d.exe, 300)}${fs7.existsSync(d.exe) ? "" : " (no longer exists; it runs from memory)"}`
+        );
+      const cmp = compareVersions(mine, d.version);
+      if (cmp > 0)
+        console.log(`this mbox is ${mine}: the next session start hands delivery over to it`);
+      else if (cmp < 0) console.log(`this mbox is ${mine} (older): it leaves the daemon alone`);
+    }
     const regs = listRegistrations();
     if (!regs.length) console.log("no registered sessions");
     for (const r of regs) {
@@ -20587,6 +20877,8 @@ program2.command("deliverd").description(
     cfg,
     transport,
     deliveryFor: (id) => getAdapter(id)?.delivery || null,
+    version: ownVersion(),
+    exe: bundlePath,
     log
   });
   process.exit(code);

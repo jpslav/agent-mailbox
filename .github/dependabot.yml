@@ -8,6 +8,11 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # commander 15 needs Node >= 22.12, and the runtime target is Node >= 18 (the bundle carries
+      # commander), so stay on 12: no major updates above it.
+      - dependency-name: commander
+        versions: ['>= 13']
   - package-ecosystem: github-actions
     directory: /
     schedule:

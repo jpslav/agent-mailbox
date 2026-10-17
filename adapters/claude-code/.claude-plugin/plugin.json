@@ -1,7 +1,7 @@
 {
   "name": "agent-mailbox",
   "displayName": "Agent Mailbox",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Agent mailbox for Claude Code: message other agent sessions (yours or coworkers') through a self-hosted NATS server",
   "author": {
     "name": "jpslav"

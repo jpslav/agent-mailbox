@@ -281,14 +281,16 @@ export interface MboxOptions {
   cwd?: string;
   input?: string;
   timeoutMs?: number;
+  /** Run this copy of the bundle instead of the repository's (another install path). */
+  bundle?: string;
 }
 
 /** Run an mbox command to completion. */
 export function mbox(
   args: string[],
-  { env, cwd, input, timeoutMs = 20000 }: MboxOptions = {},
+  { env, cwd, input, timeoutMs = 20000, bundle = MBOX }: MboxOptions = {},
 ): MboxResult {
-  const r = spawnSync(process.execPath, [MBOX, ...args], {
+  const r = spawnSync(process.execPath, [bundle, ...args], {
     env,
     cwd,
     input,
@@ -534,8 +536,10 @@ export class FakeInbox {
   readonly sessionId: string | null;
   readonly token: string | null;
   readonly firstLineMs: number;
-  /** How long to keep a connection open after reading it (a slow session). */
-  readonly closeDelayMs: number;
+  /** How long to keep a connection open after reading it (a slow session); may be changed. */
+  closeDelayMs: number;
+  /** While set, connections that have been read stay open until it resolves (a delivery held in flight). */
+  hold: Promise<void> | null = null;
   readonly delivered: InboxDelivery[] = [];
   readonly dropped: InboxDrop[] = [];
   connections = 0;
@@ -613,7 +617,8 @@ export class FakeInbox {
       c.on('end', () => {
         if (buf.trim()) handle(buf);
         if (deadline) clearTimeout(deadline);
-        if (this.closeDelayMs) setTimeout(() => c.end(), this.closeDelayMs).unref();
+        if (this.hold) void this.hold.then(() => c.end());
+        else if (this.closeDelayMs) setTimeout(() => c.end(), this.closeDelayMs).unref();
         else c.end();
       });
       c.on('error', () => {});
