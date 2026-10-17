@@ -17,14 +17,20 @@
 //       now() or delivery.cursor) is only used when that durable position has to be rebuilt.
 //       Delivery is at-least-once: onMessage may be async and its resolution is the
 //       acknowledgement; a crash before that means redelivery, so the caller dedupes by id.
-//       onMessage calls never overlap. onOpen() is called each time the subscription is
+//       onMessage calls never overlap. Deferred acknowledgement: if onMessage resolves to
+//       {ackAfter: Promise}, the next delivery is offered right away and this one is
+//       acknowledged when ackAfter resolves; if it rejects, the delivery is handed back for
+//       redelivery (soon, not after redeliverAfterMs). Ending the subscription waits briefly for
+//       outstanding acknowledgements. Broadcasts have no server-side acknowledgement: the
+//       caller's saved cursor is their position. onOpen() is called each time the subscription is
 //       (re)established. The promise never resolves: it rejects when the connection ends, or
 //       with an AbortError when `signal` aborts. Errors with `.authProblem === true` mean
 //       credentials/permissions. Calling subscribe again with different addresses re-targets the
 //       same durable position (aliases). An unacknowledged delivery is redelivered after
 //       `redeliverAfterMs` (default 60 s).
 //
-//   poll(addresses, {lookbackMs}) -> delivery[]            (oldest first; no side effects)
+//   poll(addresses, {lookbackMs, max}) -> delivery[]       (oldest first; no side effects; at most
+//       `max` per address, default 256, Infinity pages through everything in the window)
 //
 //   now() -> cursor                  the "start from here" cursor for a brand-new session
 //
@@ -260,6 +266,19 @@ export function createTransport(cfg) {
     return out;
   }
 
+  /** Page through direct gets from `start` (a start_time or seq query) until `max` messages or the end. */
+  async function directAll(jsm, stream, start, filter, max) {
+    const out = [];
+    let q = start;
+    while (out.length < max) {
+      const batch = await directBatch(jsm, stream, { ...q, next_by_subj: filter });
+      out.push(...batch.slice(0, max - out.length));
+      if (batch.length < 256) break;
+      q = { seq: batch[batch.length - 1].seq + 1 };
+    }
+    return out;
+  }
+
   // ---- now ----
   async function now() {
     const t = new Date().toISOString();
@@ -303,6 +322,8 @@ export function createTransport(cfg) {
       }
     })().catch(() => {});
 
+    // Deferred acknowledgements still in flight (see the interface: {ackAfter}).
+    const pendingAcks = new Set();
     // Serialise every onMessage call (direct + broadcast) through one chain.
     let chain = Promise.resolve();
     const serial = (fn) => {
@@ -351,15 +372,26 @@ export function createTransport(cfg) {
       const directLoop = (async () => {
         for await (const m of messages) {
           if (stopped) break;
-          await serial(async () => {
+          const res = await serial(async () => {
             cur.u = m.seq;
-            await onMessage(
+            return onMessage(
               delivery(
                 { subject: m.subject, seq: m.seq, stream: ownStream, timeMs: Math.floor(m.info.timestampNanos / NS), data: m.data, msgId: m.headers?.get('Nats-Msg-Id') || null },
                 { ...cur },
               ),
             );
           });
+          if (res && typeof res === 'object' && res.ackAfter && typeof res.ackAfter.then === 'function') {
+            // Deferred: ack once the caller has delivered it; on rejection hand it back (nak with
+            // a short delay, so a closing subscription does not get it straight back).
+            const settled = res.ackAfter.then(
+              () => m.ackAck({ timeout: 5000 }).catch(() => {}),
+              () => { try { m.nak(1000); } catch { /* connection gone: redelivered after ack_wait */ } },
+            );
+            pendingAcks.add(settled);
+            settled.finally(() => pendingAcks.delete(settled));
+            continue;
+          }
           await m.ackAck({ timeout: 5000 }).catch(() => {});
         }
         throw new Error('message stream ended');
@@ -413,19 +445,22 @@ export function createTransport(cfg) {
       stopped = true;
       signal?.removeEventListener('abort', onAbort);
       fail(new Error('closed'));
+      if (pendingAcks.size && !nc.isClosed()) {
+        await Promise.race([Promise.allSettled([...pendingAcks]), new Promise((r) => setTimeout(r, 3000).unref?.())]);
+      }
       if (!nc.isClosed()) await nc.close().catch(() => {});
     }
   }
 
   // ---- poll ----
-  async function poll(addresses, { lookbackMs }) {
+  async function poll(addresses, { lookbackMs, max = 256 }) {
     const s = await conn();
     const start_time = new Date(Date.now() - lookbackMs).toISOString();
     const out = [];
     for (const a of [...new Set(addresses)]) {
       try {
-        if (a === 'all') out.push(...(await directBatch(s.jsm, ALL_STREAM, { start_time, next_by_subj: `${PREFIX}.all.*` })));
-        else out.push(...(await directBatch(s.jsm, ownStream, { start_time, next_by_subj: `${PREFIX}.${a}.*` })));
+        if (a === 'all') out.push(...(await directAll(s.jsm, ALL_STREAM, { start_time }, `${PREFIX}.all.*`, max)));
+        else out.push(...(await directAll(s.jsm, ownStream, { start_time }, `${PREFIX}.${a}.*`, max)));
       } catch (e) {
         throw tag(e);
       }

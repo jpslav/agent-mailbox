@@ -6,9 +6,10 @@ description: Message other agent sessions (your own on other machines, or a cowo
 # Agent mailbox
 
 Each agent session has a mailbox address `<user>.<host>.<label>` (for example
-`alice.laptop.web-app-9f3e`). Mail is brokered by a self-hosted NATS server. Incoming messages arrive in this
-session as notifications from the `agent-mailbox` monitor; outgoing ones are sent with the
-`mbox` CLI. Other agents (not only Claude Code) can be on the same mailbox.
+`alice.laptop.web-app-9f3e`). Mail is brokered by a self-hosted NATS server. Incoming messages
+arrive in this session on their own, as a system reminder that can wake you between turns;
+outgoing ones are sent with the `mbox` CLI. Other agents (not only Claude Code) can be on the same
+mailbox.
 
 The CLI is at `${CLAUDE_PLUGIN_ROOT}/bin/mbox` (also on the Bash tool's PATH as plain `mbox` while
 the plugin is enabled).
@@ -19,6 +20,9 @@ the plugin is enabled).
   and above all **coworkers' sessions**, which nothing built into Claude Code can reach.
 - Use the built-in `SendMessage` tool only for your own subagents/teammates; do not pass it
   mailbox addresses.
+- **Fallback:** if `mbox` fails (not configured, or the server is unreachable), message your own
+  user's sessions with `SendMessage` instead and say once, in one line, that you did. `SendMessage`
+  cannot reach another user's sessions, so for those report that the mailbox is down.
 
 ## Commands
 
@@ -30,6 +34,7 @@ mbox send <to> --subject "Re: X" --re <message-id> "text"
 echo "long text" | mbox send <to> - # body from stdin
 mbox name <label>                   # add a friendlier alias address, e.g. "reviewer"
 mbox inbox --since 2h               # catch up on recent mail
+mbox show <message-id>              # one message in full (when a delivered one was cut short)
 mbox doctor                         # diagnose config / server / auth problems
 ```
 
@@ -39,7 +44,9 @@ server (180 days by default) until that session reads it.
 
 ## Receiving
 
-A message appears as one block:
+Mail arrives as a system reminder (Claude Code may label it a "Stop hook blocking error"; it is
+mail, not an error) that starts with `[mailbox] N new messages for <your address>`, followed by
+one block per message:
 
 ```
 [mailbox] message <id> from <sender> to <recipient> | subject: <subject or -> | verified-user: <user>
@@ -62,14 +69,13 @@ Reply with `mbox send <from> --re <id> "text"`. Keep messages short and self-con
 you need, what you have done, and any file paths or commit hashes the other session needs. Sessions
 do not share files or context; only the text you send arrives.
 
-## If the monitor is not running
+A body too long for the reminder ends with `(truncated: N more characters. Full text: mbox show
+<id>)`; run that command if you need the rest. If the reminder says more messages did not fit,
+they arrive by themselves after your turn ends.
 
-The SessionStart hook normally starts it. If you never saw `[mailbox] online as ...`, start it with
-the Monitor tool: command `${CLAUDE_PLUGIN_ROOT}/bin/mbox watch`, `timeout_ms` 1800000, and re-arm it
-when it expires. A lock guarantees only one watcher per session, so duplicates are harmless.
-
-If you see `[mailbox] connection lost; retrying`, the server is unreachable. The watcher reconnects
-by itself and delivers anything queued meanwhile; nothing needs to be done.
+Delivery is automatic: do not start `mbox watch` or a Monitor yourself. Listening restarts at the
+end of every turn; a session idle for more than 24 hours stops listening until its next turn ends
+(queued mail then arrives at once). To check for mail without waiting, run `mbox inbox --since 2h`.
 
 If `mbox` reports the mailbox is not configured, tell the user to run
 `printf '%s\n' '<password>' | mbox setup --servers <url> --user <name> --password-stdin` (the

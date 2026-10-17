@@ -9,6 +9,7 @@ import { buildEnvelope, formatBlock, oneLine, parseDelivery } from './core/envel
 import { ResolveError, presenceRecord, resolveTarget } from './core/registry.js';
 import { NoSessionError, ensureSession, updateState } from './core/state.js';
 import { createTransport, explainError, validateServer } from './core/transport/nats.js'; // composition root: the only place that picks the broker
+import { MAX_WAIT_MS, endSession, runWait } from './core/wait.js';
 import { runWatch } from './core/watch.js';
 
 class UsageError extends Error {}
@@ -78,7 +79,7 @@ program
 // ---------------------------------------------------------------- watch
 program
   .command('watch')
-  .description('stream incoming messages to stdout (run as the agent\'s monitor / background process)')
+  .description('stream incoming messages to stdout (for an agent feature that turns a background process\'s output into notifications)')
   .action(async () => {
     let cfg;
     let session;
@@ -97,6 +98,73 @@ program
     } catch (e) {
       process.stdout.write(`[mailbox] watcher failed: ${explainError(e)}\n`);
       process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------- wait
+/** A hook's stdin JSON, or {}: never blocks on a terminal, gives up on a pipe that stays silent. */
+function readHookStdin(timeoutMs) {
+  if (process.stdin.isTTY) return Promise.resolve({});
+  return new Promise((resolve) => {
+    const chunks = [];
+    const finish = () => {
+      clearTimeout(timer);
+      process.stdin.removeAllListeners('data');
+      process.stdin.pause();
+      try {
+        const j = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        resolve(j && typeof j === 'object' ? j : {});
+      } catch {
+        resolve({});
+      }
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    process.stdin.on('data', (c) => chunks.push(c));
+    process.stdin.once('end', finish);
+    process.stdin.once('error', finish);
+  });
+}
+
+program
+  .command('wait')
+  .description('wait for mail, print it on stderr as one batch and exit 2; exit 0 when none came (agent hook entry point)')
+  .option('--hook-stdin', 'read the agent hook JSON on stdin (session id, cwd)')
+  .option('--max-wait <seconds>', 'exit 0 after this long without mail (keep it below the hook timeout)', '540')
+  .action(async (opts) => {
+    // An agent hook: never a stack trace, never a failing status. 2 means "mail on stderr".
+    const quit = (msg) => {
+      if (msg) process.stderr.write(`mbox wait: ${msg}\n`);
+      process.exit(0);
+    };
+    const seconds = Number(opts.maxWait);
+    if (!Number.isFinite(seconds) || seconds <= 0) quit(`--max-wait must be a positive number of seconds (got "${opts.maxWait}")`);
+    const agent = resolveAgent({ agent: program.opts().agent });
+    const input = opts.hookStdin ? await readHookStdin(2000) : {};
+    const hook = agent.adapter?.hookInput?.(input) || {};
+    if (agent.adapter?.canWait && !agent.adapter.canWait(process.env)) quit();
+    let cfg;
+    let session;
+    try {
+      cfg = loadConfig();
+      session = resolveSession({ session: program.opts().session, agent, hookSession: hook.sessionId });
+    } catch (e) {
+      quit(e.message);
+    }
+    try {
+      const result = await runWait({
+        cfg,
+        transport: openTransport(cfg),
+        sid: session.sid,
+        agent: agent.id,
+        hostPid: session.hostPid,
+        cwd: hook.cwd || process.cwd(),
+        maxWaitMs: Math.min(seconds * 1000, MAX_WAIT_MS),
+        write: (text) => new Promise((resolve, reject) => process.stderr.write(text, (err) => (err ? reject(err) : resolve()))),
+      });
+      await closeTransports();
+      process.exit(result === 'mail' ? 2 : 0);
+    } catch (e) {
+      quit(explainError(e));
     }
   });
 
@@ -237,6 +305,26 @@ program
     if (!n) console.log(`no messages in the last ${opts.since}`);
   }));
 
+// ---------------------------------------------------------------- show
+program
+  .command('show')
+  .description('print one message (to this session or a broadcast) in full, by its id')
+  .argument('<id>', 'message id, as in "[mailbox] message <id>"')
+  .option('--since <dur>', 'how far back to look (e.g. 2h, 7d)', '30d')
+  .action(action(async (id, opts) => {
+    if (!/^\d+[smhd]$/.test(opts.since)) throw new UsageError(`--since must look like 30m, 2h or 7d (got "${opts.since}")`);
+    const { transport, st } = await context();
+    const unit = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[opts.since.slice(-1)];
+    const deliveries = await transport.poll([st.address, ...st.aliases, BROADCAST], { lookbackMs: parseInt(opts.since, 10) * unit, max: Infinity });
+    const hit = deliveries.map(parseDelivery).find((m) => m.id === id);
+    if (!hit) {
+      process.stderr.write(`mbox: no message ${oneLine(id, 140)} to this session in the last ${opts.since} (try --since 180d)\n`);
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(formatBlock(hit));
+  }));
+
 // ---------------------------------------------------------------- setup
 program
   .command('setup')
@@ -321,6 +409,7 @@ program
         launcher: launcherPath(),
         configError,
         ensure: (sid, cwd) => ensureSession({ sid, cfg, transport, cwd, hostPid: adapter.hostPid(process.env) }),
+        endSession: (sid) => endSession({ sid, cfg, transport, agent: adapter.id }),
       };
       const out = await handler(input, ctx);
       if (out) process.stdout.write(out.endsWith('\n') ? out : out + '\n');

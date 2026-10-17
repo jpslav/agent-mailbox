@@ -3,7 +3,8 @@
 //   <sid>.cursor.json  watcher-owned: {cursor (opaque, from the transport), seen (recently printed
 //                      message ids)}   (kept apart so `mbox name` and the watcher never clobber
 //                      each other's writes)
-//   <sid>.lock         single-watcher pidfile
+//   <sid>.lock         single-watcher pidfile (`mbox watch`)
+//   <sid>.wait.lock    current hook waiter (`mbox wait`); the newest claim wins
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, shortHost } from './addr.js';
@@ -29,6 +30,7 @@ const byPidDir = (env) => path.join(stateDir(env), 'by-pid');
 export const statePath = (sid, env = process.env) => path.join(sessionsDir(env), `${sid}.json`);
 export const cursorPath = (sid, env = process.env) => path.join(sessionsDir(env), `${sid}.cursor.json`);
 export const lockPath = (sid, env = process.env) => path.join(sessionsDir(env), `${sid}.lock`);
+export const waitLockPath = (sid, env = process.env) => path.join(sessionsDir(env), `${sid}.wait.lock`);
 
 function validSid(sid) {
   if (!SID_RE.test(sid)) throw new Error(`invalid session id "${sid}" (allowed: letters, digits, . _ -)`);
@@ -209,4 +211,72 @@ export function acquireLock(sid, env = process.env) {
     fs.rmSync(file, { force: true });
   }
   return { ok: false, pid: readJson(file)?.pid ?? 0 };
+}
+
+/**
+ * The pid holding a lock file, if that holder is live: another process, alive, and the file was
+ * touched within LOCK_FRESH_MS (guards against pid reuse after a crash). Otherwise null.
+ */
+function liveHolder(file) {
+  try {
+    const pid = readJson(file)?.pid;
+    const fresh = Date.now() - fs.statSync(file).mtimeMs < LOCK_FRESH_MS;
+    return Number.isInteger(pid) && pid !== process.pid && fresh && pidAlive(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** pid of a live `watch` for the session (other than this process), else null. */
+export const watcherPid = (sid, env = process.env) => liveHolder(lockPath(sid, env));
+
+/** pid of a live `wait` for the session (other than this process), else null. */
+export const waiterPid = (sid, env = process.env) => liveHolder(waitLockPath(sid, env));
+
+/** Resolves once `pid` has exited, or after `timeoutMs`. */
+export async function awaitExit(pid, timeoutMs) {
+  const t0 = Date.now();
+  while (pid && pidAlive(pid) && Date.now() - t0 < timeoutMs) await new Promise((r) => setTimeout(r, 50));
+  return !pidAlive(pid);
+}
+
+/**
+ * Claim the session's waiter lock. Unlike the watch lock this never fails: the newest claim wins
+ * and the previous holder notices (mine() turns false) and steps aside. Returns
+ * {prevPid, mine(), touch(), release()}; prevPid is the live waiter this claim supersedes.
+ */
+export function claimWaitLock(sid, env = process.env) {
+  const file = waitLockPath(sid, env);
+  mkdirp(sessionsDir(env));
+  const prevPid = waiterPid(sid, env);
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  atomicWriteJson(file, { pid: process.pid, token, startedAt: Date.now() });
+  const mine = () => readJson(file)?.token === token;
+  return {
+    prevPid,
+    mine,
+    touch() {
+      if (!mine()) return;
+      try {
+        const now = new Date();
+        fs.utimesSync(file, now, now);
+      } catch {
+        /* ignore */
+      }
+    },
+    release() {
+      try {
+        if (mine()) fs.rmSync(file, { force: true });
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
+/** Ask the session's waiter to step aside (it notices within its lock poll). Returns its pid or null. */
+export function stopWaiter(sid, env = process.env) {
+  const pid = waiterPid(sid, env);
+  fs.rmSync(waitLockPath(sid, env), { force: true });
+  return pid;
 }

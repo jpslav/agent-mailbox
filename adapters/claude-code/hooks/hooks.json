@@ -1,5 +1,5 @@
 {
-  "description": "Tell the session its agent-mailbox address and how to use the mailbox",
+  "description": "Agent mailbox: tell the session its address, deliver incoming mail (asyncRewake waiter, re-armed at every turn end), and stop the waiter when the session ends",
   "hooks": {
     "SessionStart": [
       {
@@ -8,6 +8,38 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/mbox hook claude-code session-start",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/mbox wait --hook-stdin --max-wait 86340",
+            "asyncRewake": true,
+            "timeout": 86400
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/mbox wait --hook-stdin --max-wait 86340",
+            "asyncRewake": true,
+            "timeout": 86400
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/mbox hook claude-code session-end"
           }
         ]
       }

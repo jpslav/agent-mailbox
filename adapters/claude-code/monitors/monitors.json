@@ -1,7 +1,0 @@
-[
-  {
-    "name": "agent-mailbox",
-    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/mbox watch",
-    "description": "Messages from other agent sessions (agent mailbox)"
-  }
-]

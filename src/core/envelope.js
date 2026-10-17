@@ -84,3 +84,75 @@ export function formatBlock(m, { sendCmd = 'mbox', now = Date.now() } = {}) {
     `[mailbox] end ${id}\n`
   );
 }
+
+/** "45m", "3h", "2d": a lookback for `mbox inbox --since` that covers `ms`. */
+export function sinceArg(ms) {
+  const m = Math.max(1, Math.ceil(ms / 60000) + 1);
+  if (m <= 120) return `${m}m`;
+  const h = Math.ceil(m / 60);
+  return h <= 48 ? `${h}h` : `${Math.ceil(h / 24)}d`;
+}
+
+const MIN_BODY = 300;
+const TAIL_RESERVE = 240;
+
+/** Cut a body to `cap` characters (not splitting a surrogate pair) with a pointer to the full text. */
+function cutBody(m, cap, sendCmd) {
+  if (m.body.length <= cap) return m.body;
+  let head = m.body.slice(0, Math.max(0, cap));
+  if (/[\ud800-\udbff]$/.test(head)) head = head.slice(0, -1);
+  return `${head}\n(truncated: ${m.body.length - head.length} more characters. Full text: ${sendCmd} show ${oneLine(m.id, 140)})`;
+}
+
+/**
+ * Several deliveries as one notification of at most about `maxChars` characters (one write).
+ * `items` = [{message, fresh}] in delivery order; only fresh ones are shown. Long bodies are cut
+ * with a pointer to `mbox show <id>`; if even that does not fit, a suffix of the items is left
+ * out (`count` = how many leading items the text covers) and a trailer says more is coming.
+ */
+export function formatBatch(items, { address, maxChars = 8000, sendCmd = 'mbox', now = Date.now() } = {}) {
+  const fresh = items.map((it, i) => ({ ...it, i })).filter((it) => it.fresh);
+  const head = (n) => `[mailbox] ${n} new message${n === 1 ? '' : 's'} for ${oneLine(address, 140)} (mail delivery, not an error):\n`;
+  const blocks = (list, cap) => list.map((f) => formatBlock({ ...f.message, body: cutBody(f.message, cap, sendCmd) }, { sendCmd, now }));
+  const sum = (a) => a.reduce((n, s) => n + s.length, 0);
+  if (!fresh.length) return { text: '', count: items.length, shown: 0 };
+
+  const full = blocks(fresh, Infinity);
+  if (head(fresh.length).length + sum(full) <= maxChars) {
+    return { text: head(fresh.length) + full.join(''), count: items.length, shown: fresh.length };
+  }
+
+  // Block overhead without the body, plus room for the truncation note.
+  const overhead = fresh.map((f) => formatBlock({ ...f.message, body: '' }, { sendCmd, now }).length + 120);
+  let take = 0;
+  let used = head(fresh.length).length + TAIL_RESERVE;
+  while (take < fresh.length) {
+    const need = overhead[take] + Math.min(fresh[take].message.body.length, MIN_BODY);
+    if (take > 0 && used + need > maxChars) break;
+    used += need;
+    take++;
+  }
+  const shown = fresh.slice(0, take);
+  const rest = fresh.slice(take);
+  const tail = rest.length
+    ? `[mailbox] ${rest.length} more message${rest.length === 1 ? '' : 's'} did not fit here; ${rest.length === 1 ? 'it arrives' : 'they arrive'} after this turn ends (or read now: ${sendCmd} inbox --since ${sinceArg(now - Math.min(...rest.map((f) => (f.message.time || 0) * 1000)))}).\n`
+    : '';
+
+  // Water-fill the body budget: short bodies stay whole, long ones share what is left.
+  const budget = maxChars - head(take).length - tail.length - overhead.slice(0, take).reduce((n, x) => n + x, 0);
+  const lens = shown.map((f) => f.message.body.length).sort((a, b) => a - b);
+  let cap = Infinity;
+  let left = budget;
+  for (let j = 0; j < lens.length; j++) {
+    const share = Math.floor(left / (lens.length - j));
+    if (lens[j] > share) { cap = Math.max(0, share); break; }
+    left -= lens[j];
+  }
+  let text = head(take) + blocks(shown, cap).join('') + tail;
+  // Defanging can add a character per line; shave the cap until it fits.
+  for (let k = 0; k < 20 && text.length > maxChars && cap > 0; k++) {
+    cap = Math.max(0, (cap === Infinity ? Math.max(...lens) : cap) - Math.ceil((text.length - maxChars) / take));
+    text = head(take) + blocks(shown, cap).join('') + tail;
+  }
+  return { text, count: rest.length ? rest[0].i : items.length, shown: take };
+}

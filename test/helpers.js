@@ -208,12 +208,22 @@ export class Watcher {
 
   /** All "[mailbox] message <id> ..." blocks seen so far. */
   messages() {
-    const out = [];
-    const re = /\[mailbox\] message (\S+) from (.+?) to (\S+) \| subject: (.*?) \| verified-user: ([^\n]*)\n((?:\(sent [^\n]*\)\n)?)\([^\n]*\)\n([\s\S]*?)\n\[mailbox\] end \1\n/g;
-    let m;
-    while ((m = re.exec(this.out))) out.push({ id: m[1], from: m[2], to: m[3], subject: m[4], verified: m[5], stale: m[6].trim(), body: m[7] });
-    return out;
+    return new Watcher.Parser(this.out).messages();
   }
+
+  static Parser = class {
+    constructor(text) {
+      this.text = text;
+    }
+
+    messages() {
+      const out = [];
+      const re = /\[mailbox\] message (\S+) from (.+?) to (\S+) \| subject: (.*?) \| verified-user: ([^\n]*)\n((?:\(sent [^\n]*\)\n)?)\([^\n]*\)\n([\s\S]*?)\n\[mailbox\] end \1\n/g;
+      let m;
+      while ((m = re.exec(this.text))) out.push({ id: m[1], from: m[2], to: m[3], subject: m[4], verified: m[5], stale: m[6].trim(), body: m[7] });
+      return out;
+    }
+  };
 
   async stop() {
     if (this.proc.exitCode === null && this.proc.signalCode === null) this.proc.kill('SIGTERM');
@@ -229,4 +239,50 @@ export function sessionAddr(env, session, cwd) {
 
 export function send(env, session, cwd, to, text, extra = []) {
   return mbox(['send', to, ...extra, text], { env: withSession(env, session), cwd });
+}
+
+/** `mbox wait` as a child process: stderr is what the agent would see on exit 2. */
+export class Waiter {
+  constructor(env, { cwd, session, args = [], input, stdin = 'ignore' } = {}) {
+    this.err = '';
+    this.out = '';
+    const e = session ? withSession(env, session) : env;
+    this.proc = spawn(process.execPath, [MBOX, 'wait', ...args], { env: e, cwd, stdio: [input !== undefined ? 'pipe' : stdin, 'pipe', 'pipe'] });
+    if (input !== undefined) this.proc.stdin.end(input);
+    this.exited = new Promise((r) => this.proc.once('exit', (code, signal) => r(code ?? signal)));
+    this.proc.stdout.on('data', (d) => (this.out += d));
+    this.proc.stderr.on('data', (d) => (this.err += d));
+  }
+
+  get running() {
+    return this.proc.exitCode === null && this.proc.signalCode === null;
+  }
+
+  /** The exit code (or signal), or 'still running' after timeoutMs. */
+  result(timeoutMs = 15000) {
+    return Promise.race([this.exited, sleep(timeoutMs).then(() => 'still running')]);
+  }
+
+  /** Message blocks on stderr. */
+  messages() {
+    return new Watcher.Parser(this.err).messages();
+  }
+
+  async stop() {
+    if (this.running) this.proc.kill('SIGKILL');
+    return this.exited;
+  }
+}
+
+/** The waiter lock file says this pid is the session's current waiter. */
+export async function waitForWaiter(env, session, pid, timeoutMs = 10000) {
+  const file = path.join(env.AGENT_MAILBOX_STATE_DIR, 'sessions', `${session}.wait.lock`);
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      if (JSON.parse(fs.readFileSync(file, 'utf8')).pid === pid) return;
+    } catch { /* not yet */ }
+    await sleep(50);
+  }
+  throw new Error(`waiter ${pid} never held the lock for ${session}`);
 }
