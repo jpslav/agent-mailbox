@@ -71,6 +71,16 @@ dependency bumps that change `dist/`, minor for features, major for breaking cha
    claude plugin marketplace update agent-mailbox && claude plugin update agent-mailbox@agent-mailbox
    ```
 
+   Then confirm what is actually **installed**, not just what the repo says. Claude Code runs the
+   copy in its plugin cache, and after a marketplace source change or a missed refresh it can keep
+   running an older cached version (this once left a version that hung desktop sessions in use
+   after a newer one was on `main`):
+
+   ```sh
+   claude plugin list | grep -A2 'agent-mailbox@agent-mailbox'   # Version: must be X.Y.Z
+   pgrep -fl 'mbox.mjs deliverd'                                 # the running daemon's path shows its version
+   ```
+
    If the plugin is not installed on this machine: `claude plugin marketplace add jpslav/agent-mailbox`
    then `claude plugin install agent-mailbox@agent-mailbox`. If the new version does not show,
    check that all three files really carry it on `main` and that the marketplace has refreshed.
