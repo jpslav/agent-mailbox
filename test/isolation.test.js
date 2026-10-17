@@ -5,6 +5,8 @@ import { after, before, describe, it } from 'node:test';
 import { headers } from '@nats-io/transport-node';
 import { jetstream, jetstreamManager } from '@nats-io/jetstream';
 import { connect } from '@nats-io/transport-node';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Broker, findServer, sleep } from './helpers.js';
 
 const SERVER = findServer();
@@ -191,6 +193,58 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
       assert.notEqual(b.admin(['add-user', 'all'], { check: false }).code, 0); // reserved
       assert.notEqual(b.admin(['add-user', 'Bad_Name'], { check: false }).code, 0);
       assert.notEqual(b.admin(['add-user', 'alice'], { check: false }).code, 0); // exists
+    });
+
+    it('init on a running, provisioned server neither reloads it nor touches the streams', async () => {
+      const out = b.admin(['init']).out;
+      assert.match(out, /users\.conf unchanged: no server reload needed/);
+      assert.doesNotMatch(out, /reloaded nats-server/);
+      assert.match(out, /stream MBX_ALL already exists \(kept\)/);
+      assert.match(out, /kv bucket presence already exists \(kept\)/);
+      const jsm = await jetstreamManager(admin);
+      assert.equal((await jsm.streams.info('MBX_ALL')).config.name, 'MBX_ALL');
+      assert.equal((await jsm.streams.info('KV_presence')).config.name, 'KV_presence');
+    });
+
+    it('init recreates a stream that the server loses right after a reload', async () => {
+      // A second server, so the shared one keeps its admin credentials. The `nats` CLI is wrapped so
+      // that the first `stream add MBX_ALL` is followed by deleting the stream again: what a reload
+      // finishing late does to a freshly created stream.
+      const b2 = new Broker(SERVER);
+      try {
+        await b2.init([]);
+        const nc = await b2.conn('admin');
+        const jsm = await jetstreamManager(nc);
+        await jsm.streams.delete('MBX_ALL');
+        await jsm.streams.delete('KV_presence');
+        await nc.close();
+        // A new admin user changes users.conf, so init reloads the server.
+        fs.rmSync(path.join(b2.confDir, 'admin.creds'));
+        fs.rmSync(path.join(b2.confDir, 'users.d', '_admin.conf'));
+        const shim = path.join(b2.dir, 'nats-shim.sh');
+        fs.writeFileSync(
+          shim,
+          `#!/bin/sh\n"$REAL_NATS" "$@"; rc=$?\n` +
+            `if [ "$1 $2 $3" = "stream add MBX_ALL" ] && [ ! -f "$MARK" ]; then touch "$MARK"; "$REAL_NATS" stream rm -f MBX_ALL >/dev/null 2>&1; fi\n` +
+            `exit $rc\n`,
+          { mode: 0o755 },
+        );
+        const env = { NATS_BIN: shim, REAL_NATS: SERVER.natsBin, MARK: path.join(b2.dir, 'lost-once'), MBOX_RELOAD_SETTLE: '0.2' };
+        const out = b2.admin(['init'], { env }).out;
+        assert.match(out, /reloaded nats-server/);
+        assert.ok(fs.existsSync(env.MARK), 'the shim never ran: the test proves nothing');
+        assert.match(out, /lost during the server reload; recreating it/);
+        const nc2 = await b2.conn('admin'); // the new admin credentials
+        try {
+          const jsm2 = await jetstreamManager(nc2);
+          assert.equal((await jsm2.streams.info('MBX_ALL')).config.name, 'MBX_ALL');
+          assert.equal((await jsm2.streams.info('KV_presence')).config.name, 'KV_presence');
+        } finally {
+          await nc2.close();
+        }
+      } finally {
+        await b2.stop();
+      }
     });
   });
 });

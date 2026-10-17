@@ -17,6 +17,8 @@
 #   MBOX_PID_FILE      nats-server pid file used for the reload signal [pid_file from the conf]
 #   MBOX_MAX_AGE       retention per mailbox stream [180d]     MBOX_MAX_BYTES  size cap per stream [1GiB]
 #   MBOX_PRESENCE_TTL  presence entry lifetime [30m]
+#   MBOX_RELOAD_SETTLE seconds to let a server reload finish before re-checking that the streams
+#                      just created still exist [1]
 #   NATS_BIN, NATS_SERVER_BIN   the `nats` CLI and `nats-server` [found on PATH]
 #
 # Users and permissions live in users.d/<name>.conf (one block per user); users.conf is regenerated
@@ -46,6 +48,8 @@ NATS_SERVER=${NATS_SERVER_BIN:-nats-server}
 MAX_AGE=${MBOX_MAX_AGE:-180d}
 MAX_BYTES=${MBOX_MAX_BYTES:-1GiB}
 PRESENCE_TTL=${MBOX_PRESENCE_TTL:-30m}
+SETTLE=${MBOX_RELOAD_SETTLE:-1}
+USERS_CHANGED=1  # set by rebuild_users_conf: did users.conf's content change?
 
 die() { echo "mbox-admin: $*" >&2; exit 1; }
 usage() {
@@ -119,7 +123,13 @@ rebuild_users_conf() {
     echo "}"
   } >"$tmp"
   chmod 600 "$tmp"
-  mv "$tmp" "$USERS_CONF"
+  if [ -f "$USERS_CONF" ] && cmp -s "$tmp" "$USERS_CONF"; then
+    rm -f "$tmp"
+    USERS_CHANGED=0
+  else
+    mv "$tmp" "$USERS_CONF"
+    USERS_CHANGED=1
+  fi
 }
 
 pid_file() {
@@ -167,6 +177,37 @@ add_stream() {
   echo "created stream $1 ($2, file storage, max-age $MAX_AGE, max-bytes $MAX_BYTES, discard old)"
 }
 
+# A stream created while the server is still applying a reload can be lost when the reload finishes
+# (seen on a busy machine, nats-server 2.15). So: reload only when users.conf really changed, and
+# after a reload let it settle, then re-check what was just created and recreate it if it is gone.
+# $1 check command (succeeds when everything exists), $2 command that (re)creates it.
+settle() {
+  i=0
+  while [ $i -lt 5 ]; do
+    sleep "$SETTLE"
+    if "$1"; then return 0; fi
+    echo "stream or bucket lost during the server reload; recreating it"
+    "$2"
+    i=$((i + 1))
+  done
+  "$1" || die "still missing after the server reload; check the server log and re-run"
+}
+
+check_base() { "$NATS" stream info MBX_ALL >/dev/null 2>&1 && "$NATS" kv info presence >/dev/null 2>&1; }
+ensure_base() {
+  add_stream MBX_ALL 'mbx.all.*'
+  if "$NATS" kv info presence >/dev/null 2>&1; then
+    echo "kv bucket presence already exists (kept)"
+  else
+    "$NATS" kv add presence --history 1 --ttl "$PRESENCE_TTL" --storage file --replicas 1 >/dev/null
+    echo "created kv bucket presence (history 1, ttl $PRESENCE_TTL)"
+  fi
+}
+
+# add-user's stream, named by $USER_NAME.
+check_user_stream() { "$NATS" stream info "$(stream_of "$USER_NAME")" >/dev/null 2>&1; }
+ensure_user_stream() { add_stream "$(stream_of "$USER_NAME")" "mbx.$USER_NAME.>"; }
+
 public_url() {
   if [ -n "${MBOX_PUBLIC_URL:-}" ]; then echo "$MBOX_PUBLIC_URL"; return; fi
   l=$( [ -f "$SERVER_CONF" ] && sed -n 's/^[[:space:]]*listen[[:space:]]*[:=][[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$SERVER_CONF" | head -n 1)
@@ -190,18 +231,18 @@ cmd_init() {
   fi
   rebuild_users_conf
   load_admin
-  if reload_server; then wait_auth "$NATS_USER" "$NATS_PASSWORD" || true; fi
+  reloaded=0
+  if [ "$USERS_CHANGED" = 1 ]; then
+    if reload_server; then reloaded=1; wait_auth "$NATS_USER" "$NATS_PASSWORD" || true; fi
+  else
+    echo "users.conf unchanged: no server reload needed"
+  fi
   if ! server_up; then
     echo "server not reachable at $NATS_URL as $ADMIN_USER: start nats-server (see server/install.sh), then run '$0 init' again to create the streams."
     return 0
   fi
-  add_stream MBX_ALL 'mbx.all.*'
-  if "$NATS" kv info presence >/dev/null 2>&1; then
-    echo "kv bucket presence already exists (kept)"
-  else
-    "$NATS" kv add presence --history 1 --ttl "$PRESENCE_TTL" --storage file --replicas 1 >/dev/null
-    echo "created kv bucket presence (history 1, ttl $PRESENCE_TTL)"
-  fi
+  ensure_base
+  if [ "$reloaded" = 1 ]; then settle check_base ensure_base; fi
 }
 
 cmd_add_user() {
@@ -215,7 +256,9 @@ cmd_add_user() {
   rebuild_users_conf
   reload_server || die "user written to $USERS_DIR/$name.conf, but the server must be running to create the stream; start it and re-run add-user after remove-user"
   wait_auth "$name" "$pw" || die "the server did not accept the new user after reload; check its log"
-  add_stream "$(stream_of "$name")" "mbx.$name.>"
+  USER_NAME=$name
+  ensure_user_stream
+  settle check_user_stream ensure_user_stream
   url=$(public_url)
   echo
   echo "Created mailbox user '$name'. Send them this line privately (it contains their password);"
