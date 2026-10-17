@@ -18657,6 +18657,7 @@ async function openReceiver({
   hostPid = null,
   env = process.env,
   keepTransport = false,
+  signal: signal2,
   onMessage,
   onStatus = () => {
   },
@@ -18672,7 +18673,13 @@ async function openReceiver({
   let streamAc = null;
   let reconnectRequested = false;
   const timers = [];
-  const cur = readCursor(sid, env) || { cursor: await transport.now(), seen: {} };
+  const abandoned = new Promise((resolve) => {
+    if (signal2?.aborted) resolve(void 0);
+    else signal2?.addEventListener("abort", () => resolve(void 0), { once: true });
+  });
+  const unlessAbandoned = (p) => signal2 ? Promise.race([p, abandoned]) : p;
+  const saved = readCursor(sid, env);
+  const cur = saved || { cursor: await unlessAbandoned(transport.now()), seen: {} };
   const seen = new Map(Object.entries(cur.seen || {}));
   let cursor = cur.cursor;
   const persist = () => {
@@ -18699,7 +18706,18 @@ async function openReceiver({
     () => {
     }
   );
-  await post("announce", 5e3);
+  await unlessAbandoned(post("announce", 5e3));
+  if (signal2?.aborted) {
+    return {
+      state: () => st,
+      commit,
+      stop: async ({ depart = false } = {}) => {
+        if (depart) await post("depart", 2e3);
+        if (!keepTransport) await transport.close?.().catch(() => {
+        });
+      }
+    };
+  }
   timers.push(setInterval(() => void post("heartbeat", 5e3), opt.heartbeatMs));
   let lastMtime = 0;
   try {
@@ -18820,7 +18838,7 @@ import fs5 from "node:fs";
 import path5 from "node:path";
 
 // src/core/version.ts
-var BUILD_VERSION = true ? "0.5.3" : "0.0.0-dev";
+var BUILD_VERSION = true ? "0.5.4" : "0.0.0-dev";
 function ownVersion(env = process.env) {
   return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
 }
@@ -20004,18 +20022,6 @@ function createTransport(cfg, { multiplex = false } = {}) {
       a: given?.a ?? null,
       t: given?.t ?? (/* @__PURE__ */ new Date()).toISOString()
     };
-    let nc;
-    let mux = null;
-    try {
-      if (multiplex) {
-        mux = await conn();
-        nc = mux.nc;
-      } else {
-        nc = await (0, import_transport_node.connect)(connOpts({ pingInterval: 2e4, maxPingOut: 2 }));
-      }
-    } catch (e) {
-      throw tag(e);
-    }
     let stopped = false;
     let fail2;
     const failed = new Promise((_, rej) => fail2 = rej);
@@ -20026,6 +20032,27 @@ function createTransport(cfg, { multiplex = false } = {}) {
       fail2(Object.assign(new Error("aborted"), { name: "AbortError" }));
     };
     signal2?.addEventListener("abort", onAbort, { once: true });
+    const step = (p) => Promise.race([p, failed]);
+    let nc;
+    let mux = null;
+    try {
+      if (multiplex) {
+        mux = await step(conn());
+        nc = mux.nc;
+      } else {
+        const connecting = (0, import_transport_node.connect)(connOpts({ pingInterval: 2e4, maxPingOut: 2 }));
+        try {
+          nc = await step(connecting);
+        } catch (e) {
+          void connecting.then((c) => c.close()).catch(() => {
+          });
+          throw e;
+        }
+      }
+    } catch (e) {
+      signal2?.removeEventListener("abort", onAbort);
+      throw tag(e);
+    }
     if (mux) {
       mux.subs.add(fail2);
       if (nc.isClosed()) fail2(new Error("connection closed"));
@@ -20063,10 +20090,10 @@ function createTransport(cfg, { multiplex = false } = {}) {
     };
     try {
       const js = (0, import_jetstream.jetstream)(nc, { checkAPI: false, timeout: 1e4 });
-      const jsm = await (0, import_jetstream.jetstreamManager)(nc, { checkAPI: false, timeout: 1e4 });
+      const jsm = await step((0, import_jetstream.jetstreamManager)(nc, { checkAPI: false, timeout: 1e4 }));
       let info = null;
       try {
-        info = await jsm.consumers.info(ownStream, name);
+        info = await step(jsm.consumers.info(ownStream, name));
       } catch (e) {
         if (!isNotFound(e)) throw tag(e);
       }
@@ -20075,27 +20102,31 @@ function createTransport(cfg, { multiplex = false } = {}) {
           ...info.config.filter_subjects || (info.config.filter_subject ? [info.config.filter_subject] : [])
         ].sort();
         if (JSON.stringify(have) !== JSON.stringify(filters) || info.config.ack_wait !== ackWait) {
-          await jsm.consumers.update(ownStream, name, {
-            filter_subjects: filters,
-            ack_wait: ackWait
-          });
+          await step(
+            jsm.consumers.update(ownStream, name, {
+              filter_subjects: filters,
+              ack_wait: ackWait
+            })
+          );
         }
       } else {
         const start = cur.u !== null && cur.u !== void 0 ? { deliver_policy: "by_start_sequence", opt_start_seq: Number(cur.u) + 1 } : { deliver_policy: "by_start_time", opt_start_time: cur.t };
-        await jsm.consumers.add(ownStream, {
-          name,
-          durable_name: name,
-          description: `mailbox session ${String(session).slice(0, 64)}`,
-          filter_subjects: filters,
-          ack_policy: "explicit",
-          ack_wait: ackWait,
-          max_deliver: -1,
-          inactive_threshold: INACTIVE_NS,
-          replay_policy: "instant",
-          ...start
-        });
+        await step(
+          jsm.consumers.add(ownStream, {
+            name,
+            durable_name: name,
+            description: `mailbox session ${String(session).slice(0, 64)}`,
+            filter_subjects: filters,
+            ack_policy: "explicit",
+            ack_wait: ackWait,
+            max_deliver: -1,
+            inactive_threshold: INACTIVE_NS,
+            replay_policy: "instant",
+            ...start
+          })
+        );
       }
-      const consumer = await js.consumers.get(ownStream, name);
+      const consumer = await step(js.consumers.get(ownStream, name));
       messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
       directLoop = (async () => {
         for await (const m of messages) {
@@ -20182,8 +20213,8 @@ function createTransport(cfg, { multiplex = false } = {}) {
           }
         };
         wakeSub = nc.subscribe(`${PREFIX}.all.*`, { callback: () => void catchUp(3) });
-        await nc.flush();
-        await catchUp();
+        await step(nc.flush());
+        await step(catchUp());
         const iv = setInterval(() => void catchUp(), broadcastPollMs);
         iv.unref?.();
         failed.catch(() => clearInterval(iv));
@@ -20415,6 +20446,12 @@ function createTransport(cfg, { multiplex = false } = {}) {
 
 // src/core/wait.ts
 var MAX_WAIT_MS = 2 ** 31 - 1;
+var LEAVE_MS = 5e3;
+async function within(p, ms) {
+  let t;
+  await Promise.race([p, new Promise((r) => t = setTimeout(r, ms))]);
+  clearTimeout(t);
+}
 var handled2 = (e) => {
   const p = Promise.reject(e);
   p.catch(() => {
@@ -20436,15 +20473,25 @@ async function runWait({
     lockPollMs: Number(env.AGENT_MAILBOX_WAIT_POLL_MS) || 250,
     drainMs: Number(env.AGENT_MAILBOX_DRAIN_MS) || 300,
     maxChars: Number(env.AGENT_MAILBOX_WAIT_MAX_CHARS) || 8e3,
+    // Test-only fault injection (AGENT_MAILBOX_FAULT), never set in production:
+    // "crash-after-write"; "slow-open:<ms>" (the receiver's presence announcement takes <ms>
+    // longer, so the waiter is superseded while its receiver is still opening); "slow-subscribe:<ms>"
+    // (the receiver's subscription starts <ms> late, deaf to the stop, so the waiter is superseded
+    // with a receiver that is open but cannot stop promptly).
     fault: env.AGENT_MAILBOX_FAULT || ""
-    // test-only: "crash-after-write"
   };
+  const faultMs = (name) => Number(new RegExp(`^${name}:(\\d+)$`).exec(opt.fault)?.[1]) || 0;
+  const slowOpenMs = faultMs("slow-open");
+  const slowSubscribeMs = faultMs("slow-subscribe");
   const st = await ensureSession({ sid, cfg, transport, cwd, hostPid, env });
   const lock = claimWaitLock(sid, env);
   const yielded = async () => {
     lock.release();
-    await transport.close?.().catch(() => {
-    });
+    await within(
+      transport.close?.().catch(() => {
+      }),
+      LEAVE_MS
+    );
     return "idle";
   };
   if (watcherPid(sid, env)) return yielded();
@@ -20458,14 +20505,18 @@ async function runWait({
   let doneResolve;
   const done = new Promise((r) => doneResolve = r);
   let rx = null;
+  const opening = new AbortController();
+  let opened = null;
   function finish(result2, { depart = false } = {}) {
     if (finishing) return finishing;
     finishing = (async () => {
       clearTimeout(drainTimer);
       timers.forEach((t) => clearTimeout(t));
-      const receiving = rx?.stop({ depart });
+      opening.abort();
+      const receiving = (rx ?? await opened?.catch(() => null))?.stop({ depart });
       for (const b of batch.splice(0)) b.reject(new Error("not delivered"));
-      await receiving;
+      if (result2 === "idle") await within(receiving, LEAVE_MS);
+      else await receiving;
       lock.release();
       doneResolve(result2);
     })();
@@ -20521,23 +20572,48 @@ async function runWait({
   const onSignal = () => yieldNow({ depart: hostGone() });
   const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
   for (const sig of signals) process.on(sig, onSignal);
-  rx = await openReceiver({
-    cfg,
-    transport,
-    sid,
-    st,
-    agent,
-    hostPid,
-    env,
-    onMessage,
-    onHostGone: () => yieldNow({ depart: true })
-  });
   const poll = setInterval(() => {
     if (!lock.mine() || watcherPid(sid, env)) yieldNow();
     else lock.touch();
   }, opt.lockPollMs);
   poll.unref?.();
   timers.push(setTimeout(() => yieldNow(), Math.min(Math.max(1, maxWaitMs), MAX_WAIT_MS)));
+  const late = (ms) => new Promise((r) => setTimeout(r, ms));
+  const slowTransport = slowOpenMs || slowSubscribeMs ? {
+    ...transport,
+    presence: {
+      ...transport.presence,
+      announce: async (...args) => {
+        await late(slowOpenMs);
+        return transport.presence.announce(...args);
+      }
+    },
+    subscribe: async (...args) => {
+      await late(slowSubscribeMs);
+      return transport.subscribe(...args);
+    }
+  } : transport;
+  opened = openReceiver({
+    cfg,
+    transport: slowTransport,
+    sid,
+    st,
+    agent,
+    hostPid,
+    env,
+    signal: opening.signal,
+    onMessage,
+    onHostGone: () => yieldNow({ depart: true })
+  });
+  try {
+    rx = await opened;
+  } catch (e) {
+    clearInterval(poll);
+    for (const sig of signals) process.off(sig, onSignal);
+    timers.forEach((t) => clearTimeout(t));
+    lock.release();
+    throw e;
+  }
   const result = await done;
   clearInterval(poll);
   for (const sig of signals) process.off(sig, onSignal);
@@ -20818,7 +20894,7 @@ program2.command("wait").description(
         (resolve, reject) => process.stderr.write(text, (err) => err ? reject(err) : resolve())
       )
     });
-    await closeTransports();
+    await Promise.race([closeTransports(), new Promise((r) => setTimeout(r, 2e3).unref())]);
     process.exit(result === "mail" ? 2 : 0);
   } catch (e) {
     quit(explainError(e));

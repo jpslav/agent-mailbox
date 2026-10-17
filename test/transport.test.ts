@@ -1,6 +1,7 @@
 // NATS transport: pure parts (address <-> subject mapping, names) and the seam itself.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import {
   consumerName,
@@ -82,5 +83,36 @@ describe('transport seam', () => {
   });
   it('the transport directory holds only the NATS transport', () => {
     assert.deepEqual(fs.readdirSync(path.join(ROOT, 'src/core/transport')), ['nats.ts']);
+  });
+});
+
+describe('subscribe', () => {
+  it('an abort while it is still connecting ends it at once with an AbortError', async () => {
+    // A server that accepts the connection and never answers: connecting hangs until its timeout.
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((s) => void sockets.add(s));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as net.AddressInfo; // listening on TCP: an AddressInfo
+    try {
+      const t = createTransport({
+        servers: [`nats://127.0.0.1:${port}`],
+        user: 'u',
+        password: 'p',
+      });
+      const ac = new AbortController();
+      const sub = t.subscribe({
+        session: 's',
+        addresses: ['u.h.l'],
+        signal: ac.signal,
+        onMessage: () => undefined,
+      });
+      while (!sockets.size) await new Promise((r) => setTimeout(r, 10)); // it is connecting
+      ac.abort();
+      // Without honouring the abort it would end with the connect timeout's error instead.
+      await assert.rejects(sub, { name: 'AbortError' });
+    } finally {
+      for (const s of sockets) s.destroy();
+      server.close();
+    }
   });
 });

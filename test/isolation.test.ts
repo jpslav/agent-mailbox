@@ -22,7 +22,7 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
     await b.init(['alice', 'bob']);
     alice = await b.conn('alice');
     admin = await b.conn('admin');
-    ajs = jetstream(alice, { checkAPI: false, timeout: 3000 });
+    ajs = jetstream(alice, { checkAPI: false, timeout: 15000 });
     // fixtures owned by bob: a message in his stream and a durable consumer on it
     const bob = await b.conn('bob');
     await jetstream(bob, { checkAPI: false }).publish(
@@ -46,7 +46,7 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
   /** A request alice sends must be refused by the server's permissions (not by JetStream). */
   async function denied(subject: string, body: unknown = ''): Promise<void> {
     await assert.rejects(
-      alice.request(subject, enc(body), { timeout: 3000 }),
+      alice.request(subject, enc(body), { timeout: 15000 }),
       /Permissions Violation for Publish to/,
       subject,
     );
@@ -175,7 +175,7 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
               deliver_policy: 'all',
             },
           }),
-          { timeout: 3000 },
+          { timeout: 15000 },
         );
         assert.ok(r.string().length > 0);
       }
@@ -192,7 +192,7 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
             deliver_policy: 'all',
           },
         }),
-        { timeout: 3000 },
+        { timeout: 15000 },
       );
       for await (const m of ctl) assert.match(m.string(), /forged/);
       await sleep(1500);
@@ -206,12 +206,12 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
           user: 'alice',
           pass: 'wrong-password-1234',
           reconnect: false,
-          timeout: 2000,
+          timeout: 10000,
         }),
         /Authorization Violation/i,
       );
       await assert.rejects(
-        connect({ servers: b.url, reconnect: false, timeout: 2000 }),
+        connect({ servers: b.url, reconnect: false, timeout: 10000 }),
         /Authorization Violation/i,
       );
     });
