@@ -388,7 +388,9 @@ per session: no waiter, no running hook, no background task, nothing for the mod
   daemon to hand over and starts the new one, which waits for the old one to exit (and kills it
   after 20 s if it does not). The old daemon stops taking mail, finishes the delivery in flight,
   hands everything else back to the server in order and exits; the new one delivers it, each
-  message once. The same version from another install path, or an older version, leaves the
+  message once, and holds newer mail until it has all of it, so direct mail stays in send order
+  (after a crash, newer mail can wait up to about a minute for that; see `docs/PROTOCOL.md`,
+  "Delivery order"). The same version from another install path, or an older version, leaves the
   running daemon alone. The steps are logged (`handover requested`, `... exited; taking over`,
   `started (pid ..., version ...)`).
 - **SessionEnd** (`mbox hook claude-code session-end`, also run by `/clear`): removes the

@@ -217,7 +217,9 @@ export interface SubscribeOptions {
   /**
    * Ending the subscription stops taking deliveries, waits up to this long for the ones already
    * handed out to be acknowledged or handed back (default 3 s), then hands back the rest, oldest
-   * first, so the session's next subscriber gets them before anything newer.
+   * first. A subscription that starts while earlier deliveries are still unacknowledged holds
+   * what it receives until they are back (or a little past redeliverAfterMs), so the session's
+   * mail reaches onMessage in stream order across subscribers.
    */
   settleMs?: number;
 }
@@ -283,4 +285,22 @@ export interface Transport {
 export interface TransportOptions {
   /** A long-running process serving many sessions: every subscription shares one connection. */
   multiplex?: boolean;
+  /** Test-only fault injection (see TransportFaults); never set outside the tests. */
+  faults?: TransportFaults;
+}
+
+/**
+ * Test-only knobs that force the orderings a handover can produce, whatever the machine's speed.
+ * Set from AGENT_MAILBOX_TEST_* environment variables by the CLI.
+ */
+export interface TransportFaults {
+  /**
+   * An ending subscription loses the newest N messages it would hand back, as if the server had
+   * sent them in the instant the pull ended: they come back only after redeliverAfterMs.
+   */
+  loseHandBack?: number;
+  /** An ending subscription waits this long before handing back. */
+  handBackDelayMs?: number;
+  /** A starting subscription waits this long after reading its durable position, before taking mail. */
+  startDelayMs?: number;
 }

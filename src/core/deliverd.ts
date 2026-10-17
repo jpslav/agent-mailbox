@@ -22,7 +22,8 @@
 //     waits for the older one to hand over, and terminates it after handoverMs if it does not. The
 //     old one hands over gracefully on SIGTERM: it stops taking messages, finishes the delivery in
 //     flight and its acknowledgement, hands back everything else unacknowledged and in order (so
-//     the new daemon's receivers, on the same durable per-session positions, get it first),
+//     the new daemon's receivers, on the same durable per-session positions, get it first; the
+//     transport holds newer mail until it is all back, so it is shown in stream order),
 //     releases the lock and exits. Delivered ids are on disk before they are acknowledged, so the
 //     new daemon never shows one again.
 //

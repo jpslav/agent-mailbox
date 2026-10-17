@@ -23,13 +23,18 @@
 //       redelivery (soon, not after redeliverAfterMs). Ending the subscription (signal) first
 //       stops taking deliveries, then waits up to `settleMs` (default 3 s) for the ones already
 //       handed to onMessage to be acknowledged or handed back, then hands back everything not
-//       acknowledged at once and oldest first, so the session's next subscriber (a new delivery
-//       daemon after a handover) gets it in order, before anything newer. One gap remains: a
-//       delivery the server sends in the instant the subscription ends is seen by nobody and
-//       comes back after redeliverAfterMs. Broadcasts have no server-side acknowledgement: the
-//       caller's saved cursor is their position. onOpen() is called each time the subscription is
-//       (re)established. The promise never resolves: it rejects when the connection ends, or
-//       with an AbortError when `signal` aborts. Errors with `.authProblem === true` mean
+//       acknowledged at once and oldest first. A delivery the server sends in the instant the
+//       subscription ends is seen by nobody and comes back after redeliverAfterMs.
+//       Order: mail for the session's addresses reaches onMessage in stream order (the order the
+//       server stored it; for one sender, the order of sending), also across subscribers. A
+//       subscription that starts while earlier deliveries are still unacknowledged (handed back,
+//       lost in that instant, or held by a reader that crashed) holds everything it receives
+//       until they are all back, then offers it sorted; it gives up waiting a little after
+//       redeliverAfterMs (redeliverAfterMs + max(5 s, half of it)) and offers what it has.
+//       Broadcasts are in order among themselves, not relative to direct mail; they have no
+//       server-side acknowledgement: the caller's saved cursor is their position. onOpen() is
+//       called each time the subscription is (re)established. The promise never resolves: it
+//       rejects when the connection ends, or with an AbortError when `signal` aborts. Errors with `.authProblem === true` mean
 //       credentials/permissions. Calling subscribe again with different addresses re-targets the
 //       same durable position (aliases). An unacknowledged delivery is redelivered after
 //       `redeliverAfterMs` (default 60 s).
@@ -53,9 +58,10 @@
 //   diagnose({user, host}) -> [{ok, name, hint?}]       connectivity / auth / permission self-check
 //   close()                          release connections (call before exiting)
 //
-// createTransport(cfg, {multiplex}): with multiplex: true (a long-running process serving many
-// sessions), every subscribe() and every request-style call share ONE connection; ending a
+// createTransport(cfg, {multiplex, faults}): with multiplex: true (a long-running process serving
+// many sessions), every subscribe() and every request-style call share ONE connection; ending a
 // subscription leaves it open, and close() releases it. Without it, each subscribe() has its own.
+// `faults` are test-only knobs (TransportFaults in types.ts).
 //
 // delivery = {id, time(unix s), to ('all' | address), sender (server-verified user), payload
 //             (string as published), cursor}
@@ -247,6 +253,7 @@ export function validateServer(server: string): void {
 }
 
 const td = new TextDecoder();
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- transport
 
@@ -299,7 +306,7 @@ interface Shared {
 
 export function createTransport(
   cfg: TransportConfig,
-  { multiplex = false }: TransportOptions = {},
+  { multiplex = false, faults = {} }: TransportOptions = {},
 ): Transport {
   const servers = Array.isArray(cfg.servers) ? cfg.servers : [cfg.servers];
   if (!servers.length) throw new Error('no server configured');
@@ -579,6 +586,14 @@ export function createTransport(
     const pendingAcks = new Set<Promise<unknown>>();
     // Ending: deliveries not acknowledged, handed back together and oldest first (see `finally`).
     const handBack: JsMsg[] = [];
+    // Mail held until the messages owed from the session's previous reader are back (see below).
+    let gate: {
+      held: Map<number, JsMsg>; // by stream sequence; a redelivery replaces the older copy
+      back: Set<number>; // owed sequences received
+      timer: ReturnType<typeof setTimeout>;
+    } | null = null;
+    // Offering what the gate held; later mail waits for it.
+    let released: Promise<void> = Promise.resolve();
     let handedBack = false;
     const giveBack = (m: JsMsg): void => {
       if (!handedBack) {
@@ -645,57 +660,101 @@ export function createTransport(
         );
       }
       const consumer = await step(js.consumers.get(ownStream, name));
-      messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
 
+      // In-order hand-over between readers. Messages the session's previous reader received and
+      // never acknowledged (a daemon that handed over, was killed, or lost its connection) are
+      // still owed to the session: handed back, they return at once (though not always in the
+      // order they were handed back); otherwise the server sends them again after ack_wait, and
+      // anything newer it sends in the meantime would overtake them. So until every owed message
+      // is back (or a deadline a little past ack_wait passes), what arrives is held, and then all
+      // of it goes to onMessage in stream order. After that, arrival order is stream order: this
+      // subscription is the session's only reader and gets new mail in stream order.
+      const owed = info?.num_ack_pending ?? 0;
+      const owedUpTo = info?.delivered.stream_seq ?? 0;
+      if (faults.startDelayMs) await step(sleep(faults.startDelayMs)); // test-only: a slow start
+
+      // One message to onMessage (or, ending, back to the server).
+      const take = async (m: JsMsg): Promise<void> => {
+        // Ending: what the client had already received goes back unseen.
+        if (stopped) {
+          giveBack(m);
+          return;
+        }
+        // What onMessage resolved to: nothing, or {ackAfter} to defer the acknowledgement.
+        const res = (await serial(async () => {
+          cur.u = m.seq;
+          return onMessage(
+            delivery(
+              {
+                subject: m.subject,
+                seq: m.seq,
+                stream: ownStream,
+                timeMs: Math.floor(m.info.timestampNanos / NS),
+                data: m.data,
+                msgId: m.headers?.get('Nats-Msg-Id') || null,
+              },
+              { ...cur },
+            ),
+          );
+        })) as { ackAfter?: Promise<unknown> } | null | undefined;
+        if (
+          res &&
+          typeof res === 'object' &&
+          res.ackAfter &&
+          typeof res.ackAfter.then === 'function'
+        ) {
+          // Deferred: ack once the caller has delivered it; on rejection hand it back (while
+          // running, with a short delay, so this subscription does not get it straight back;
+          // while ending, with the rest, in order).
+          const settled = res.ackAfter.then(
+            () => m.ackAck({ timeout: 5000 }).catch(() => {}),
+            () => {
+              if (stopped) return giveBack(m);
+              try {
+                m.nak(1000);
+              } catch {
+                /* connection gone: redelivered after ack_wait */
+              }
+            },
+          );
+          pendingAcks.add(settled);
+          void settled.finally(() => pendingAcks.delete(settled));
+          return;
+        }
+        await m.ackAck({ timeout: 5000 }).catch(() => {});
+      };
+
+      // Everything held, in stream order, ahead of whatever arrives next.
+      const openGate = (): void => {
+        if (!gate) return;
+        clearTimeout(gate.timer);
+        const ready = [...gate.held.values()].sort((a, b) => a.seq - b.seq);
+        gate = null;
+        released = (async () => {
+          for (const m of ready) await take(m);
+        })();
+        released.catch((e) => fail(tag(e)));
+      };
+      if (owed > 0) {
+        gate = {
+          held: new Map(),
+          back: new Set(),
+          timer: setTimeout(openGate, redeliverAfterMs + Math.max(5000, redeliverAfterMs / 2)),
+        };
+        gate.timer.unref?.();
+      }
+
+      messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
       directLoop = (async () => {
         for await (const m of messages) {
-          // Ending: what the client had already received goes back unseen.
-          if (stopped) {
-            giveBack(m);
+          if (gate && !stopped) {
+            gate.held.set(m.seq, m);
+            if (m.seq <= owedUpTo) gate.back.add(m.seq);
+            if (gate.back.size >= owed) openGate();
             continue;
           }
-          // What onMessage resolved to: nothing, or {ackAfter} to defer the acknowledgement.
-          const res = (await serial(async () => {
-            cur.u = m.seq;
-            return onMessage(
-              delivery(
-                {
-                  subject: m.subject,
-                  seq: m.seq,
-                  stream: ownStream,
-                  timeMs: Math.floor(m.info.timestampNanos / NS),
-                  data: m.data,
-                  msgId: m.headers?.get('Nats-Msg-Id') || null,
-                },
-                { ...cur },
-              ),
-            );
-          })) as { ackAfter?: Promise<unknown> } | null | undefined;
-          if (
-            res &&
-            typeof res === 'object' &&
-            res.ackAfter &&
-            typeof res.ackAfter.then === 'function'
-          ) {
-            // Deferred: ack once the caller has delivered it; on rejection hand it back (while
-            // running, with a short delay, so this subscription does not get it straight back;
-            // while ending, with the rest, in order).
-            const settled = res.ackAfter.then(
-              () => m.ackAck({ timeout: 5000 }).catch(() => {}),
-              () => {
-                if (stopped) return giveBack(m);
-                try {
-                  m.nak(1000);
-                } catch {
-                  /* connection gone: redelivered after ack_wait */
-                }
-              },
-            );
-            pendingAcks.add(settled);
-            void settled.finally(() => pendingAcks.delete(settled));
-            continue;
-          }
-          await m.ackAck({ timeout: 5000 }).catch(() => {});
+          await released;
+          await take(m);
         }
         throw new Error('message stream ended');
       })();
@@ -762,6 +821,12 @@ export function createTransport(
       stopped = true;
       signal?.removeEventListener('abort', onAbort);
       fail(new Error('closed'));
+      // Mail still held for the owed messages was never offered: it goes back with the rest.
+      if (gate) {
+        clearTimeout(gate.timer);
+        handBack.push(...gate.held.values());
+        gate = null;
+      }
       // 1. Take nothing new. What the client already holds still runs through directLoop, which
       //    collects it for handing back; the loop ends after it.
       try {
@@ -777,12 +842,18 @@ export function createTransport(
       if (!nc.isClosed()) {
         // 2. Let the deliveries already handed out settle: acknowledged, or handed back.
         const settle = new Promise((r) => setTimeout(r, settleMs).unref?.());
-        await Promise.race([directLoop ? directLoop.catch(() => {}) : null, settle]);
+        await Promise.race([
+          Promise.all([directLoop?.catch(() => {}), released.catch(() => {})]),
+          settle,
+        ]);
         if (pendingAcks.size) await Promise.race([Promise.allSettled([...pendingAcks]), settle]);
         // 3. Hand back the rest at once, oldest first, and make sure the server has it before the
         //    caller lets the session's next subscriber in.
+        if (faults.handBackDelayMs) await sleep(faults.handBackDelayMs); // test-only: a late hand-back
         handedBack = true;
-        for (const m of handBack.sort((a, b) => a.seq - b.seq)) {
+        handBack.sort((a, b) => a.seq - b.seq);
+        if (faults.loseHandBack) handBack.splice(-faults.loseHandBack); // test-only: the stop gap
+        for (const m of handBack) {
           try {
             m.nak();
           } catch {

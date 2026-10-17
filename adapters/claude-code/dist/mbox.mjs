@@ -19842,7 +19842,8 @@ function validateServer(server) {
     throw new Error(`server must look like nats://host:4222, got "${server}"`);
 }
 var td = new TextDecoder();
-function createTransport(cfg, { multiplex = false } = {}) {
+var sleep3 = (ms) => new Promise((r) => setTimeout(r, ms));
+function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
   const servers = Array.isArray(cfg.servers) ? cfg.servers : [cfg.servers];
   if (!servers.length) throw new Error("no server configured");
   servers.forEach(validateServer);
@@ -20070,6 +20071,8 @@ function createTransport(cfg, { multiplex = false } = {}) {
     let directLoop = null;
     const pendingAcks = /* @__PURE__ */ new Set();
     const handBack = [];
+    let gate = null;
+    let released = Promise.resolve();
     let handedBack = false;
     const giveBack = (m) => {
       if (!handedBack) {
@@ -20127,47 +20130,78 @@ function createTransport(cfg, { multiplex = false } = {}) {
         );
       }
       const consumer = await step(js.consumers.get(ownStream, name));
+      const owed = info?.num_ack_pending ?? 0;
+      const owedUpTo = info?.delivered.stream_seq ?? 0;
+      if (faults.startDelayMs) await step(sleep3(faults.startDelayMs));
+      const take = async (m) => {
+        if (stopped) {
+          giveBack(m);
+          return;
+        }
+        const res = await serial(async () => {
+          cur.u = m.seq;
+          return onMessage(
+            delivery(
+              {
+                subject: m.subject,
+                seq: m.seq,
+                stream: ownStream,
+                timeMs: Math.floor(m.info.timestampNanos / NS),
+                data: m.data,
+                msgId: m.headers?.get("Nats-Msg-Id") || null
+              },
+              { ...cur }
+            )
+          );
+        });
+        if (res && typeof res === "object" && res.ackAfter && typeof res.ackAfter.then === "function") {
+          const settled = res.ackAfter.then(
+            () => m.ackAck({ timeout: 5e3 }).catch(() => {
+            }),
+            () => {
+              if (stopped) return giveBack(m);
+              try {
+                m.nak(1e3);
+              } catch {
+              }
+            }
+          );
+          pendingAcks.add(settled);
+          void settled.finally(() => pendingAcks.delete(settled));
+          return;
+        }
+        await m.ackAck({ timeout: 5e3 }).catch(() => {
+        });
+      };
+      const openGate = () => {
+        if (!gate) return;
+        clearTimeout(gate.timer);
+        const ready = [...gate.held.values()].sort((a, b) => a.seq - b.seq);
+        gate = null;
+        released = (async () => {
+          for (const m of ready) await take(m);
+        })();
+        released.catch((e) => fail2(tag(e)));
+      };
+      if (owed > 0) {
+        gate = {
+          held: /* @__PURE__ */ new Map(),
+          back: /* @__PURE__ */ new Set(),
+          timer: setTimeout(openGate, redeliverAfterMs + Math.max(5e3, redeliverAfterMs / 2))
+        };
+        gate.timer.unref?.();
+      }
       messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
       directLoop = (async () => {
         for await (const m of messages) {
-          if (stopped) {
-            giveBack(m);
+          if (gate && !stopped) {
+            gate.held.set(m.seq, m);
+            if (m.seq <= owedUpTo) gate.back.add(m.seq);
+            if (gate.back.size >= owed) openGate();
             continue;
           }
-          const res = await serial(async () => {
-            cur.u = m.seq;
-            return onMessage(
-              delivery(
-                {
-                  subject: m.subject,
-                  seq: m.seq,
-                  stream: ownStream,
-                  timeMs: Math.floor(m.info.timestampNanos / NS),
-                  data: m.data,
-                  msgId: m.headers?.get("Nats-Msg-Id") || null
-                },
-                { ...cur }
-              )
-            );
-          });
-          if (res && typeof res === "object" && res.ackAfter && typeof res.ackAfter.then === "function") {
-            const settled = res.ackAfter.then(
-              () => m.ackAck({ timeout: 5e3 }).catch(() => {
-              }),
-              () => {
-                if (stopped) return giveBack(m);
-                try {
-                  m.nak(1e3);
-                } catch {
-                }
-              }
-            );
-            pendingAcks.add(settled);
-            void settled.finally(() => pendingAcks.delete(settled));
-            continue;
-          }
-          await m.ackAck({ timeout: 5e3 }).catch(() => {
-          });
+          await released;
+          await take(m);
         }
         throw new Error("message stream ended");
       })();
@@ -20228,6 +20262,11 @@ function createTransport(cfg, { multiplex = false } = {}) {
       stopped = true;
       signal2?.removeEventListener("abort", onAbort);
       fail2(new Error("closed"));
+      if (gate) {
+        clearTimeout(gate.timer);
+        handBack.push(...gate.held.values());
+        gate = null;
+      }
       try {
         messages?.stop();
       } catch {
@@ -20238,11 +20277,18 @@ function createTransport(cfg, { multiplex = false } = {}) {
       }
       if (!nc.isClosed()) {
         const settle = new Promise((r) => setTimeout(r, settleMs).unref?.());
-        await Promise.race([directLoop ? directLoop.catch(() => {
-        }) : null, settle]);
+        await Promise.race([
+          Promise.all([directLoop?.catch(() => {
+          }), released.catch(() => {
+          })]),
+          settle
+        ]);
         if (pendingAcks.size) await Promise.race([Promise.allSettled([...pendingAcks]), settle]);
+        if (faults.handBackDelayMs) await sleep3(faults.handBackDelayMs);
         handedBack = true;
-        for (const m of handBack.sort((a, b) => a.seq - b.seq)) {
+        handBack.sort((a, b) => a.seq - b.seq);
+        if (faults.loseHandBack) handBack.splice(-faults.loseHandBack);
+        for (const m of handBack) {
           try {
             m.nak();
           } catch {
@@ -20747,7 +20793,13 @@ function reviveDeliverd() {
 }
 var transports = [];
 function openTransport(cfg, opts) {
-  const t = createTransport(cfg, opts);
+  const env = process.env;
+  const faults = {
+    loseHandBack: Number(env.AGENT_MAILBOX_TEST_LOSE_HANDBACK) || 0,
+    handBackDelayMs: Number(env.AGENT_MAILBOX_TEST_HANDBACK_DELAY_MS) || 0,
+    startDelayMs: Number(env.AGENT_MAILBOX_TEST_START_DELAY_MS) || 0
+  };
+  const t = createTransport(cfg, { ...opts, faults });
   transports.push(t);
   return t;
 }

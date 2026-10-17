@@ -687,7 +687,12 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     logOf(env)
       .split('\n')
       .filter((l) => pattern.test(l));
-  /** Asserts that the log holds lines matching each pattern, in this order. */
+  /**
+   * Asserts that the log holds lines matching each pattern, in this order. Only for lines one
+   * process writes: the old daemon, the new one and the hook append to the same file, and nothing
+   * orders two processes' lines (the old daemon releases its lock before it logs "stopped", so the
+   * new one's "taking over" can come first).
+   */
   const assertLogOrder = (env: MachineEnv, patterns: RegExp[]): void => {
     const lines = logOf(env).split('\n');
     let from = 0;
@@ -781,17 +786,25 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.notEqual(lock.pid, oldPid);
     assert.equal(lock.version, NEW);
     assert.ok(alive(lock.pid));
-    // Each step is in the log, and the delivery in flight finished after the handover began.
+    // Each step is in the log. The hook's request, the old daemon's steps (the delivery in flight
+    // finished after the handover began) and the new daemon's steps each in their own order.
+    assert.equal(
+      logLines(
+        env,
+        new RegExp(`handover requested: deliverd ${re(OLD)} \\(pid ${oldPid}\\) -> ${re(NEW)}$`),
+      ).length,
+      1,
+    );
     assertLogOrder(env, [
-      new RegExp(`handover requested: deliverd ${re(OLD)} \\(pid ${oldPid}\\) -> ${re(NEW)}$`),
       new RegExp(`stopping \\(SIGTERM; handing over to ${re(NEW)}\\)$`),
       /delivered \d+ messages? to /,
       new RegExp(`stopped \\(pid ${oldPid}, version ${re(OLD)}\\)$`),
+    ]);
+    assertLogOrder(env, [
       new RegExp(`deliverd ${re(OLD)} \\(pid ${oldPid}\\) exited; taking over$`),
       new RegExp(`started \\(pid ${lock.pid}, version ${re(NEW)}\\)$`),
       new RegExp(`serving ${re(address)}$`),
     ]);
-    assert.equal(logLines(env, /handover requested/).length, 1);
     assert.equal(logLines(env, /another deliverd is running/).length, 0);
   });
 
@@ -892,15 +905,131 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       fake.messages().map((m) => m.id),
       ['k1', 'k2', 'k3', 'k4'],
     );
+    assert.equal(logLines(env, /handover requested: /).length, 1);
+    assert.ok(logLines(env, /ignoring SIGTERM \(test fault\)/).length >= 1);
     assertLogOrder(env, [
-      /handover requested: /,
-      /ignoring SIGTERM \(test fault\)/,
       new RegExp(
         `deliverd ${re(OLD)} \\(pid ${oldPid}\\) did not exit within 3 s; terminating it \\(SIGKILL\\)$`,
       ),
       new RegExp(`deliverd ${re(OLD)} \\(pid ${oldPid}\\) was terminated; taking over$`),
       new RegExp(`started \\(pid \\d+, version ${re(NEW)}\\)$`),
     ]);
+  });
+
+  it('mail sent while a killed daemon still owes earlier messages waits for them: all in order', async () => {
+    // A long redelivery interval: the next daemon starts while the killed one's two messages are
+    // still out (unacknowledged and not yet due again), so the server offers the one sent after
+    // them first. The daemon holds it until the two are back.
+    const env = bobMachine({ AGENT_MAILBOX_REDELIVER_MS: '8000' });
+    const sid = 'd-owed-1013';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const { address } = sessionStart(env, sid, projectDir('owed'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
+    await until(() => peers().includes(address), 'announced');
+    const first = daemonPid(env);
+    await pauseAndWait(env, address);
+    await publish(address, ['o1', 'o2']);
+    await until(async () => (await heldCount(sid)) === 2, 'both held by the daemon');
+    if (first) process.kill(first, 'SIGKILL');
+    await until(() => !alive(first), 'daemon killed');
+    assert.equal(mbox(['resume'], { env }).code, 0);
+    await publish(address, ['o3']);
+    sessionStart(env, sid, projectDir('owed'), { socket: fake.path, hostPid: host.pid });
+    await until(() => alive(daemonPid(env)) && daemonPid(env) !== first, 'daemon restarted');
+    await fake.waitFor((f) => f.messages().length === 3, 30000);
+    await until(async () => (await ackPending(sid)) === 0, 'all acknowledged', 20000);
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ['o1', 'o2', 'o3'],
+      'every message once, in send order',
+    );
+  });
+
+  it('a handover that loses the newest handed-back message (the stop gap): newer mail waits for it, all in order', async () => {
+    // The old daemon hands h1 and h2 back but loses h3 (a test knob), as if the server had sent h3
+    // in the instant the old daemon stopped listening: h3 comes back only after the redelivery
+    // interval. The new daemon starts slowly (another knob), and h4 is sent meanwhile, so the
+    // server offers it before h3.
+    const env = bobMachine({ AGENT_MAILBOX_REDELIVER_MS: '4000' });
+    const sid = 'd-gap-1014';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const { address } = sessionStart(
+      { ...as(env, OLD), AGENT_MAILBOX_TEST_LOSE_HANDBACK: '1' },
+      sid,
+      projectDir('gap'),
+      { socket: fake.path, hostPid: host.pid },
+    );
+    await until(() => alive(daemonPid(env)), 'old daemon started');
+    const oldPid = lockOf(env).pid;
+    await until(() => peers().includes(address), 'announced');
+    await pauseAndWait(env, address);
+    await publish(address, ['h1', 'h2', 'h3']);
+    await until(async () => (await heldCount(sid)) === 3, 'all three held by the old daemon');
+
+    sessionStart(
+      { ...as(env, NEW), AGENT_MAILBOX_TEST_START_DELAY_MS: '3000' },
+      sid,
+      projectDir('gap'),
+      {
+        socket: fake.path,
+        hostPid: host.pid,
+      },
+    );
+    await until(() => !alive(oldPid), 'old daemon exited', 30000);
+    assert.equal(mbox(['resume'], { env }).code, 0);
+    await until(
+      () => logLines(env, new RegExp(`^\\S+ serving ${re(address)}$`)).length === 2,
+      'new daemon serving',
+      20000,
+    );
+    await publish(address, ['h4']); // while the new daemon is still starting
+    await fake.waitFor((f) => f.messages().length === 4, 30000);
+    await until(async () => (await ackPending(sid)) === 0, 'all acknowledged', 20000);
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ['h1', 'h2', 'h3', 'h4'],
+      'every message once, in send order',
+    );
+  });
+
+  it('a hand-back that comes after the redelivery interval keeps the order', async () => {
+    // The old daemon hands back 3 s late (a test knob), after the 2 s redelivery interval: the
+    // server has already queued l1 and l2 again, and l3 is sent in between.
+    const env = bobMachine();
+    const sid = 'd-late-1015';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const { address } = sessionStart(
+      { ...as(env, OLD), AGENT_MAILBOX_TEST_HANDBACK_DELAY_MS: '3000' },
+      sid,
+      projectDir('late'),
+      { socket: fake.path, hostPid: host.pid },
+    );
+    await until(() => alive(daemonPid(env)), 'old daemon started');
+    const oldPid = lockOf(env).pid;
+    await until(() => peers().includes(address), 'announced');
+    await pauseAndWait(env, address);
+    await publish(address, ['l1', 'l2']);
+    await until(async () => (await heldCount(sid)) === 2, 'both held by the old daemon');
+
+    sessionStart(as(env, NEW), sid, projectDir('late'), { socket: fake.path, hostPid: host.pid });
+    await until(() => /stopping \(SIGTERM/.test(logOf(env)), 'the old daemon is handing over');
+    await publish(address, ['l3']); // while the hand-back is delayed
+    await until(() => !alive(oldPid), 'old daemon exited', 30000);
+    assert.equal(mbox(['resume'], { env }).code, 0);
+    await fake.waitFor((f) => f.messages().length === 3, 30000);
+    await publish(address, ['l4']);
+    await fake.waitFor((f) => f.messages().length === 4, 20000);
+    await until(async () => (await ackPending(sid)) === 0, 'all acknowledged', 20000);
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ['l1', 'l2', 'l3', 'l4'],
+      'every message once, in send order',
+    );
   });
 
   it('two sessions starting together with a newer version start one new daemon', async () => {

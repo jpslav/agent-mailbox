@@ -168,3 +168,32 @@ context, decision, why.
 - **Why:** Deterministic fault injection reproduces a race every time, where load only makes it
   likely, and it costs nobody their machine. The two-week rule for new dependency versions is
   likewise enforced by Dependabot's `cooldown` (14 days) rather than by memory.
+
+## Delivery order across readers
+
+- **Date:** 2026-10
+- **Context:** Agents hold conversations over the mailbox, and a session that sees "3" before "2"
+  can get confused. Within one reader, mail arrived in stream order, but not across readers: the
+  takeover tests failed under load because messages handed back by the old daemon (or lost in the
+  instant it stopped, or held by a killed one) came back after newer mail. Handing back in order
+  is not enough either: the server does not always redeliver nak'd messages in nak order.
+- **Decision:** Direct mail reaches a session in stream order (for one sender, send order), across
+  readers too. A subscription that starts while the session's consumer still has unacknowledged
+  messages (`num_ack_pending`) holds everything it receives until every one of them (each
+  sequence up to `delivered.stream_seq`) is back, then offers all of it sorted by stream sequence.
+  The hold gives up after `ack_wait` plus max(5 s, half of `ack_wait`) and offers what it has.
+  Broadcasts stay ordered among themselves only. Messages carry no sequence number for the model.
+  Takeover log lines are not ordered across processes; tests assert order only between lines one
+  process writes. This supersedes the "out of order" limit in "A newer delivery daemon takes over
+  from an older one": a pre-0.5.3 daemon's late hand-back and the stop gap now delay newer mail
+  instead of reordering it.
+- **Why:** It is the strongest guarantee that keeps batching. `max_ack_pending` 1 would order
+  everything but deliver one message per socket post and break the runaway guard's count of held
+  mail. The hold costs nothing while a session has one reader; after a clean handover the owed
+  messages return at once; only a crash or the stop gap delays newer mail, by up to about
+  `ack_wait` (60 s), which beats showing it first. A per-sender or stream sequence in the message
+  block would change what the model sees, would not reveal reordering reliably (stream
+  sequences have gaps from other sessions' mail), and is unnecessary once order holds.
+- **Limit:** a message that does not come back within the hold (a server redelivering late) is
+  shown after newer mail. A previous reader that acknowledges a message after the next one started
+  only makes the hold run to its end.
