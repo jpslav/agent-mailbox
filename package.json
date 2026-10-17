@@ -1,6 +1,6 @@
 {
   "name": "agent-mailbox",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "Agent mailbox: messages between agent sessions, brokered by a NATS JetStream server",
   "type": "module",
@@ -27,13 +27,40 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
+    "test:unit": "node --import tsx --test --test-concurrency=1 test/agents.test.ts test/golden.test.ts test/hook.test.ts test/launcher.test.ts test/transport.test.ts test/unit.test.ts",
+    "prepare": "node scripts/install-hooks.mjs"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx --no-install lint-staged",
+    "pre-push": "npm run typecheck && npm run test:unit"
+  },
+  "lint-staged": {
+    "*.{ts,mjs}": [
+      "prettier --write",
+      "eslint --fix --no-warn-ignored"
+    ],
+    "*.{json,md,yml,yaml}": "prettier --write"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/kv": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
-    "commander": "^12.1.0",
-    "esbuild": "^0.28.2"
+    "@types/node": "20.19.43",
+    "commander": "12.1.0",
+    "esbuild": "0.28.2",
+    "eslint": "10.12.0",
+    "eslint-config-prettier": "10.1.8",
+    "lint-staged": "16.4.0",
+    "prettier": "3.9.9",
+    "simple-git-hooks": "2.14.0",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
   }
 }

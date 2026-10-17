@@ -17,7 +17,8 @@ const PLUGIN = 'adapters/claude-code/.claude-plugin/plugin.json';
 const DIST = 'adapters/claude-code/dist';
 
 const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8'));
-const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+const git = (...args) =>
+  execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
 
 const fail = (msg) => {
   console.error(`check-versions: ${msg}`);
@@ -32,10 +33,15 @@ const versions = {
   [PLUGIN]: readJson(PLUGIN).version,
 };
 for (const [file, v] of Object.entries(versions)) {
-  if (typeof v !== 'string' || !/^\d+\.\d+\.\d+$/.test(v)) fail(`${file} has no valid version (got ${JSON.stringify(v)})`);
+  if (typeof v !== 'string' || !/^\d+\.\d+\.\d+$/.test(v))
+    fail(`${file} has no valid version (got ${JSON.stringify(v)})`);
 }
 if (new Set(Object.values(versions)).size !== 1) {
-  fail(`versions differ:\n${Object.entries(versions).map(([f, v]) => `  ${f}: ${v}`).join('\n')}`);
+  fail(
+    `versions differ:\n${Object.entries(versions)
+      .map(([f, v]) => `  ${f}: ${v}`)
+      .join('\n')}`,
+  );
 }
 const version = versions['package.json'];
 console.log(`versions agree: ${version}`);
@@ -50,7 +56,9 @@ if (i !== -1) {
   } else {
     const baseVersion = JSON.parse(git('show', `${base}:${PLUGIN}`)).version;
     if (baseVersion === version) {
-      fail(`${DIST} changed relative to ${base} (${changed.split('\n').join(', ')}) but the version is still ${version}. Bump it in package.json, package-lock.json and ${PLUGIN} together (installed copies update only when the version changes).`);
+      fail(
+        `${DIST} changed relative to ${base} (${changed.split('\n').join(', ')}) but the version is still ${version}. Bump it in package.json, package-lock.json and ${PLUGIN} together (installed copies update only when the version changes).`,
+      );
     }
     console.log(`${DIST} changed and the version moved ${baseVersion} -> ${version}`);
   }

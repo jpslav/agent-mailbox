@@ -12,6 +12,8 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-17
+
 ### Added
 - Maintainer kit: CLAUDE.md rewritten as a maintainer's handbook, project skills under
   `.claude/skills/` (`ship-change`, `release`, `live-test`, `triage`, `add-adapter`),
@@ -19,6 +21,9 @@ treat them as approximate.
   templates, CODEOWNERS, Dependabot configuration and a project `.claude/settings.json` allowlist.
 - CI checks (steps in the existing `test` job): the three version fields must agree, and a pull
   request that changes `adapters/claude-code/dist/` must change the version.
+
+### Changed
+- Source converted to TypeScript; no behavior change.
 
 ### Fixed
 - `server/mbox-admin.sh init` (and `add-user`) could lose a freshly created stream when the server

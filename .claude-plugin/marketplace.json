@@ -10,11 +10,7 @@
       "source": "./adapters/claude-code",
       "description": "Send and receive messages between Claude Code sessions (yours and coworkers') through a NATS server",
       "category": "productivity",
-      "tags": [
-        "messaging",
-        "multi-session",
-        "nats"
-      ]
+      "tags": ["messaging", "multi-session", "nats"]
     }
   ]
 }

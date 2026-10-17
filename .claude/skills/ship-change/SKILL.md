@@ -20,12 +20,22 @@ with your branch name throughout.
 2. Make the change. Before committing, run the checks that apply (all of them for code changes):
 
    ```sh
+   npm run typecheck                       # tsc, strict
+   npm run lint                            # ESLint (type-checked rules)
+   npm run format:check                    # Prettier; `npm run format` fixes it
    npm run build && npm test               # build commits dist/; integration suites must RUN, not skip
    node scripts/check-versions.mjs
    claude plugin validate ./adapters/claude-code --strict
    claude plugin validate . --strict
    for f in adapters/claude-code/bin/mbox server/*.sh; do sh -n "$f"; done
    ```
+
+   The git hooks cover part of this: pre-commit runs Prettier and ESLint on the staged files,
+   pre-push runs `npm run typecheck` and `npm run test:unit`. They are a safety net, not a
+   substitute: run the full list above before pushing, because CI runs `format:check`, `lint` and
+   `typecheck` as steps of every `test` job. If a hook blocks you for a reason that is not about
+   your change, fix that rather than bypassing it; `--no-verify` or `SKIP_SIMPLE_GIT_HOOKS=1` is
+   for emergencies only (CLAUDE.md, "Formatting, linting and git hooks").
 
    Re-read CLAUDE.md "Rules" and "Security model" if the change touches those areas. Keep names,
    hosts and paths generic (public repo). A change that users should receive also needs the

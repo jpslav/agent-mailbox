@@ -27,6 +27,7 @@ dependency bumps that change `dist/`, minor for features, major for breaking cha
    ```sh
    npm version X.Y.Z --no-git-tag-version                       # package.json and package-lock.json
    node -e 'const fs=require("fs"),f="adapters/claude-code/.claude-plugin/plugin.json",j=JSON.parse(fs.readFileSync(f,"utf8"));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+"\n")' X.Y.Z
+   npx prettier --write adapters/claude-code/.claude-plugin/plugin.json   # JSON.stringify expands short arrays; CI checks formatting
    node scripts/check-versions.mjs                              # prints "versions agree: X.Y.Z"
    git diff --stat                                              # exactly those three files
    ```
@@ -39,6 +40,7 @@ dependency bumps that change `dist/`, minor for features, major for breaking cha
 4. Build and test:
 
    ```sh
+   npm run typecheck && npm run lint && npm run format:check
    npm run build && npm test
    git status --short                      # dist/ may change only if src/ changed since the last build
    ```

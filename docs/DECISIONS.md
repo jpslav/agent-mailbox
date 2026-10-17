@@ -54,13 +54,13 @@ context, decision, why.
 - **Decision:** Use the documented per-session inbox socket, fed by one auto-started
   `mbox deliverd` per user and machine. `mbox wait` stays as the generic fallback.
 - **Why, and what was rejected:**
-  - *Plugin monitors* were rejected: the desktop app does not start them.
-  - *asyncRewake hooks* were rejected: the desktop app treats a session with a running hook as
+  - _Plugin monitors_ were rejected: the desktop app does not start them.
+  - _asyncRewake hooks_ were rejected: the desktop app treats a session with a running hook as
     busy and queues the user's input behind it, which hung a session.
-  - *A background-task `mbox wait`* works, but shows a running task in every session, which can
+  - _A background-task `mbox wait`_ works, but shows a running task in every session, which can
     block managers from archiving child sessions. It stays as the generic fallback for agents
     without a push channel.
-  - *The inbox socket* runs nothing inside any session, wakes idle sessions in both apps, and is
+  - _The inbox socket_ runs nothing inside any session, wakes idle sessions in both apps, and is
     documented by Claude Code for scripts and hooks. See PROTOCOL.md.
 
 ## Honest sender
@@ -82,7 +82,7 @@ context, decision, why.
 - **Context:** Claude Code is the only supported agent today, and NATS is the only broker.
 - **Decision:** `src/core/` knows neither a specific agent nor the broker. Agents are plain
   adapter objects in `src/agents/`; the broker lives behind one interface in
-  `src/core/transport/nats.js`. `test/transport.test.js` enforces the seam.
+  `src/core/transport/nats.ts`. `test/transport.test.ts` enforces the seam.
 - **Why:** Adding Codex or another agent should not touch core, and the broker should be
   replaceable. If an addition forces a core change, the abstraction is wrong.
 
@@ -106,3 +106,21 @@ context, decision, why.
   the component they are inspecting, or wait for a condition; timeouts are generous. Run the
   suite under load (every core busy) when touching delivery code.
 - **Why:** CI runners are slow, and loaded runs found two bugs that quiet runs hid.
+
+## Strict TypeScript, golden tests for the wire formats
+
+- **Date:** 2026-10
+- **Context:** The code base was plain JavaScript, and its contracts (the adapter interface, the
+  transport seam, envelope v1, registrations, presence entries) lived in comments. Several
+  machines and a closed-source agent depend on the exact bytes it writes.
+- **Decision:** `src/` and `test/` are strict TypeScript (`strict`, `noUncheckedIndexedAccess`,
+  NodeNext); the contracts are exported interfaces in `src/core/types.ts` and
+  `src/agents/adapter.ts`. esbuild still bundles (`tsc --noEmit` only checks) and the tests run
+  through `tsx`, so the committed `dist/mbox.mjs` stays the only artifact. `test/golden.test.ts`
+  and `test/golden-presence.test.ts` assert the exact JSON of the envelope, a registration file, a
+  presence entry and the inbox-socket line; they were written against the JavaScript first and
+  passed before and after the conversion. ESLint (type-checked), Prettier and git hooks keep it
+  that way; CI runs the three checks as steps of the existing `test` job.
+- **Why:** The compiler now checks the seam and the adapter contract, and untrusted data (hook
+  payloads, files, presence entries) must be narrowed before use. Golden tests make a wire-format
+  change a deliberate, reviewed act instead of a side effect.
