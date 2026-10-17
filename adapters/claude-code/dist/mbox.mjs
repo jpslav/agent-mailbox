@@ -18767,6 +18767,7 @@ async function runDeliverd({ cfg, transport, deliveryFor, env = process.env, log
     let drainTimer = null;
     let retryTimer = null;
     let flushing = false;
+    const inflight = /* @__PURE__ */ new Set();
     let backoff = opt.retryMs;
     let failingSince = null;
     let failures = 0;
@@ -18806,7 +18807,7 @@ async function runDeliverd({ cfg, transport, deliveryFor, env = process.env, log
         rx.commit([{ delivery: d, message: m }]);
         return void 0;
       }
-      if (fresh && pending.some((p) => p.fresh && p.message.id === m.id)) fresh = false;
+      if (fresh && (inflight.has(m.id) || pending.some((p) => p.fresh && p.message.id === m.id))) fresh = false;
       let resolve;
       let reject;
       const ackAfter = new Promise((res, rej) => {
@@ -18841,6 +18842,7 @@ async function runDeliverd({ cfg, transport, deliveryFor, env = process.env, log
       }
       flushing = true;
       const all = pending.splice(0);
+      for (const p of all) if (p.fresh) inflight.add(p.message.id);
       const room = opt.maxPerMin - sent.length;
       let cut = all.length;
       for (let i = 0, n = 0; i < all.length; i++) if (all[i].fresh && ++n > room) {
@@ -18876,6 +18878,7 @@ async function runDeliverd({ cfg, transport, deliveryFor, env = process.env, log
         } catch (e) {
           flushing = false;
           pending.unshift(...items);
+          inflight.clear();
           return failed(e);
         }
         if (opt.fault === "crash-after-deliver") process.kill(process.pid, "SIGKILL");
@@ -18895,6 +18898,7 @@ async function runDeliverd({ cfg, transport, deliveryFor, env = process.env, log
       lastErr = "";
       backoff = opt.retryMs;
       flushing = false;
+      inflight.clear();
       if (stopped) {
         for (const p of [...rest, ...pending.splice(0)]) p.reject(new Error("not delivered"));
         return void 0;
@@ -19989,6 +19993,7 @@ function openTransport(cfg, opts) {
   transports.push(t);
   return t;
 }
+var flushStdio = () => Promise.all([process.stdout, process.stderr].map((s) => new Promise((r) => s.write("", () => r()))));
 var closeTransports = () => Promise.all(transports.map((t) => t.close().catch(() => {
 })));
 async function fail(e) {
@@ -20017,6 +20022,7 @@ var action = (fn) => async (...args) => {
     await fail(e);
   }
   await closeTransports();
+  await flushStdio();
   process.exit(process.exitCode ?? 0);
 };
 program2.command("whoami").description("print this session's mailbox address").action(action(async () => {
@@ -20161,14 +20167,16 @@ program2.command("resume").description("undo mbox pause: resume push delivery fo
   console.log(`delivery resumed for ${target || pauseSummary(before)}. Still paused: ${pauseSummary(p)}.`);
   if (target && p.all) console.log("note: all sessions are still paused; run mbox resume --all to lift that.");
 }));
-program2.command("guide").description(`short help on using the mailbox; sections: ${GUIDE_SECTIONS.join(", ")}`).argument("[section]", "which section (default: overview)").action((section) => {
+program2.command("guide").description(`short help on using the mailbox; sections: ${GUIDE_SECTIONS.join(", ")}`).argument("[section]", "which section (default: overview)").action(async (section) => {
   const text = guideText(section);
   if (!text) {
     process.stderr.write(`mbox: no guide section "${oneLine(section, 40)}". Sections: ${GUIDE_SECTIONS.join(", ")}
 `);
+    await flushStdio();
     process.exit(2);
   }
   process.stdout.write(text);
+  await flushStdio();
   process.exit(0);
 });
 async function readStdin(timeoutMs) {
@@ -20384,6 +20392,7 @@ program2.command("hook").description("agent hook entry point: mbox hook <agent> 
 `);
   }
   await closeTransports();
+  await flushStdio();
   process.exit(0);
 });
 program2.configureOutput({ outputError: (s, write) => write(s) });

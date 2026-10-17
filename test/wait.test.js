@@ -195,7 +195,11 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
       assert.ok(rounds < 12, 'converges');
     }
     assert.ok(rounds > 1, 'needed more than one batch');
-    assert.deepEqual(got, sent.map((t) => t.split(' ').slice(0, 2).join(' ')));
+    // Exactly once: nothing lost, nothing twice. The order is not asserted: mail left for the next
+    // waiter comes back through the server's redelivery, which may put a message behind later ones
+    // when the machine is slow.
+    const want = sent.map((t) => t.split(' ').slice(0, 2).join(' '));
+    assert.deepEqual([...got].sort(), [...want].sort());
   });
 
   it('--hook-stdin takes the session and cwd from the hook payload; empty or silent stdin does not block', async () => {

@@ -106,6 +106,7 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
     let drainTimer = null;
     let retryTimer = null;
     let flushing = false;
+    const inflight = new Set(); // ids of the fresh messages taken out of `pending` by the flush under way
     let backoff = opt.retryMs;
     let failingSince = null;
     let failures = 0;
@@ -148,7 +149,8 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
         rx.commit([{ delivery: d, message: m }]);
         return undefined;
       }
-      if (fresh && pending.some((p) => p.fresh && p.message.id === m.id)) fresh = false; // redelivered while waiting
+      // Redelivered while waiting, or while its delivery is in flight (not yet recorded as seen).
+      if (fresh && (inflight.has(m.id) || pending.some((p) => p.fresh && p.message.id === m.id))) fresh = false;
       let resolve;
       let reject;
       const ackAfter = new Promise((res, rej) => { resolve = res; reject = rej; });
@@ -180,6 +182,7 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       }
       flushing = true;
       const all = pending.splice(0);
+      for (const p of all) if (p.fresh) inflight.add(p.message.id);
       // Runaway guard: at most the window's remaining room of fresh messages in this delivery.
       const room = opt.maxPerMin - sent.length;
       let cut = all.length;
@@ -211,6 +214,7 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
         } catch (e) {
           flushing = false;
           pending.unshift(...items);
+          inflight.clear();
           return failed(e);
         }
         if (opt.fault === 'crash-after-deliver') process.kill(process.pid, 'SIGKILL');
@@ -230,6 +234,7 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       lastErr = '';
       backoff = opt.retryMs;
       flushing = false;
+      inflight.clear();
       if (stopped) {
         for (const p of [...rest, ...pending.splice(0)]) p.reject(new Error('not delivered'));
         return undefined;

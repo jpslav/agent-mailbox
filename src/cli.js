@@ -45,6 +45,11 @@ function openTransport(cfg, opts) {
   transports.push(t);
   return t;
 }
+/**
+ * Let pending stdout/stderr writes finish before process.exit(): into a pipe that is full (macOS
+ * pipes hold only 16 KB at first) Node queues the rest of a large write, and exiting would cut it off.
+ */
+const flushStdio = () => Promise.all([process.stdout, process.stderr].map((s) => new Promise((r) => s.write('', () => r()))));
 const closeTransports = () => Promise.all(transports.map((t) => t.close().catch(() => {})));
 
 async function fail(e) {
@@ -79,6 +84,7 @@ const action = (fn) => async (...args) => {
     await fail(e);
   }
   await closeTransports();
+  await flushStdio();
   process.exit(process.exitCode ?? 0);
 };
 
@@ -269,13 +275,15 @@ program
   .command('guide')
   .description(`short help on using the mailbox; sections: ${GUIDE_SECTIONS.join(', ')}`)
   .argument('[section]', 'which section (default: overview)')
-  .action((section) => {
+  .action(async (section) => {
     const text = guideText(section);
     if (!text) {
       process.stderr.write(`mbox: no guide section "${oneLine(section, 40)}". Sections: ${GUIDE_SECTIONS.join(', ')}\n`);
+      await flushStdio();
       process.exit(2);
     }
     process.stdout.write(text);
+    await flushStdio();
     process.exit(0);
   });
 
@@ -531,6 +539,7 @@ program
       process.stderr.write(`mbox hook: ${e.message}\n`);
     }
     await closeTransports();
+    await flushStdio();
     process.exit(0);
   });
 
