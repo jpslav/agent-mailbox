@@ -9,7 +9,7 @@ import { after, before } from 'node:test';
 import { jetstream, jetstreamManager, type JetStreamManager } from '@nats-io/jetstream';
 import type { Env, Registration } from '../src/core/types.js';
 import type { NatsConnection } from '@nats-io/transport-node';
-import { consumerName } from '../src/core/transport/nats.js';
+import { consumerName, createTransport } from '../src/core/transport/nats.js';
 import {
   Broker,
   FakeInbox,
@@ -1030,6 +1030,65 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       ['l1', 'l2', 'l3', 'l4'],
       'every message once, in send order',
     );
+  });
+
+  it('an abort while a subscription holds newer mail for owed messages ends it at once', async () => {
+    // Reader 1 takes x1 and never acknowledges it, and ends without handing it back (settleMs is
+    // short, the acknowledgement never comes): x1 is owed for the 30 s redelivery interval. Reader
+    // 2 holds x2 behind it until x1 is back, which would take 30 s or more; an abort ends that.
+    const sid = 'd-hold-abort-1016';
+    const address = 'bob.hold.abort';
+    const cfg = { servers: [b.url], user: 'bob', password: b.password('bob') };
+    const redeliverAfterMs = 30000;
+    const t1 = createTransport(cfg);
+    const t2 = createTransport(cfg);
+    cleanup.push(
+      () => t1.close(),
+      () => t2.close(),
+    );
+    const ac1 = new AbortController();
+    let took = 0;
+    const sub1 = t1.subscribe({
+      session: sid,
+      addresses: [address],
+      signal: ac1.signal,
+      redeliverAfterMs,
+      settleMs: 100,
+      onMessage: () => {
+        took++;
+        return { ackAfter: new Promise<void>(() => {}) };
+      },
+    });
+    sub1.catch(() => {});
+    await until(async () => (await ackPending(sid)) === 0, 'reader 1 subscribed');
+    await publish(address, ['x1']);
+    await until(() => took === 1, 'reader 1 took x1');
+    ac1.abort();
+    await assert.rejects(sub1, { name: 'AbortError' });
+
+    const ac2 = new AbortController();
+    const seen: string[] = [];
+    const sub2 = t2.subscribe({
+      session: sid,
+      addresses: [address],
+      signal: ac2.signal,
+      redeliverAfterMs,
+      onMessage: (d) => void seen.push(d.id),
+    });
+    sub2.catch(() => {});
+    await publish(address, ['x2']);
+    await until(async () => (await heldCount(sid)) === 2, 'x1 owed, x2 sent to reader 2');
+    assert.deepEqual(seen, [], 'x2 is held while x1 is owed');
+    ac2.abort();
+    const ended = await Promise.race([
+      sub2.then(
+        () => 'resolved',
+        (e: unknown) => (e as Error).name,
+      ),
+      sleep(15000).then(() => 'still holding'),
+    ]);
+    assert.equal(ended, 'AbortError', 'the abort ends the hold long before x1 is back');
+    assert.deepEqual(seen, []);
   });
 
   it('two sessions starting together with a newer version start one new daemon', async () => {
