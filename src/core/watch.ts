@@ -21,9 +21,22 @@ export interface RunWatchInput {
  * process's stdout into notifications (a monitor). We print very little, and each message in a
  * single write(). Returns the process exit code.
  */
-export async function runWatch({ cfg, transport, sid, agent = 'unknown', hostPid = null, env = process.env, out = process.stdout, cwd = process.cwd() }: RunWatchInput): Promise<number> {
+export async function runWatch({
+  cfg,
+  transport,
+  sid,
+  agent = 'unknown',
+  hostPid = null,
+  env = process.env,
+  out = process.stdout,
+  cwd = process.cwd(),
+}: RunWatchInput): Promise<number> {
   const write = (s: string): void => {
-    try { out.write(s); } catch { /* monitor gone */ }
+    try {
+      out.write(s);
+    } catch {
+      /* monitor gone */
+    }
   };
   // Resolves once the bytes are handed to the OS (pipes are asynchronous on some platforms).
   const writeFlushed = (s: string): Promise<void> =>
@@ -60,27 +73,36 @@ export async function runWatch({ cfg, transport, sid, agent = 'unknown', hostPid
     lock.release();
     doneResolve();
   }
-  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(sig, () => void shutdown());
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
+    process.on(sig, () => void shutdown());
   process.on('exit', () => lock.release());
   out.on('error', () => void shutdown());
 
   // The transport awaits onMessage before acknowledging: print, flush, persist, THEN ack
   // (at-least-once). A redelivery after a crash between print and ack is not fresh (seen ring).
   rx = await openReceiver({
-    cfg, transport, sid, st, agent, hostPid, env,
+    cfg,
+    transport,
+    sid,
+    st,
+    agent,
+    hostPid,
+    env,
     async onMessage(d: Delivery, m: Message, fresh: boolean) {
       if (fresh) await writeFlushed(formatBlock(m));
       rx!.commit([{ delivery: d, message: m }]);
       if (fault === 'crash-after-print') process.kill(process.pid, 'SIGKILL');
     },
     onStatus(kind: 'lost' | 'restored', hint?: string) {
-      if (kind === 'lost') write(`[mailbox] connection lost${hint ? ` (${hint})` : ''}; retrying\n`);
+      if (kind === 'lost')
+        write(`[mailbox] connection lost${hint ? ` (${hint})` : ''}; retrying\n`);
       else write('[mailbox] connection restored\n');
     },
     onTick: () => lock.touch(),
     onHostGone: () => void shutdown(),
   });
-  if (stopping) await rx.stop({ depart: true }); // a signal arrived while starting up
+  if (stopping)
+    await rx.stop({ depart: true }); // a signal arrived while starting up
   else write(`[mailbox] online as ${st.address}. Send with: mbox send <to> "<text>"\n`);
 
   await done;

@@ -15,7 +15,17 @@ import { formatBatch } from './envelope.js';
 import { presenceRecord } from './registry.js';
 import { openReceiver } from './receiver.js';
 import type { Receiver } from './receiver.js';
-import { awaitExit, claimWaitLock, ensureSession, pidAlive, readState, stopWaiter, validateSessionId, waiterPid, watcherPid } from './state.js';
+import {
+  awaitExit,
+  claimWaitLock,
+  ensureSession,
+  pidAlive,
+  readState,
+  stopWaiter,
+  validateSessionId,
+  waiterPid,
+  watcherPid,
+} from './state.js';
 import type { Config, Delivery, DeliveryResult, Env, Message, Transport } from './types.js';
 
 /** Longest a timer can wait (setTimeout's limit). */
@@ -58,7 +68,17 @@ interface BatchEntry {
  * @returns 'mail' (text written and acknowledged) or 'idle' (superseded, a watcher took over,
  *          maxWaitMs passed, the host process exited, or a signal)
  */
-export async function runWait({ cfg, transport, sid, agent = 'unknown', hostPid = null, env = process.env, cwd = process.cwd(), maxWaitMs, write }: RunWaitInput): Promise<WaitResult> {
+export async function runWait({
+  cfg,
+  transport,
+  sid,
+  agent = 'unknown',
+  hostPid = null,
+  env = process.env,
+  cwd = process.cwd(),
+  maxWaitMs,
+  write,
+}: RunWaitInput): Promise<WaitResult> {
   const opt = {
     lockPollMs: Number(env.AGENT_MAILBOX_WAIT_POLL_MS) || 250,
     drainMs: Number(env.AGENT_MAILBOX_DRAIN_MS) || 300,
@@ -86,7 +106,10 @@ export async function runWait({ cfg, transport, sid, agent = 'unknown', hostPid 
   const done = new Promise<WaitResult>((r) => (doneResolve = r));
   let rx: Receiver | null = null; // set before any delivery can arrive; callbacks below rely on it
 
-  function finish(result: WaitResult, { depart = false }: { depart?: boolean } = {}): Promise<void> {
+  function finish(
+    result: WaitResult,
+    { depart = false }: { depart?: boolean } = {},
+  ): Promise<void> {
     if (finishing) return finishing;
     finishing = (async () => {
       clearTimeout(drainTimer);
@@ -99,7 +122,9 @@ export async function runWait({ cfg, transport, sid, agent = 'unknown', hostPid 
     return finishing;
   }
   /** Leave quietly unless a batch is already being written (then that write completes). */
-  const yieldNow = (opts?: { depart?: boolean }): void => { if (!flushing) void finish('idle', opts); };
+  const yieldNow = (opts?: { depart?: boolean }): void => {
+    if (!flushing) void finish('idle', opts);
+  };
   const hostGone = (): boolean => (hostPid ? !pidAlive(hostPid) : false);
 
   async function flush(): Promise<void> {
@@ -107,7 +132,10 @@ export async function runWait({ cfg, transport, sid, agent = 'unknown', hostPid 
     flushing = true;
     clearTimeout(drainTimer);
     const items = batch.splice(0);
-    const { text, count } = formatBatch(items, { address: rx!.state().address, maxChars: opt.maxChars });
+    const { text, count } = formatBatch(items, {
+      address: rx!.state().address,
+      maxChars: opt.maxChars,
+    });
     const delivered = items.slice(0, count);
     const deferred = items.slice(count);
     deferred.forEach((b) => b.reject(new Error('deferred')));
@@ -133,7 +161,10 @@ export async function runWait({ cfg, transport, sid, agent = 'unknown', hostPid 
     if (fresh && batch.some((b) => b.fresh && b.message.id === m.id)) fresh = false; // same id twice in one batch
     let resolve!: () => void;
     let reject!: (e: Error) => void;
-    const ackAfter = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    const ackAfter = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
     ackAfter.catch(() => {});
     batch.push({ delivery: d, message: m, fresh, resolve, reject });
     if (fresh && !drainTimer) drainTimer = setTimeout(() => void flush(), opt.drainMs);
@@ -146,7 +177,13 @@ export async function runWait({ cfg, transport, sid, agent = 'unknown', hostPid 
   for (const sig of signals) process.on(sig, onSignal);
 
   rx = await openReceiver({
-    cfg, transport, sid, st, agent, hostPid, env,
+    cfg,
+    transport,
+    sid,
+    st,
+    agent,
+    hostPid,
+    env,
     onMessage,
     onHostGone: () => yieldNow({ depart: true }),
   });
@@ -187,5 +224,7 @@ export async function endSession({
   if (watcherPid(sid, env) || waiterPid(sid, env)) return;
   const st = readState(sid, env);
   if (!st) return;
-  await transport.presence.depart(presenceRecord(st, { sid, cfg, agent }), { timeoutMs: 1000 }).catch(() => {});
+  await transport.presence
+    .depart(presenceRecord(st, { sid, cfg, agent }), { timeoutMs: 1000 })
+    .catch(() => {});
 }

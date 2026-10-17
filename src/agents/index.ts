@@ -4,7 +4,13 @@ import type { Env } from '../core/types.js';
 import type { Adapter } from './adapter.js';
 import claudeCode from './claude-code.js';
 
-export type { Adapter, HookContext, HookHandler, HookInput, InstructionsContext } from './adapter.js';
+export type {
+  Adapter,
+  HookContext,
+  HookHandler,
+  HookInput,
+  InstructionsContext,
+} from './adapter.js';
 
 /**
  * The adapter interface is `Adapter` in ./adapter.ts (a plain object):
@@ -26,7 +32,8 @@ export type { Adapter, HookContext, HookHandler, HookInput, InstructionsContext 
 export const adapters: Adapter[] = [claudeCode];
 
 export const getAdapter = (id: string): Adapter | null => adapters.find((a) => a.id === id) || null;
-export const detectAdapter = (env: Env): Adapter | null => adapters.find((a) => a.detect(env)) || null;
+export const detectAdapter = (env: Env): Adapter | null =>
+  adapters.find((a) => a.detect(env)) || null;
 
 /**
  * Agent resolution: --agent, AGENT_MAILBOX_AGENT, the first adapter that detects itself, else 'unknown'.
@@ -37,7 +44,10 @@ export interface ResolvedAgent {
   adapter: Adapter | null;
 }
 
-export function resolveAgent({ agent, env = process.env }: { agent?: string; env?: Env } = {}): ResolvedAgent {
+export function resolveAgent({
+  agent,
+  env = process.env,
+}: { agent?: string; env?: Env } = {}): ResolvedAgent {
   const explicit = agent || env.AGENT_MAILBOX_AGENT;
   if (explicit) return { id: explicit, adapter: getAdapter(explicit) };
   const detected = detectAdapter(env);
@@ -62,10 +72,20 @@ export function resolveSession({
   agent,
   hookSession = null,
   env = process.env,
-}: { session?: string; agent?: ResolvedAgent; hookSession?: string | null; env?: Env } = {}): ResolvedSession {
+}: {
+  session?: string;
+  agent?: ResolvedAgent;
+  hookSession?: string | null;
+  env?: Env;
+} = {}): ResolvedSession {
   const a = agent || resolveAgent({ env });
   const hostPid = a.adapter?.hostPid(env) ?? null;
-  const sid = session || env.AGENT_MAILBOX_SESSION || hookSession || a.adapter?.sessionId(env) || sessionIdForHostPid(hostPid, env);
+  const sid =
+    session ||
+    env.AGENT_MAILBOX_SESSION ||
+    hookSession ||
+    a.adapter?.sessionId(env) ||
+    sessionIdForHostPid(hostPid, env);
   if (!sid) throw new NoSessionError();
   return { sid: validateSessionId(sid), agent: a.id, adapter: a.adapter, hostPid };
 }

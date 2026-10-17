@@ -2,7 +2,13 @@
 // nobody is meant to await them (awaiting inside a suite changes nothing). These wrappers call
 // them and discard the promise, so that @typescript-eslint/no-floating-promises does not flag
 // every test declaration. Behavior is exactly node:test's.
-import { describe as nodeDescribe, it as nodeIt, type SuiteContext, type TestContext, type TestOptions } from 'node:test';
+import {
+  describe as nodeDescribe,
+  it as nodeIt,
+  type SuiteContext,
+  type TestContext,
+  type TestOptions,
+} from 'node:test';
 
 type SuiteFn = (suite: SuiteContext) => void | Promise<void>;
 type TestFn = (test: TestContext) => void | Promise<void>;

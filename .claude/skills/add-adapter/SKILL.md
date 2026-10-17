@@ -58,6 +58,7 @@ adapter id (lowercase, for example `codex`).
    Then try it in a real session of that agent, in a visible terminal where a human can watch
    (the `live-test` skill is the recipe: adapt the two prompts and the launch command to the
    agent). Never run the agent headless for this.
+
 8. **Docs**: README.md (supported agents, the adapter section if the interface grew), CHANGELOG.md
    (Added), and a CLAUDE.md line if a new rule came out of it. If the adapter ships files users
    install, bump the version (`release` skill) and make sure the marketplace entry covers it.

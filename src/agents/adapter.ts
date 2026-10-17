@@ -38,7 +38,12 @@ export type HookHandler = (input: unknown, ctx: HookContext) => Promise<string>;
 /** What `instructions` needs to know to tell the agent how to use the mailbox. */
 export type InstructionsContext =
   | { configured: false; error: string; launcher: string }
-  | { configured: true; address: string; launcher: string; /** Does the session receive mail by push? (default: yes) */ push?: boolean };
+  | {
+      configured: true;
+      address: string;
+      launcher: string;
+      /** Does the session receive mail by push? (default: yes) */ push?: boolean;
+    };
 
 export interface Adapter {
   id: string;

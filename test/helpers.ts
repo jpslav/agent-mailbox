@@ -24,7 +24,8 @@ export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 /** `list[i]`, failing the test when there is no such element. */
 export function at<T>(list: readonly T[], i: number): T {
   const v = list[i];
-  if (v === undefined) throw new Error(`expected an element at index ${i}, but the list has ${list.length}`);
+  if (v === undefined)
+    throw new Error(`expected an element at index ${i}, but the list has ${list.length}`);
   return v;
 }
 
@@ -50,8 +51,10 @@ export function findServer(): ServerInfo {
   const natsBin = process.env.NATS_BIN || 'nats';
   const a = spawnSync(serverBin, ['--version'], { encoding: 'utf8' });
   const b = spawnSync(natsBin, ['--version'], { encoding: 'utf8' });
-  if (a.error || a.status !== 0) return { serverBin, natsBin, skip: 'nats-server not found (set NATS_SERVER_BIN)' };
-  if (b.error || b.status !== 0) return { serverBin, natsBin, skip: 'nats CLI not found (set NATS_BIN)' };
+  if (a.error || a.status !== 0)
+    return { serverBin, natsBin, skip: 'nats-server not found (set NATS_SERVER_BIN)' };
+  if (b.error || b.status !== 0)
+    return { serverBin, natsBin, skip: 'nats CLI not found (set NATS_BIN)' };
   return { serverBin, natsBin };
 }
 
@@ -134,8 +137,14 @@ export class Broker {
 
   /** Run server/mbox-admin.sh against this server. */
   admin(args: string[], { check = true, env = {} }: AdminCommandOptions = {}): AdminResult {
-    const r = spawnSync('/bin/sh', [ADMIN, ...args], { encoding: 'utf8', env: { ...this.adminEnv(), ...env } });
-    if (check && r.status !== 0) throw new Error(`mbox-admin.sh ${args.join(' ')} failed (${r.status}): ${r.stderr || r.stdout}`);
+    const r = spawnSync('/bin/sh', [ADMIN, ...args], {
+      encoding: 'utf8',
+      env: { ...this.adminEnv(), ...env },
+    });
+    if (check && r.status !== 0)
+      throw new Error(
+        `mbox-admin.sh ${args.join(' ')} failed (${r.status}): ${r.stderr || r.stdout}`,
+      );
     return { code: r.status, out: r.stdout + r.stderr };
   }
 
@@ -143,7 +152,8 @@ export class Broker {
     const txt = fs.readFileSync(path.join(this.confDir, 'admin.creds'), 'utf8');
     const user = /^user=(.*)$/m.exec(txt)?.[1];
     const pass = /^password=(.*)$/m.exec(txt)?.[1];
-    if (user === undefined || pass === undefined) throw new Error('admin.creds has no user= and password= lines');
+    if (user === undefined || pass === undefined)
+      throw new Error('admin.creds has no user= and password= lines');
     return { user, pass };
   }
 
@@ -169,14 +179,19 @@ export class Broker {
 
   addUser(u: string): string {
     const { out } = this.admin(['add-user', u]);
-    const password = /printf '%s\\n' '([A-Za-z0-9]+)' \| mbox setup --servers (\S+) --user (\S+) --password-stdin/.exec(out)?.[1];
+    const password =
+      /printf '%s\\n' '([A-Za-z0-9]+)' \| mbox setup --servers (\S+) --user (\S+) --password-stdin/.exec(
+        out,
+      )?.[1];
     if (password === undefined) throw new Error(`no setup line in:\n${out}`);
     this.passwords[u] = password;
     return out;
   }
 
   async start(): Promise<void> {
-    const proc = spawn(this.server.serverBin, ['-c', this.configFile], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const proc = spawn(this.server.serverBin, ['-c', this.configFile], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
     this.proc = proc;
     this.log = '';
     proc.stderr.on('data', (d: Buffer) => (this.log += d.toString()));
@@ -215,7 +230,10 @@ export class Broker {
 
   /** A raw client connection as a mailbox user (with that user's private inbox prefix) or the admin. */
   async conn(user: string): Promise<NatsConnection> {
-    const auth = user === 'admin' ? this.adminCreds() : { user, pass: this.password(user), inboxPrefix: `_INBOX_${user}` };
+    const auth =
+      user === 'admin'
+        ? this.adminCreds()
+        : { user, pass: this.password(user), inboxPrefix: `_INBOX_${user}` };
     return connect({ servers: this.url, ...auth, reconnect: false, timeout: 3000 });
   }
 }
@@ -266,12 +284,25 @@ export interface MboxOptions {
 }
 
 /** Run an mbox command to completion. */
-export function mbox(args: string[], { env, cwd, input, timeoutMs = 20000 }: MboxOptions = {}): MboxResult {
-  const r = spawnSync(process.execPath, [MBOX, ...args], { env, cwd, input, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 });
+export function mbox(
+  args: string[],
+  { env, cwd, input, timeoutMs = 20000 }: MboxOptions = {},
+): MboxResult {
+  const r = spawnSync(process.execPath, [MBOX, ...args], {
+    env,
+    cwd,
+    input,
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 8 * 1024 * 1024,
+  });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
-const withSession = (env: Env, session: string | undefined): Env => ({ ...env, AGENT_MAILBOX_SESSION: session });
+const withSession = (env: Env, session: string | undefined): Env => ({
+  ...env,
+  AGENT_MAILBOX_SESSION: session,
+});
 
 /** One "[mailbox] message <id> ..." block, as `Watcher.messages()` parses it. */
 export interface MailboxBlock {
@@ -299,8 +330,19 @@ class BlockParser {
   constructor(private readonly text: string) {}
 
   messages(): MailboxBlock[] {
-    const re = /\[mailbox\] message (\S+) from (.+?) to (\S+) \| subject: (.*?) \| verified-user: ([^\n]*)\n((?:\(sent [^\n]*\)\n)?)\([^\n]*\)\n([\s\S]*?)\n\[mailbox\] end \1\n/g;
-    return [...this.text.matchAll(re)].map(([, id = '', from = '', to = '', subject = '', verified = '', stale = '', body = '']) => ({ id, from, to, subject, verified, stale: stale.trim(), body }));
+    const re =
+      /\[mailbox\] message (\S+) from (.+?) to (\S+) \| subject: (.*?) \| verified-user: ([^\n]*)\n((?:\(sent [^\n]*\)\n)?)\([^\n]*\)\n([\s\S]*?)\n\[mailbox\] end \1\n/g;
+    return [...this.text.matchAll(re)].map(
+      ([, id = '', from = '', to = '', subject = '', verified = '', stale = '', body = '']) => ({
+        id,
+        from,
+        to,
+        subject,
+        verified,
+        stale: stale.trim(),
+        body,
+      }),
+    );
   }
 }
 
@@ -335,7 +377,9 @@ export class Watcher {
       if (this.proc.exitCode !== null || this.proc.signalCode !== null) break;
       await sleep(50);
     }
-    throw new Error(`timed out waiting for ${re}; stdout so far:\n${this.out.slice(0, 4000)}\nstderr:\n${this.err}`);
+    throw new Error(
+      `timed out waiting for ${re}; stdout so far:\n${this.out.slice(0, 4000)}\nstderr:\n${this.err}`,
+    );
   }
 
   /** All "[mailbox] message <id> ..." blocks seen so far. */
@@ -355,7 +399,14 @@ export function sessionAddr(env: Env, session: string, cwd: string): string {
   return (r.stdout.split('\n')[0] ?? '').trim();
 }
 
-export function send(env: Env, session: string, cwd: string, to: string, text: string, extra: string[] = []): MboxResult {
+export function send(
+  env: Env,
+  session: string,
+  cwd: string,
+  to: string,
+  text: string,
+  extra: string[] = [],
+): MboxResult {
   return mbox(['send', to, ...extra, text], { env: withSession(env, session), cwd });
 }
 
@@ -378,7 +429,11 @@ export class Waiter {
 
   constructor(env: Env, { cwd, session, args = [], input, stdin = 'ignore' }: WaiterOptions = {}) {
     const e = session ? withSession(env, session) : env;
-    this.proc = spawn(process.execPath, [MBOX, 'wait', ...args], { env: e, cwd, stdio: [input !== undefined ? 'pipe' : stdin, 'pipe', 'pipe'] });
+    this.proc = spawn(process.execPath, [MBOX, 'wait', ...args], {
+      env: e,
+      cwd,
+      stdio: [input !== undefined ? 'pipe' : stdin, 'pipe', 'pipe'],
+    });
     if (input !== undefined) this.proc.stdin?.end(input);
     this.exited = new Promise((r) => this.proc.once('exit', (code, signal) => r(code ?? signal)));
     const { stdout, stderr } = this.proc;
@@ -395,7 +450,10 @@ export class Waiter {
 
   /** The exit code (or signal), or 'still running' after timeoutMs. */
   result(timeoutMs = 15000): Promise<ExitStatus | 'still running'> {
-    return Promise.race([this.exited, sleep(timeoutMs).then((): 'still running' => 'still running')]);
+    return Promise.race([
+      this.exited,
+      sleep(timeoutMs).then((): 'still running' => 'still running'),
+    ]);
   }
 
   /** Message blocks on stderr. */
@@ -410,13 +468,20 @@ export class Waiter {
 }
 
 /** The waiter lock file says this pid is the session's current waiter. */
-export async function waitForWaiter(env: Env, session: string, pid: number | undefined, timeoutMs = 10000): Promise<void> {
+export async function waitForWaiter(
+  env: Env,
+  session: string,
+  pid: number | undefined,
+  timeoutMs = 10000,
+): Promise<void> {
   const file = path.join(env.AGENT_MAILBOX_STATE_DIR ?? '', 'sessions', `${session}.wait.lock`);
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     try {
       if ((JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: unknown }).pid === pid) return; // our own lock file
-    } catch { /* not yet */ }
+    } catch {
+      /* not yet */
+    }
     await sleep(50);
   }
   throw new Error(`waiter ${pid} never held the lock for ${session}`);
@@ -461,7 +526,8 @@ export interface FakeInboxOptions {
   closeDelayMs?: number;
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 export class FakeInbox {
   readonly path: string;
@@ -475,7 +541,15 @@ export class FakeInbox {
   connections = 0;
   server: net.Server | null = null;
 
-  constructor(socketPath: string, { sessionId = null, token = null, firstLineMs = 30000, closeDelayMs = 0 }: FakeInboxOptions = {}) {
+  constructor(
+    socketPath: string,
+    {
+      sessionId = null,
+      token = null,
+      firstLineMs = 30000,
+      closeDelayMs = 0,
+    }: FakeInboxOptions = {},
+  ) {
     this.path = socketPath;
     this.sessionId = sessionId;
     this.token = token;
@@ -508,11 +582,20 @@ export class FakeInbox {
           return;
         }
         first = false;
-        if (j?.type !== 'user') { this.dropped.push({ reason: 'type', line: raw }); return; }
+        if (j?.type !== 'user') {
+          this.dropped.push({ reason: 'type', line: raw });
+          return;
+        }
         const message = j.message;
         const content = isRecord(message) ? message.content : undefined;
-        if (typeof content !== 'string' || !content) { this.dropped.push({ reason: 'content', line: raw }); return; }
-        if (j.session_id !== undefined && this.sessionId && j.session_id !== this.sessionId) { this.dropped.push({ reason: 'session_id', line: raw }); return; }
+        if (typeof content !== 'string' || !content) {
+          this.dropped.push({ reason: 'content', line: raw });
+          return;
+        }
+        if (j.session_id !== undefined && this.sessionId && j.session_id !== this.sessionId) {
+          this.dropped.push({ reason: 'session_id', line: raw });
+          return;
+        }
         // type, message and content were checked above
         this.delivered.push({ content, msg: j as InboxUserLine, line: raw, authed, authLine });
       };
@@ -565,7 +648,9 @@ export class FakeInbox {
       if (pred(this)) return;
       await sleep(50);
     }
-    throw new Error(`fake inbox: condition not met in ${timeoutMs} ms; delivered:\n${this.contents().join('\n---\n').slice(0, 4000)}\ndropped: ${JSON.stringify(this.dropped).slice(0, 1000)}`);
+    throw new Error(
+      `fake inbox: condition not met in ${timeoutMs} ms; delivered:\n${this.contents().join('\n---\n').slice(0, 4000)}\ndropped: ${JSON.stringify(this.dropped).slice(0, 1000)}`,
+    );
   }
 }
 

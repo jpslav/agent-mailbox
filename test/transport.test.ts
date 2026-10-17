@@ -2,7 +2,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { consumerName, createTransport, parseSubject, presenceKey, streamFor, subjectFor } from '../src/core/transport/nats.js';
+import {
+  consumerName,
+  createTransport,
+  parseSubject,
+  presenceKey,
+  streamFor,
+  subjectFor,
+} from '../src/core/transport/nats.js';
 import { ROOT } from './helpers.js';
 import { describe, it } from './suite.js';
 
@@ -10,7 +17,10 @@ describe('subject mapping', () => {
   it('direct mail carries the sender user as the last token; broadcast is mbx.all.<sender>', () => {
     assert.equal(subjectFor('bob.build-box.web-1a2b', 'alice'), 'mbx.bob.build-box.web-1a2b.alice');
     assert.equal(subjectFor('all', 'alice'), 'mbx.all.alice');
-    assert.deepEqual(parseSubject('mbx.bob.build-box.web-1a2b.alice'), { to: 'bob.build-box.web-1a2b', sender: 'alice' });
+    assert.deepEqual(parseSubject('mbx.bob.build-box.web-1a2b.alice'), {
+      to: 'bob.build-box.web-1a2b',
+      sender: 'alice',
+    });
     assert.deepEqual(parseSubject('mbx.all.alice'), { to: 'all', sender: 'alice' });
     assert.equal(parseSubject('mbx.bob.h'), null);
     assert.equal(parseSubject('other.subject'), null);
@@ -32,8 +42,15 @@ describe('subject mapping', () => {
     assert.match(presenceKey('alice', 'laptop', 'sess.1'), /^alice\.laptop\.[0-9a-f]{12}$/);
   });
   it('validates server URLs and caps labels', () => {
-    assert.throws(() => createTransport({ servers: ['http://x'], user: 'u', password: 'p' }), /nats:\/\//);
-    const t = createTransport({ servers: ['nats://127.0.0.1:1', 'tls://mailbox-host.example.ts.net:4222'], user: 'u', password: 'p' });
+    assert.throws(
+      () => createTransport({ servers: ['http://x'], user: 'u', password: 'p' }),
+      /nats:\/\//,
+    );
+    const t = createTransport({
+      servers: ['nats://127.0.0.1:1', 'tls://mailbox-host.example.ts.net:4222'],
+      user: 'u',
+      password: 'p',
+    });
     assert.equal(t.limits.maxLabelLen('alice', 'laptop'), 128 - 'alice.laptop.'.length);
   });
 });
@@ -45,16 +62,22 @@ describe('transport seam', () => {
       if (f.isDirectory()) return f.name === 'transport' ? [] : walk(path.join(d, f.name));
       return f.name.endsWith('.ts') ? [path.join(d, f.name)] : [];
     });
-  const strip = (code: string): string => code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  const strip = (code: string): string =>
+    code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
   // Broker concepts that must stay inside src/core/transport/.
-  const FORBIDDEN = /\bnats\b|@nats-io|\$JS|\$KV|jetstream|\bmbx\.|_INBOX|filter_subjects?|\bsubjects\b|\bdurable|\bconsumer|\bKvm\b|\bfetch\(|\btopic|ntfy|Authorization/i;
+  const FORBIDDEN =
+    /\bnats\b|@nats-io|\$JS|\$KV|jetstream|\bmbx\.|_INBOX|filter_subjects?|\bsubjects\b|\bdurable|\bconsumer|\bKvm\b|\bfetch\(|\btopic|ntfy|Authorization/i;
   it('core, agents and the CLI know nothing about subjects, $JS, JetStream or NATS', () => {
     const files = [...walk(path.join(ROOT, 'src/core')), ...walk(path.join(ROOT, 'src/agents'))];
     assert.ok(files.length >= 8);
-    for (const f of files) assert.doesNotMatch(strip(fs.readFileSync(f, 'utf8')), FORBIDDEN, path.relative(ROOT, f));
+    for (const f of files)
+      assert.doesNotMatch(strip(fs.readFileSync(f, 'utf8')), FORBIDDEN, path.relative(ROOT, f));
     const cli = fs.readFileSync(path.join(ROOT, 'src/cli.ts'), 'utf8');
     const imports = [...cli.matchAll(/from '([^']+)'/g)].map((m) => m[1] ?? '');
-    assert.deepEqual(imports.filter((i) => i.includes('transport')), ['./core/transport/nats.js']); // the single place that picks the broker
+    assert.deepEqual(
+      imports.filter((i) => i.includes('transport')),
+      ['./core/transport/nats.js'],
+    ); // the single place that picks the broker
     assert.doesNotMatch(strip(cli).replace("'./core/transport/nats.js'", ''), FORBIDDEN);
   });
   it('the transport directory holds only the NATS transport', () => {

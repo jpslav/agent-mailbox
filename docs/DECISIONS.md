@@ -54,13 +54,13 @@ context, decision, why.
 - **Decision:** Use the documented per-session inbox socket, fed by one auto-started
   `mbox deliverd` per user and machine. `mbox wait` stays as the generic fallback.
 - **Why, and what was rejected:**
-  - *Plugin monitors* were rejected: the desktop app does not start them.
-  - *asyncRewake hooks* were rejected: the desktop app treats a session with a running hook as
+  - _Plugin monitors_ were rejected: the desktop app does not start them.
+  - _asyncRewake hooks_ were rejected: the desktop app treats a session with a running hook as
     busy and queues the user's input behind it, which hung a session.
-  - *A background-task `mbox wait`* works, but shows a running task in every session, which can
+  - _A background-task `mbox wait`_ works, but shows a running task in every session, which can
     block managers from archiving child sessions. It stays as the generic fallback for agents
     without a push channel.
-  - *The inbox socket* runs nothing inside any session, wakes idle sessions in both apps, and is
+  - _The inbox socket_ runs nothing inside any session, wakes idle sessions in both apps, and is
     documented by Claude Code for scripts and hooks. See PROTOCOL.md.
 
 ## Honest sender

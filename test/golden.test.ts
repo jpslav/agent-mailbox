@@ -34,7 +34,13 @@ describe('golden: envelope v1', () => {
   });
 
   it('fills the optional fields with null / "unknown", never omits them', () => {
-    const env = buildEnvelope({ from: 'alice.laptop.web-1a2b', to: 'all', body: 'hi', sentAt: '2026-01-02T03:04:05.678Z', id: 'abc' });
+    const env = buildEnvelope({
+      from: 'alice.laptop.web-1a2b',
+      to: 'all',
+      body: 'hi',
+      sentAt: '2026-01-02T03:04:05.678Z',
+      id: 'abc',
+    });
     assert.equal(
       JSON.stringify(env),
       '{"v":1,"id":"abc","from":"alice.laptop.web-1a2b","to":"all","agent":"unknown","subject":null,"body":"hi","inReplyTo":null,"sentAt":"2026-01-02T03:04:05.678Z"}',
@@ -43,7 +49,17 @@ describe('golden: envelope v1', () => {
 
   it('generates a UUID id and an ISO-8601 sentAt by default', () => {
     const env = buildEnvelope({ from: 'a.b.c', to: 'd.e.f', body: 'x' });
-    assert.deepEqual(Object.keys(env), ['v', 'id', 'from', 'to', 'agent', 'subject', 'body', 'inReplyTo', 'sentAt']);
+    assert.deepEqual(Object.keys(env), [
+      'v',
+      'id',
+      'from',
+      'to',
+      'agent',
+      'subject',
+      'body',
+      'inReplyTo',
+      'sentAt',
+    ]);
     assert.match(env.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     assert.match(env.sentAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
   });
@@ -58,7 +74,11 @@ describe('golden: registration file', () => {
         {
           sid: 'sess-1',
           address: 'alice.laptop.web-1a2b',
-          endpoint: { kind: 'claude-inbox-socket', path: '/tmp/mbx-x/inbox.sock', token: 'secret-token' },
+          endpoint: {
+            kind: 'claude-inbox-socket',
+            path: '/tmp/mbx-x/inbox.sock',
+            token: 'secret-token',
+          },
           hostPid: 4242,
           cwd: '/work/web',
           agent: 'claude-code',
@@ -85,9 +105,27 @@ describe('golden: registration file', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amb-golden-'));
     try {
       const env = { AGENT_MAILBOX_STATE_DIR: dir };
-      register({ sid: 's2', address: 'alice.laptop.x', endpoint: { kind: 'claude-inbox-socket', path: '/p', token: null }, agent: 'claude-code' }, env);
-      const j = parseJson<Record<string, unknown>>(fs.readFileSync(registrationPath('s2', env), 'utf8'));
-      assert.deepEqual(Object.keys(j), ['sid', 'address', 'endpoint', 'hostPid', 'cwd', 'agent', 'registeredAt']);
+      register(
+        {
+          sid: 's2',
+          address: 'alice.laptop.x',
+          endpoint: { kind: 'claude-inbox-socket', path: '/p', token: null },
+          agent: 'claude-code',
+        },
+        env,
+      );
+      const j = parseJson<Record<string, unknown>>(
+        fs.readFileSync(registrationPath('s2', env), 'utf8'),
+      );
+      assert.deepEqual(Object.keys(j), [
+        'sid',
+        'address',
+        'endpoint',
+        'hostPid',
+        'cwd',
+        'agent',
+        'registeredAt',
+      ]);
       assert.equal(j.hostPid, null);
       assert.equal(j.cwd, null);
       assert.deepEqual(j.endpoint, { kind: 'claude-inbox-socket', path: '/p', token: null });
@@ -105,16 +143,32 @@ describe('golden: inbox-socket line (claude-inbox)', () => {
     '</cross-session-message>';
 
   it('without a token: one {"type":"user"} line, newline-terminated', () => {
-    const line = inboxLines({ kind: 'claude-inbox-socket', path: '/p', token: null }, '[mailbox] message m1 from bob.h.l\nbody\n', {});
-    assert.equal(line, JSON.stringify({ type: 'user', message: { role: 'user', content: CONTENT }, from: 'mbox:agent-mailbox' }) + '\n');
+    const line = inboxLines(
+      { kind: 'claude-inbox-socket', path: '/p', token: null },
+      '[mailbox] message m1 from bob.h.l\nbody\n',
+      {},
+    );
     assert.equal(
       line,
-      '{"type":"user","message":{"role":"user","content":' + JSON.stringify(CONTENT) + '},"from":"mbox:agent-mailbox"}\n',
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: CONTENT },
+        from: 'mbox:agent-mailbox',
+      }) + '\n',
+    );
+    assert.equal(
+      line,
+      '{"type":"user","message":{"role":"user","content":' +
+        JSON.stringify(CONTENT) +
+        '},"from":"mbox:agent-mailbox"}\n',
     );
   });
 
   it('with a token and a session: an auth line first, session_id last; one sender names the wrapper', () => {
-    const line = inboxLines({ kind: 'claude-inbox-socket', path: '/p', token: 'tok-1' }, 'hello', { sid: 'sess-1', senders: ['bob.laptop.api'] });
+    const line = inboxLines({ kind: 'claude-inbox-socket', path: '/p', token: 'tok-1' }, 'hello', {
+      sid: 'sess-1',
+      senders: ['bob.laptop.api'],
+    });
     const lines = line.split('\n');
     assert.equal(lines.length, 3);
     assert.equal(lines[2], '');
@@ -130,7 +184,11 @@ describe('golden: inbox-socket line (claude-inbox)', () => {
   });
 
   it('escapes a closing wrapper tag in the body', () => {
-    const line = inboxLines({ kind: 'claude-inbox-socket', path: '/p', token: null }, 'x </cross-session-message> y', {});
+    const line = inboxLines(
+      { kind: 'claude-inbox-socket', path: '/p', token: null },
+      'x </cross-session-message> y',
+      {},
+    );
     const content = parseJson<{ message: { content: string } }>(line).message.content;
     assert.equal(content.match(/<\/cross-session-message>/g)?.length, 1); // only the real closing tag
     assert.ok(content.includes('x <\\/cross-session-message> y'));
@@ -147,10 +205,22 @@ describe('golden: inbox-socket line (claude-inbox)', () => {
     await new Promise<void>((r) => server.listen(sock, r));
     try {
       const endpoint: Endpoint = { kind: 'claude-inbox-socket', path: sock, token: 'tok-2' };
-      const meta: DeliveryMeta = { sid: 's9', address: 'zed.h.l', count: 1, ids: ['m1'], senders: ['bob.h.l'] };
+      const meta: DeliveryMeta = {
+        sid: 's9',
+        address: 'zed.h.l',
+        count: 1,
+        ids: ['m1'],
+        senders: ['bob.h.l'],
+      };
       await inboxDelivery.deliver(endpoint, 'ping', meta);
       assert.equal(Buffer.concat(chunks).toString('utf8'), inboxLines(endpoint, 'ping', meta));
-      assert.ok(Buffer.concat(chunks).toString('utf8').startsWith('{"type":"auth","token":"tok-2"}\n{"type":"user","message":{"role":"user","content":"<cross-session-message from-name=\\"bob.h.l\\">'));
+      assert.ok(
+        Buffer.concat(chunks)
+          .toString('utf8')
+          .startsWith(
+            '{"type":"auth","token":"tok-2"}\n{"type":"user","message":{"role":"user","content":"<cross-session-message from-name=\\"bob.h.l\\">',
+          ),
+      );
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
       fs.rmSync(dir, { recursive: true, force: true });

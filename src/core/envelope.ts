@@ -18,8 +18,27 @@ export interface BuildEnvelopeInput {
 }
 
 /** Envelope v1. `id` is broker-independent: it is what `--re` references and what dedupes. */
-export function buildEnvelope({ from, to, agent = 'unknown', subject = null, body, inReplyTo = null, sentAt = new Date().toISOString(), id = crypto.randomUUID() }: BuildEnvelopeInput): Envelope {
-  return { v: 1, id, from, to, agent, subject: subject ?? null, body, inReplyTo: inReplyTo ?? null, sentAt };
+export function buildEnvelope({
+  from,
+  to,
+  agent = 'unknown',
+  subject = null,
+  body,
+  inReplyTo = null,
+  sentAt = new Date().toISOString(),
+  id = crypto.randomUUID(),
+}: BuildEnvelopeInput): Envelope {
+  return {
+    v: 1,
+    id,
+    from,
+    to,
+    agent,
+    subject: subject ?? null,
+    body,
+    inReplyTo: inReplyTo ?? null,
+    sentAt,
+  };
 }
 
 /** A payload that claims to be an envelope: nothing about it is checked yet. */
@@ -44,13 +63,22 @@ type ParsedEnvelope = UntrustedEnvelope & { from: string; body: string };
  * broker verified; `from` is what the envelope claims. A payload that is not a v1 envelope (e.g.
  * text a human published by hand) becomes a raw message.
  */
-export function parseDelivery(d: Pick<Delivery, 'id' | 'time' | 'to' | 'sender' | 'payload'>): Message {
+export function parseDelivery(
+  d: Pick<Delivery, 'id' | 'time' | 'to' | 'sender' | 'payload'>,
+): Message {
   const base = { id: d.id, time: d.time, sender: typeof d.sender === 'string' ? d.sender : null };
   let env: ParsedEnvelope | null = null;
   try {
     // Anyone can publish anything, so this is untrusted JSON until the checks below.
     const j = JSON.parse(d.payload) as UntrustedEnvelope | null;
-    if (j && typeof j === 'object' && j.v === 1 && typeof j.from === 'string' && typeof j.body === 'string') env = j as ParsedEnvelope;
+    if (
+      j &&
+      typeof j === 'object' &&
+      j.v === 1 &&
+      typeof j.from === 'string' &&
+      typeof j.body === 'string'
+    )
+      env = j as ParsedEnvelope;
   } catch {
     /* not JSON */
   }
@@ -68,7 +96,17 @@ export function parseDelivery(d: Pick<Delivery, 'id' | 'time' | 'to' | 'sender' 
       raw: false,
     };
   }
-  return { ...base, from: RAW_FROM, to: d.to, agent: null, subject: null, body: String(d.payload ?? ''), inReplyTo: null, sentAt: null, raw: true };
+  return {
+    ...base,
+    from: RAW_FROM,
+    to: d.to,
+    agent: null,
+    subject: null,
+    body: String(d.payload ?? ''),
+    inReplyTo: null,
+    sentAt: null,
+    raw: true,
+  };
 }
 
 // eslint-disable-next-line no-control-regex -- matching control characters is the point: they are replaced by spaces
@@ -91,7 +129,10 @@ function defang(body: string): string {
 function verified(m: Pick<Message, 'sender' | 'raw' | 'from'>): string {
   if (!m.sender) return 'verified-user: (unknown)';
   const claimed = m.raw ? null : String(m.from).split('.')[0];
-  const flag = claimed && claimed !== m.sender ? ` (MISMATCH: "from" claims user ${oneLine(claimed, 60)})` : '';
+  const flag =
+    claimed && claimed !== m.sender
+      ? ` (MISMATCH: "from" claims user ${oneLine(claimed, 60)})`
+      : '';
   return `verified-user: ${oneLine(m.sender, 60)}${flag}`;
 }
 
@@ -103,10 +144,16 @@ function staleNote(m: Pick<Message, 'sentAt'>, now: number): string {
 }
 
 /** The fields of a message that a printed block shows. */
-export type BlockMessage = Pick<Message, 'id' | 'from' | 'to' | 'subject' | 'body' | 'raw' | 'sender' | 'sentAt'>;
+export type BlockMessage = Pick<
+  Message,
+  'id' | 'from' | 'to' | 'subject' | 'body' | 'raw' | 'sender' | 'sentAt'
+>;
 
 /** The block printed by `watch` / `inbox` (single string => single write call). */
-export function formatBlock(m: BlockMessage, { sendCmd = 'mbox', now = Date.now() }: { sendCmd?: string; now?: number } = {}): string {
+export function formatBlock(
+  m: BlockMessage,
+  { sendCmd = 'mbox', now = Date.now() }: { sendCmd?: string; now?: number } = {},
+): string {
   const from = oneLine(m.from, 120);
   const id = oneLine(m.id, 140);
   const reply = m.raw ? '' : ` Reply with: ${sendCmd} send ${from} --re ${id} "<text>"`;
@@ -165,11 +212,22 @@ export interface BatchOptions {
  */
 export function formatBatch(
   items: BatchItem[],
-  { address, maxChars = 8000, sendCmd = 'mbox', now = Date.now(), note = '(mail delivery, not an error)', later = 'after this turn ends' }: BatchOptions,
+  {
+    address,
+    maxChars = 8000,
+    sendCmd = 'mbox',
+    now = Date.now(),
+    note = '(mail delivery, not an error)',
+    later = 'after this turn ends',
+  }: BatchOptions,
 ): { text: string; count: number; shown: number } {
   const fresh = items.map((it, i) => ({ ...it, i })).filter((it) => it.fresh);
-  const head = (n: number): string => `[mailbox] ${n} new message${n === 1 ? '' : 's'} for ${oneLine(address, 140)}${note ? ` ${note}` : ''}:\n`;
-  const blocks = (list: typeof fresh, cap: number): string[] => list.map((f) => formatBlock({ ...f.message, body: cutBody(f.message, cap, sendCmd) }, { sendCmd, now }));
+  const head = (n: number): string =>
+    `[mailbox] ${n} new message${n === 1 ? '' : 's'} for ${oneLine(address, 140)}${note ? ` ${note}` : ''}:\n`;
+  const blocks = (list: typeof fresh, cap: number): string[] =>
+    list.map((f) =>
+      formatBlock({ ...f.message, body: cutBody(f.message, cap, sendCmd) }, { sendCmd, now }),
+    );
   const sum = (a: string[]): number => a.reduce((n, s) => n + s.length, 0);
   if (!fresh.length) return { text: '', count: items.length, shown: 0 };
 
@@ -179,7 +237,9 @@ export function formatBatch(
   }
 
   // Block overhead without the body, plus room for the truncation note.
-  const overhead = fresh.map((f) => formatBlock({ ...f.message, body: '' }, { sendCmd, now }).length + 120);
+  const overhead = fresh.map(
+    (f) => formatBlock({ ...f.message, body: '' }, { sendCmd, now }).length + 120,
+  );
   let take = 0;
   let used = head(fresh.length).length + TAIL_RESERVE;
   while (take < fresh.length) {
@@ -195,20 +255,27 @@ export function formatBatch(
     : '';
 
   // Water-fill the body budget: short bodies stay whole, long ones share what is left.
-  const budget = maxChars - head(take).length - tail.length - overhead.slice(0, take).reduce((n, x) => n + x, 0);
+  const budget =
+    maxChars - head(take).length - tail.length - overhead.slice(0, take).reduce((n, x) => n + x, 0);
   const lens = shown.map((f) => f.message.body.length).sort((a, b) => a - b);
   let cap = Infinity;
   let left = budget;
   for (let j = 0; j < lens.length; j++) {
     const len = lens[j]!; // j < lens.length
     const share = Math.floor(left / (lens.length - j));
-    if (len > share) { cap = Math.max(0, share); break; }
+    if (len > share) {
+      cap = Math.max(0, share);
+      break;
+    }
     left -= len;
   }
   let text = head(take) + blocks(shown, cap).join('') + tail;
   // Defanging can add a character per line; shave the cap until it fits.
   for (let k = 0; k < 20 && text.length > maxChars && cap > 0; k++) {
-    cap = Math.max(0, (cap === Infinity ? Math.max(...lens) : cap) - Math.ceil((text.length - maxChars) / take));
+    cap = Math.max(
+      0,
+      (cap === Infinity ? Math.max(...lens) : cap) - Math.ceil((text.length - maxChars) / take),
+    );
     text = head(take) + blocks(shown, cap).join('') + tail;
   }
   return { text, count: rest[0]?.i ?? items.length, shown: take };

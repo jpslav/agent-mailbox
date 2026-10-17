@@ -25,7 +25,10 @@ export function shortHost(): string {
 
 /** Sanitise `label` and truncate it to `maxLen` (the transport says how long a label may be). */
 export function fitLabel(user: string, host: string, label: string, maxLen: number): string {
-  if (maxLen < 1) throw new Error(`user "${user}" and host "${host}" are too long to form an address on this broker`);
+  if (maxLen < 1)
+    throw new Error(
+      `user "${user}" and host "${host}" are too long to form an address on this broker`,
+    );
   const out = sanitizeSeg(label, maxLen);
   if (!out) throw new Error(`label "${label}" has no usable characters (allowed: a-z 0-9 -)`);
   return out;

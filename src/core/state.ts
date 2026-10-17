@@ -23,18 +23,26 @@ export class NoSessionError extends Error {
 const SID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function stateDir(env: Env = process.env): string {
-  return env.AGENT_MAILBOX_STATE_DIR || path.join(xdgDir('XDG_STATE_HOME', path.join('.local', 'state'), env), 'agent-mailbox');
+  return (
+    env.AGENT_MAILBOX_STATE_DIR ||
+    path.join(xdgDir('XDG_STATE_HOME', path.join('.local', 'state'), env), 'agent-mailbox')
+  );
 }
 const sessionsDir = (env: Env): string => path.join(stateDir(env), 'sessions');
 const byPidDir = (env: Env): string => path.join(stateDir(env), 'by-pid');
 
-export const statePath = (sid: string, env: Env = process.env): string => path.join(sessionsDir(env), `${sid}.json`);
-export const cursorPath = (sid: string, env: Env = process.env): string => path.join(sessionsDir(env), `${sid}.cursor.json`);
-export const lockPath = (sid: string, env: Env = process.env): string => path.join(sessionsDir(env), `${sid}.lock`);
-export const waitLockPath = (sid: string, env: Env = process.env): string => path.join(sessionsDir(env), `${sid}.wait.lock`);
+export const statePath = (sid: string, env: Env = process.env): string =>
+  path.join(sessionsDir(env), `${sid}.json`);
+export const cursorPath = (sid: string, env: Env = process.env): string =>
+  path.join(sessionsDir(env), `${sid}.cursor.json`);
+export const lockPath = (sid: string, env: Env = process.env): string =>
+  path.join(sessionsDir(env), `${sid}.lock`);
+export const waitLockPath = (sid: string, env: Env = process.env): string =>
+  path.join(sessionsDir(env), `${sid}.wait.lock`);
 
 function validSid(sid: string): string {
-  if (!SID_RE.test(sid)) throw new Error(`invalid session id "${sid}" (allowed: letters, digits, . _ -)`);
+  if (!SID_RE.test(sid))
+    throw new Error(`invalid session id "${sid}" (allowed: letters, digits, . _ -)`);
   return sid;
 }
 
@@ -43,7 +51,10 @@ export function validateSessionId(sid: unknown): string {
 }
 
 /** Fallback lookup: session id recorded for a host (agent) process id by an earlier command. */
-export function sessionIdForHostPid(pid: number | null | undefined, env: Env = process.env): string | null {
+export function sessionIdForHostPid(
+  pid: number | null | undefined,
+  env: Env = process.env,
+): string | null {
   if (!pid || !/^\d+$/.test(String(pid))) return null;
   try {
     const sid = fs.readFileSync(path.join(byPidDir(env), String(pid)), 'utf8').trim();
@@ -95,7 +106,9 @@ export function readJson(file: string): Record<string, unknown> | null {
 export function readState(sid: string, env: Env = process.env): SessionState | null {
   const s = readJson(statePath(sid, env));
   if (!s || typeof s.address !== 'string') return null;
-  const aliases = Array.isArray(s.aliases) ? (s.aliases as unknown[]).filter((a): a is string => typeof a === 'string') : [];
+  const aliases = Array.isArray(s.aliases)
+    ? (s.aliases as unknown[]).filter((a): a is string => typeof a === 'string')
+    : [];
   // `address` is checked; the other fields were written by ensureSession and are not re-validated.
   return { ...s, aliases } as unknown as SessionState;
 }
@@ -103,7 +116,10 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
 export function readCursor(sid: string, env: Env = process.env): CursorFile | null {
   const c = readJson(cursorPath(sid, env));
   if (!c || c.cursor === undefined || c.cursor === null) return null;
-  return { cursor: c.cursor, seen: c.seen && typeof c.seen === 'object' ? (c.seen as Record<string, number>) : {} };
+  return {
+    cursor: c.cursor,
+    seen: c.seen && typeof c.seen === 'object' ? (c.seen as Record<string, number>) : {},
+  };
 }
 
 export function writeCursor(sid: string, cur: CursorFile, env: Env = process.env): void {
@@ -135,7 +151,12 @@ export async function ensureSession({
   let st = readState(sid, env);
   if (!st) {
     const host = shortHost();
-    const label = fitLabel(cfg.user, host, defaultLabel(cwd, sid), transport.limits.maxLabelLen(cfg.user, host));
+    const label = fitLabel(
+      cfg.user,
+      host,
+      defaultLabel(cwd, sid),
+      transport.limits.maxLabelLen(cfg.user, host),
+    );
     const created: SessionState = {
       address: `${cfg.user}.${host}.${label}`,
       aliases: [],
@@ -162,7 +183,11 @@ export async function ensureSession({
   return st;
 }
 
-export function updateState(sid: string, fn: (st: SessionState) => SessionState | void, env: Env = process.env): SessionState {
+export function updateState(
+  sid: string,
+  fn: (st: SessionState) => SessionState | void,
+  env: Env = process.env,
+): SessionState {
   const st = readState(sid, env);
   if (!st) throw new Error(`no state for session ${sid}`);
   const next = fn({ ...st, aliases: [...st.aliases] }) || st;
@@ -251,7 +276,8 @@ export function acquireFileLock(file: string): LockResult {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
     }
-    if (typeof pid === 'number' && pid && pid !== process.pid && pidAlive(pid) && fresh) return { ok: false, pid };
+    if (typeof pid === 'number' && pid && pid !== process.pid && pidAlive(pid) && fresh)
+      return { ok: false, pid };
     fs.rmSync(file, { force: true });
   }
   const last = readJson(file)?.pid;
@@ -266,7 +292,13 @@ function liveHolder(file: string): number | null {
   try {
     const pid = readJson(file)?.pid;
     const fresh = Date.now() - fs.statSync(file).mtimeMs < LOCK_FRESH_MS;
-    return typeof pid === 'number' && Number.isInteger(pid) && pid !== process.pid && fresh && pidAlive(pid) ? pid : null;
+    return typeof pid === 'number' &&
+      Number.isInteger(pid) &&
+      pid !== process.pid &&
+      fresh &&
+      pidAlive(pid)
+      ? pid
+      : null;
   } catch {
     return null;
   }
@@ -276,15 +308,18 @@ function liveHolder(file: string): number | null {
 export const lockHolder = (file: string): number | null => liveHolder(file);
 
 /** pid of a live `watch` for the session (other than this process), else null. */
-export const watcherPid = (sid: string, env: Env = process.env): number | null => liveHolder(lockPath(sid, env));
+export const watcherPid = (sid: string, env: Env = process.env): number | null =>
+  liveHolder(lockPath(sid, env));
 
 /** pid of a live `wait` for the session (other than this process), else null. */
-export const waiterPid = (sid: string, env: Env = process.env): number | null => liveHolder(waitLockPath(sid, env));
+export const waiterPid = (sid: string, env: Env = process.env): number | null =>
+  liveHolder(waitLockPath(sid, env));
 
 /** Resolves once `pid` has exited, or after `timeoutMs`. */
 export async function awaitExit(pid: number | null, timeoutMs: number): Promise<boolean> {
   const t0 = Date.now();
-  while (pid && pidAlive(pid) && Date.now() - t0 < timeoutMs) await new Promise((r) => setTimeout(r, 50));
+  while (pid && pidAlive(pid) && Date.now() - t0 < timeoutMs)
+    await new Promise((r) => setTimeout(r, 50));
   return !pidAlive(pid);
 }
 

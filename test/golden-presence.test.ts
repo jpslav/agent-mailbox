@@ -25,7 +25,12 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
     const nc = await b.conn('admin'); // a user may not read raw KV entries; the test inspects them as the admin
     try {
       const rec = presenceRecord(
-        { address: 'alice.laptop.web-1a2b', aliases: ['alice.laptop.front'], cwd: '/work/web', createdAt: '2026-01-02T03:04:05.678Z' },
+        {
+          address: 'alice.laptop.web-1a2b',
+          aliases: ['alice.laptop.front'],
+          cwd: '/work/web',
+          createdAt: '2026-01-02T03:04:05.678Z',
+        },
         { sid: 'sess-1', cfg: { user: 'alice' }, agent: 'claude-code', pid: 4242 },
       );
       await t.presence.announce(rec);
@@ -43,19 +48,33 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
       // ...and the listing built from it
       const [peer] = await t.presence.list();
       assert.ok(peer);
-      assert.deepEqual(Object.keys(peer), ['session', 'address', 'aliases', 'agent', 'user', 'host', 'cwd', 'pid', 'lastSeen', 'live']);
-      assert.deepEqual({ ...peer, lastSeen: 0 }, {
-        session: 'sess-1',
-        address: 'alice.laptop.web-1a2b',
-        aliases: ['alice.laptop.front'],
-        agent: 'claude-code',
-        user: 'alice',
-        host: 'laptop',
-        cwd: '/work/web',
-        pid: 4242,
-        lastSeen: 0,
-        live: true,
-      });
+      assert.deepEqual(Object.keys(peer), [
+        'session',
+        'address',
+        'aliases',
+        'agent',
+        'user',
+        'host',
+        'cwd',
+        'pid',
+        'lastSeen',
+        'live',
+      ]);
+      assert.deepEqual(
+        { ...peer, lastSeen: 0 },
+        {
+          session: 'sess-1',
+          address: 'alice.laptop.web-1a2b',
+          aliases: ['alice.laptop.front'],
+          agent: 'claude-code',
+          user: 'alice',
+          host: 'laptop',
+          cwd: '/work/web',
+          pid: 4242,
+          lastSeen: 0,
+          live: true,
+        },
+      );
     } finally {
       await t.close();
       await nc.close();

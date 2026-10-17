@@ -8,7 +8,12 @@ export const HEARTBEAT_MS = 10 * 60 * 1000;
 /** The presence record for a session: what peers see in `mbox peers`. */
 export function presenceRecord(
   st: SessionState,
-  { sid, cfg, agent = 'unknown', pid = process.pid }: { sid: string; cfg: Pick<Config, 'user'>; agent?: string; pid?: number },
+  {
+    sid,
+    cfg,
+    agent = 'unknown',
+    pid = process.pid,
+  }: { sid: string; cfg: Pick<Config, 'user'>; agent?: string; pid?: number },
 ): PresenceRecord {
   return {
     address: st.address,
@@ -41,7 +46,8 @@ export function resolveTarget(input: unknown, peers: PresenceEntry[]): ResolvedT
   if (raw === 'all') return { to: 'all', live: true, peer: null };
   const live = peers.filter((p) => p.live);
   const nameOwners = new Map<string, PresenceEntry>(); // name -> peer
-  for (const p of live) for (const n of [p.address, ...p.aliases]) if (!nameOwners.has(n)) nameOwners.set(n, p);
+  for (const p of live)
+    for (const n of [p.address, ...p.aliases]) if (!nameOwners.has(n)) nameOwners.set(n, p);
 
   if (isAddr(raw)) {
     const peer = nameOwners.get(raw) || null;
@@ -62,13 +68,17 @@ export function resolveTarget(input: unknown, peers: PresenceEntry[]): ResolvedT
     if (!first) continue;
     const sessions = new Set(hits.map(([, p]) => p.session));
     if (sessions.size > 1) {
-      const lines = hits.map(([n, p]) => `  ${n}${n !== p.address ? ` (alias of ${p.address})` : ''}`);
-      throw new ResolveError(`"${raw}" is ambiguous; matches ${sessions.size} live sessions:\n${lines.join('\n')}\nUse a longer prefix or the full address.`);
+      const lines = hits.map(
+        ([n, p]) => `  ${n}${n !== p.address ? ` (alias of ${p.address})` : ''}`,
+      );
+      throw new ResolveError(
+        `"${raw}" is ambiguous; matches ${sessions.size} live sessions:\n${lines.join('\n')}\nUse a longer prefix or the full address.`,
+      );
     }
     const peer = first[1];
     // Several names for one session: prefer an exact alias hit, else the primary address.
     const exact = hits.find(([n]) => n === raw);
-    const name = exact ? exact[0] : hits.find(([n]) => n === peer.address)?.[0] ?? first[0];
+    const name = exact ? exact[0] : (hits.find(([n]) => n === peer.address)?.[0] ?? first[0]);
     return { to: name, live: true, peer };
   }
   throw new ResolveError(

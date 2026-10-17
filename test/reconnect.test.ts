@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { after, before } from 'node:test';
-import { Broker, Watcher, findServer, makeEnv, projectDir, send, sessionAddr, sleep } from './helpers.js';
+import {
+  Broker,
+  Watcher,
+  findServer,
+  makeEnv,
+  projectDir,
+  send,
+  sessionAddr,
+  sleep,
+} from './helpers.js';
 import { describe, it } from './suite.js';
 
 const SERVER = findServer();
@@ -40,8 +49,14 @@ describe('server crash and restart', { skip: SERVER.skip }, () => {
       await sleep(800);
       assert.equal(w.out.split('connection lost').length - 1, 1, w.out);
       assert.equal(w.out.split('connection restored').length - 1, 1, w.out);
-      assert.deepEqual(w.messages().map((m) => m.body), ['before', 'after']);
-      assert.deepEqual(w2.messages().map((m) => m.body), ['queued before the crash']);
+      assert.deepEqual(
+        w.messages().map((m) => m.body),
+        ['before', 'after'],
+      );
+      assert.deepEqual(
+        w2.messages().map((m) => m.body),
+        ['queued before the crash'],
+      );
     } finally {
       await w.stop();
       await w2?.stop();

@@ -115,11 +115,11 @@ changes.
 
 NATS mapping (a transport detail):
 
-| what | subject | stored in |
-| --- | --- | --- |
-| direct mail to `U.H.L` from user `S` | `mbx.U.H.L.S` | stream `MBX_U` (`mbx.U.>`) |
-| broadcast from user `S` | `mbx.all.S` | stream `MBX_ALL` (`mbx.all.*`) |
-| presence of a session | KV `presence`, key `U.H.<session hash>` | stream `KV_presence` |
+| what                                 | subject                                 | stored in                      |
+| ------------------------------------ | --------------------------------------- | ------------------------------ |
+| direct mail to `U.H.L` from user `S` | `mbx.U.H.L.S`                           | stream `MBX_U` (`mbx.U.>`)     |
+| broadcast from user `S`              | `mbx.all.S`                             | stream `MBX_ALL` (`mbx.all.*`) |
+| presence of a session                | KV `presence`, key `U.H.<session hash>` | stream `KV_presence`           |
 
 The trailing sender token is **enforced by the server** (user `S` may only publish subjects ending
 in `.S`), so every delivery carries a verified sender user. Publishers set `Nats-Msg-Id` to the
@@ -144,11 +144,11 @@ tailnet (see Tailscale below). Files, all under `server/`:
 Default locations (override with environment variables, which `mbox-admin.sh` and `install.sh`
 both read):
 
-| | macOS (Homebrew) | Linux |
-| --- | --- | --- |
-| config dir, `MBOX_CONF_DIR` | `$(brew --prefix)/etc/agent-mailbox` | `/etc/agent-mailbox` |
-| JetStream store, `store_dir` | `$(brew --prefix)/var/lib/nats` | `/var/lib/agent-mailbox` |
-| pid file | `$(brew --prefix)/var/run/agent-mailbox/nats-server.pid` | `/run/agent-mailbox/nats-server.pid` |
+|                              | macOS (Homebrew)                                         | Linux                                |
+| ---------------------------- | -------------------------------------------------------- | ------------------------------------ |
+| config dir, `MBOX_CONF_DIR`  | `$(brew --prefix)/etc/agent-mailbox`                     | `/etc/agent-mailbox`                 |
+| JetStream store, `store_dir` | `$(brew --prefix)/var/lib/nats`                          | `/var/lib/agent-mailbox`             |
+| pid file                     | `$(brew --prefix)/var/run/agent-mailbox/nats-server.pid` | `/run/agent-mailbox/nats-server.pid` |
 
 `mbox-admin.sh` uses the Homebrew paths whenever `brew` is on `PATH` (including Linuxbrew), the
 Linux paths otherwise. It connects to the address in the config's `listen` line (a wildcard

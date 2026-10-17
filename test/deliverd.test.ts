@@ -9,7 +9,24 @@ import { jetstream, jetstreamManager, type JetStreamManager } from '@nats-io/jet
 import type { Env, Registration } from '../src/core/types.js';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { consumerName } from '../src/core/transport/nats.js';
-import { Broker, FakeInbox, MBOX, Watcher, at, findServer, makeEnv, mbox, parseJson, projectDir, send, sleep, socketDir, type FakeInboxOptions, type HookOutput, type MachineEnv } from './helpers.js';
+import {
+  Broker,
+  FakeInbox,
+  MBOX,
+  Watcher,
+  at,
+  findServer,
+  makeEnv,
+  mbox,
+  parseJson,
+  projectDir,
+  send,
+  sleep,
+  socketDir,
+  type FakeInboxOptions,
+  type HookOutput,
+  type MachineEnv,
+} from './helpers.js';
 import { describe, it } from './suite.js';
 
 const SERVER = findServer();
@@ -59,10 +76,12 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     cleanup.push(() => stopDaemon(env));
     return env;
   };
-  const statePath = (env: MachineEnv, ...p: string[]): string => path.join(env.AGENT_MAILBOX_STATE_DIR, ...p);
+  const statePath = (env: MachineEnv, ...p: string[]): string =>
+    path.join(env.AGENT_MAILBOX_STATE_DIR, ...p);
   const daemonPid = (env: MachineEnv): number | null => {
     try {
-      return parseJson<{ pid: number }>(fs.readFileSync(statePath(env, 'deliverd.lock'), 'utf8')).pid;
+      return parseJson<{ pid: number }>(fs.readFileSync(statePath(env, 'deliverd.lock'), 'utf8'))
+        .pid;
     } catch {
       return null;
     }
@@ -90,10 +109,29 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     return p;
   };
   /** The SessionStart hook as Claude Code runs it, with the inbox socket in its environment. */
-  const sessionStart = (env: MachineEnv, sid: string, dir: string, { socket, token = TOKEN, hostPid }: { socket?: string; token?: string; hostPid?: number } = {}): { ctx: string; ms: number; address: string } => {
-    const e = { ...env, CLAUDECODE: '1', ...(socket ? { CLAUDE_CODE_MESSAGING_SOCKET: socket } : {}), ...(token ? { CLAUDE_CODE_MESSAGING_TOKEN: token } : {}), ...(hostPid ? { CLAUDE_PID: String(hostPid) } : {}) };
+  const sessionStart = (
+    env: MachineEnv,
+    sid: string,
+    dir: string,
+    { socket, token = TOKEN, hostPid }: { socket?: string; token?: string; hostPid?: number } = {},
+  ): { ctx: string; ms: number; address: string } => {
+    const e = {
+      ...env,
+      CLAUDECODE: '1',
+      ...(socket ? { CLAUDE_CODE_MESSAGING_SOCKET: socket } : {}),
+      ...(token ? { CLAUDE_CODE_MESSAGING_TOKEN: token } : {}),
+      ...(hostPid ? { CLAUDE_PID: String(hostPid) } : {}),
+    };
     const t0 = Date.now();
-    const r = mbox(['hook', 'claude-code', 'session-start'], { env: e, input: JSON.stringify({ session_id: sid, cwd: dir, hook_event_name: 'SessionStart', source: 'startup' }) });
+    const r = mbox(['hook', 'claude-code', 'session-start'], {
+      env: e,
+      input: JSON.stringify({
+        session_id: sid,
+        cwd: dir,
+        hook_event_name: 'SessionStart',
+        source: 'startup',
+      }),
+    });
     const ms = Date.now() - t0;
     assert.equal(r.code, 0, r.stderr);
     const ctx = parseJson<HookOutput>(r.stdout).hookSpecificOutput.additionalContext;
@@ -102,11 +140,18 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     return { ctx, ms, address };
   };
   const sessionEnd = (env: MachineEnv, sid: string): void => {
-    const r = mbox(['hook', 'claude-code', 'session-end'], { env: { ...env, CLAUDECODE: '1' }, input: JSON.stringify({ session_id: sid, hook_event_name: 'SessionEnd', reason: 'other' }) });
+    const r = mbox(['hook', 'claude-code', 'session-end'], {
+      env: { ...env, CLAUDECODE: '1' },
+      input: JSON.stringify({ session_id: sid, hook_event_name: 'SessionEnd', reason: 'other' }),
+    });
     assert.equal(r.code, 0, r.stderr);
   };
   const inbox = async (sid: string, opts: FakeInboxOptions = {}): Promise<FakeInbox> => {
-    const fake = new FakeInbox(path.join(socketDir(), 's.sock'), { sessionId: sid, token: TOKEN, ...opts });
+    const fake = new FakeInbox(path.join(socketDir(), 's.sock'), {
+      sessionId: sid,
+      token: TOKEN,
+      ...opts,
+    });
     await fake.start();
     cleanup.push(() => fake.stop());
     return fake;
@@ -147,7 +192,9 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       try {
         await until(() => seen() > before, 'daemon saw the pause', 1500);
         return;
-      } catch { /* its first poll may have swallowed the change: write it again */ }
+      } catch {
+        /* its first poll may have swallowed the change: write it again */
+      }
     }
     throw new Error('the daemon never reported the pause');
   };
@@ -172,13 +219,19 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     const fake = await inbox(sid);
     const host = fakeHost();
     assert.equal(daemonPid(env), null);
-    const { ctx, ms, address } = sessionStart(env, sid, projectDir('basic'), { socket: fake.path, hostPid: host.pid });
+    const { ctx, ms, address } = sessionStart(env, sid, projectDir('basic'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
     // The hook is meant to take well under a second (it does so on a normal machine) and Claude Code
     // gives it 10 s (hooks.json). The test only guards against it blocking on the daemon or the
     // network, so the limit has headroom for a loaded CI runner, where node's own start-up alone
     // can take a second.
     assert.ok(ms < 3000, `hook took ${ms} ms with the daemon down`);
-    assert.match(ctx, /arrives on its own, between tool calls or as a new turn, as a cross-session message whose from-name is the sender's mailbox address/);
+    assert.match(
+      ctx,
+      /arrives on its own, between tool calls or as a new turn, as a cross-session message whose from-name is the sender's mailbox address/,
+    );
     assert.match(ctx, /SendMessage cannot reach mailbox addresses/);
     assert.match(ctx, /mbox guide` for details/);
 
@@ -186,7 +239,18 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.equal(fs.statSync(regFile).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.dirname(regFile)).mode & 0o777, 0o700);
     const reg = parseJson<Registration>(fs.readFileSync(regFile, 'utf8'));
-    assert.deepEqual({ ...reg, registeredAt: 'x' }, { sid, address, endpoint: { kind: 'claude-inbox-socket', path: fake.path, token: TOKEN }, hostPid: host.pid, cwd: reg.cwd, agent: 'claude-code', registeredAt: 'x' });
+    assert.deepEqual(
+      { ...reg, registeredAt: 'x' },
+      {
+        sid,
+        address,
+        endpoint: { kind: 'claude-inbox-socket', path: fake.path, token: TOKEN },
+        hostPid: host.pid,
+        cwd: reg.cwd,
+        agent: 'claude-code',
+        registeredAt: 'x',
+      },
+    );
 
     await until(() => daemonPid(env) && alive(daemonPid(env)), 'daemon started');
     await until(() => peers().includes(address), 'announced');
@@ -209,23 +273,48 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.ok(d.authed);
     assert.ok(!d.line.includes(TOKEN), 'the token travels only in the auth line');
     const from = at(fake.messages(), 0).from;
-    assert.ok(d.content.startsWith(`<cross-session-message from-name="${from}">\nAgent mailbox delivery`), d.content.slice(0, 200));
+    assert.ok(
+      d.content.startsWith(`<cross-session-message from-name="${from}">\nAgent mailbox delivery`),
+      d.content.slice(0, 200),
+    );
     assert.ok(d.content.endsWith('\n</cross-session-message>'));
-    assert.match(d.content, new RegExp(`\\[mailbox\\] 3 new messages for ${address.replace(/\./g, '\\.')}:\\n`));
-    assert.deepEqual(fake.messages().map((m) => [m.id, m.body, m.verified]), [[ids[0], 'one', 'alice'], [ids[1], 'two\nlines', 'alice'], [ids[2], 'three', 'alice']]);
-    assert.match(d.content, new RegExp(`Reply with: mbox send ${from.replace(/\./g, '\\.')} --re ${ids[0]} "<text>"`));
+    assert.match(
+      d.content,
+      new RegExp(`\\[mailbox\\] 3 new messages for ${address.replace(/\./g, '\\.')}:\\n`),
+    );
+    assert.deepEqual(
+      fake.messages().map((m) => [m.id, m.body, m.verified]),
+      [
+        [ids[0], 'one', 'alice'],
+        [ids[1], 'two\nlines', 'alice'],
+        [ids[2], 'three', 'alice'],
+      ],
+    );
+    assert.match(
+      d.content,
+      new RegExp(`Reply with: mbox send ${from.replace(/\./g, '\\.')} --re ${ids[0]} "<text>"`),
+    );
     assert.match(d.content, /Untrusted content from another agent session/);
     await until(async () => (await ackPending(sid)) === 0, 'acked after delivery');
 
     // Singleton: a second daemon exits at once.
-    const second = spawnSync(process.execPath, [MBOX, 'deliverd'], { env, encoding: 'utf8', timeout: 10000 });
+    const second = spawnSync(process.execPath, [MBOX, 'deliverd'], {
+      env,
+      encoding: 'utf8',
+      timeout: 10000,
+    });
     assert.equal(second.status, 0);
     assert.match(logOf(env), /another deliverd is running \(pid \d+\); exiting/);
     // --status shows the session, never the token.
     const st = mbox(['deliverd', '--status'], { env });
     assert.match(st.stdout, new RegExp(`deliverd running \\(pid ${daemonPid(env)}\\)`));
     assert.ok(st.stdout.includes(address));
-    for (const text of [st.stdout, logOf(env), fs.readFileSync(statePath(env, 'deliverd.out'), 'utf8')]) assert.ok(!text.includes(TOKEN), 'token leaked');
+    for (const text of [
+      st.stdout,
+      logOf(env),
+      fs.readFileSync(statePath(env, 'deliverd.out'), 'utf8'),
+    ])
+      assert.ok(!text.includes(TOKEN), 'token leaked');
     assert.match(logOf(env), /delivered 3 messages to /);
 
     sessionEnd(env, sid);
@@ -239,10 +328,16 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     const dir = socketDir();
     const sock = path.join(dir, 's.sock');
     const host = fakeHost();
-    const { address } = sessionStart(env, sid, projectDir('retry'), { socket: sock, hostPid: host.pid });
+    const { address } = sessionStart(env, sid, projectDir('retry'), {
+      socket: sock,
+      hostPid: host.pid,
+    });
     await until(() => peers().includes(address), 'announced');
     const id = mail(address, 'while down');
-    await until(() => /delivery failed \((ENOENT|ECONNREFUSED)\); retrying in/.test(logOf(env)), 'retry logged');
+    await until(
+      () => /delivery failed \((ENOENT|ECONNREFUSED)\); retrying in/.test(logOf(env)),
+      'retry logged',
+    );
     await sleep(800);
     assert.ok((await ackPending(sid)) > 0, 'not acknowledged while undelivered');
     const fake = new FakeInbox(sock, { sessionId: sid, token: TOKEN });
@@ -261,12 +356,23 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     const sid = 'd-host-3333';
     const fake = await inbox(sid);
     const host = fakeHost();
-    const { address } = sessionStart(env, sid, projectDir('host'), { socket: fake.path, hostPid: host.pid });
+    const { address } = sessionStart(env, sid, projectDir('host'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
     await until(() => peers().includes(address), 'announced');
     host.kill('SIGKILL');
-    await until(() => !fs.existsSync(statePath(env, 'registrations', `${sid}.json`)), 'deregistered');
+    await until(
+      () => !fs.existsSync(statePath(env, 'registrations', `${sid}.json`)),
+      'deregistered',
+    );
     await until(() => !peers().includes(address), 'departed');
-    assert.match(logOf(env), new RegExp(`${address.replace(/\./g, '\\.')}: session process ${host.pid} is gone; deregistered`));
+    assert.match(
+      logOf(env),
+      new RegExp(
+        `${address.replace(/\./g, '\\.')}: session process ${host.pid} is gone; deregistered`,
+      ),
+    );
     const id = mail(address, 'after death');
     await sleep(1000);
     assert.equal(fake.delivered.length, 0);
@@ -280,7 +386,12 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     const sid = 'd-restart-4444';
     const fake = await inbox(sid);
     const host = fakeHost();
-    const { address } = sessionStart({ ...env, AGENT_MAILBOX_FAULT: 'crash-after-commit' }, sid, projectDir('restart'), { socket: fake.path, hostPid: host.pid });
+    const { address } = sessionStart(
+      { ...env, AGENT_MAILBOX_FAULT: 'crash-after-commit' },
+      sid,
+      projectDir('restart'),
+      { socket: fake.path, hostPid: host.pid },
+    );
     await until(() => peers().includes(address), 'announced');
     const first = daemonPid(env);
     const id = mail(address, 'exactly once');
@@ -289,12 +400,22 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.ok((await ackPending(sid)) > 0, 'killed before the acknowledgement');
     // Any mbox command (or the next session start) brings the daemon back.
     assert.equal(mbox(['--session', sid, 'whoami'], { env }).code, 0);
-    await until(() => daemonPid(env) && daemonPid(env) !== first && alive(daemonPid(env)), 'daemon restarted');
-    await until(async () => (await ackPending(sid)) === 0, 'redelivery recognised and acknowledged', 20000);
+    await until(
+      () => daemonPid(env) && daemonPid(env) !== first && alive(daemonPid(env)),
+      'daemon restarted',
+    );
+    await until(
+      async () => (await ackPending(sid)) === 0,
+      'redelivery recognised and acknowledged',
+      20000,
+    );
     const id2 = mail(address, 'next one');
     await fake.waitFor((f) => f.messages().length === 2);
     await sleep(500);
-    assert.deepEqual(fake.messages().map((m) => m.id), [id, id2]);
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      [id, id2],
+    );
   });
 
   it('runaway guard: at most AGENT_MAILBOX_MAX_PER_MIN per window, the rest held with one notice line', async () => {
@@ -302,34 +423,66 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     // milliseconds, and the batching window is stretched to 1.5 s (a test knob), so they reach the
     // daemon together however slow the machine is; the assertions are on totals, order and the
     // notice count, never on which delivery a message happened to land in.
-    const env = bobMachine({ AGENT_MAILBOX_MAX_PER_MIN: '3', AGENT_MAILBOX_RATE_WINDOW_MS: '4000', AGENT_MAILBOX_DRAIN_MS: '1500' });
+    const env = bobMachine({
+      AGENT_MAILBOX_MAX_PER_MIN: '3',
+      AGENT_MAILBOX_RATE_WINDOW_MS: '4000',
+      AGENT_MAILBOX_DRAIN_MS: '1500',
+    });
     const sid = 'd-rate-5555';
     const fake = await inbox(sid);
     const host = fakeHost();
-    const { address } = sessionStart(env, sid, projectDir('rate'), { socket: fake.path, hostPid: host.pid });
+    const { address } = sessionStart(env, sid, projectDir('rate'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
     await until(() => peers().includes(address), 'announced');
     const ids = ['r1', 'r2', 'r3', 'r4', 'r5'];
     const nc = await b.conn('alice');
     const js = jetstream(nc, { checkAPI: false });
-    for (const id of ids) await js.publish(`mbx.${address}.alice`, JSON.stringify({ v: 1, id, from: 'alice.laptop.x', to: address, body: id }), { msgID: id });
+    for (const id of ids)
+      await js.publish(
+        `mbx.${address}.alice`,
+        JSON.stringify({ v: 1, id, from: 'alice.laptop.x', to: address, body: id }),
+        { msgID: id },
+      );
     await nc.close();
     await fake.waitFor((f) => f.messages().length === 5, 20000);
     await sleep(500);
     const per = fake.delivered.map((d) => new Watcher.Parser(d.content).messages().length);
-    assert.ok(per.every((n) => n <= 3), `no delivery above the limit: ${per.join(',')}`);
-    assert.equal(per.reduce((a, n) => a + n, 0), 5);
-    assert.deepEqual(fake.messages().map((m) => m.id), ids, 'every message once, in order, each a complete block');
-    const notices = fake.contents().join('\n').match(/^\[mailbox\] throttling: .*$/gm) || [];
+    assert.ok(
+      per.every((n) => n <= 3),
+      `no delivery above the limit: ${per.join(',')}`,
+    );
+    assert.equal(
+      per.reduce((a, n) => a + n, 0),
+      5,
+    );
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ids,
+      'every message once, in order, each a complete block',
+    );
+    const notices =
+      fake
+        .contents()
+        .join('\n')
+        .match(/^\[mailbox\] throttling: .*$/gm) || [];
     assert.equal(notices.length, 1, fake.contents().join('\n---\n'));
     assert.match(notices[0], /this session gets at most 3 messages per minute; /);
     assert.match(logOf(env), /: throttling, /);
   });
 
   it('runaway guard: mail already waiting beyond the limit is held with the notice in the same delivery', async () => {
-    const env = bobMachine({ AGENT_MAILBOX_MAX_PER_MIN: '3', AGENT_MAILBOX_RATE_WINDOW_MS: '6000' });
+    const env = bobMachine({
+      AGENT_MAILBOX_MAX_PER_MIN: '3',
+      AGENT_MAILBOX_RATE_WINDOW_MS: '6000',
+    });
     const sid = 'd-rate-5556';
     const fake = await inbox(sid);
-    const { address } = sessionStart(env, sid, projectDir('rate2'), { socket: fake.path, hostPid: fakeHost().pid });
+    const { address } = sessionStart(env, sid, projectDir('rate2'), {
+      socket: fake.path,
+      hostPid: fakeHost().pid,
+    });
     await until(() => peers().includes(address), 'announced');
     await pauseAndWait(env, address);
     const ids = ['q1', 'q2', 'q3', 'q4', 'q5'].map((t) => mail(address, t));
@@ -340,9 +493,15 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.equal(fake.delivered.length, 1, 'the excess waits for the next window');
     const first = at(fake.delivered, 0).content;
     assert.equal(new Watcher.Parser(first).messages().length, 3);
-    assert.match(first, /\n\[mailbox\] throttling: this session gets at most 3 messages per minute; 2 more messages are held and follow in the next window \(or read now: mbox inbox --since 10m\)\.\n<\/cross-session-message>$/);
+    assert.match(
+      first,
+      /\n\[mailbox\] throttling: this session gets at most 3 messages per minute; 2 more messages are held and follow in the next window \(or read now: mbox inbox --since 10m\)\.\n<\/cross-session-message>$/,
+    );
     await fake.waitFor((f) => f.messages().length === 5, 20000);
-    assert.deepEqual(fake.messages().map((m) => m.id), ids);
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      ids,
+    );
     const last = fake.delivered.at(-1);
     assert.ok(last);
     assert.doesNotMatch(last.content, /throttling/);
@@ -354,16 +513,27 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     // redelivery interval, so the server hands the daemon the same message again mid-delivery.
     const env = bobMachine();
     const sid = 'd-flight-5557';
-    const fake = new FakeInbox(path.join(socketDir(), 's.sock'), { sessionId: sid, token: TOKEN, closeDelayMs: 4000 });
+    const fake = new FakeInbox(path.join(socketDir(), 's.sock'), {
+      sessionId: sid,
+      token: TOKEN,
+      closeDelayMs: 4000,
+    });
     await fake.start();
     cleanup.push(() => fake.stop());
-    const { address } = sessionStart(env, sid, projectDir('flight'), { socket: fake.path, hostPid: fakeHost().pid });
+    const { address } = sessionStart(env, sid, projectDir('flight'), {
+      socket: fake.path,
+      hostPid: fakeHost().pid,
+    });
     await until(() => peers().includes(address), 'announced');
     const id = mail(address, 'only once');
     await fake.waitFor((f) => f.messages().length === 1);
     await until(async () => (await ackPending(sid)) === 0, 'acked after delivery', 20000);
     await sleep(3000); // past more redelivery intervals
-    assert.deepEqual(fake.messages().map((m) => m.id), [id], 'delivered exactly once');
+    assert.deepEqual(
+      fake.messages().map((m) => m.id),
+      [id],
+      'delivered exactly once',
+    );
   });
 
   it('mbox pause holds delivery (one session, or --all) until mbox resume', async () => {
@@ -372,8 +542,14 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     const s2 = 'd-pause-7777';
     const f1 = await inbox(s1);
     const f2 = await inbox(s2);
-    const a1 = sessionStart(env, s1, projectDir('pause-a'), { socket: f1.path, hostPid: fakeHost().pid }).address;
-    const a2 = sessionStart(env, s2, projectDir('pause-b'), { socket: f2.path, hostPid: fakeHost().pid }).address;
+    const a1 = sessionStart(env, s1, projectDir('pause-a'), {
+      socket: f1.path,
+      hostPid: fakeHost().pid,
+    }).address;
+    const a2 = sessionStart(env, s2, projectDir('pause-b'), {
+      socket: f2.path,
+      hostPid: fakeHost().pid,
+    }).address;
     await until(() => peers().includes(a1) && peers().includes(a2), 'announced');
 
     const p = mbox(['pause', a1], { env });
@@ -386,7 +562,10 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     await sleep(1000);
     assert.equal(f1.delivered.length, 0, 'paused session gets nothing');
     assert.ok((await ackPending(s1)) > 0, 'held mail stays unacknowledged');
-    assert.match(mbox(['deliverd', '--status'], { env }).stdout, new RegExp(`paused: ${a1.replace(/\./g, '\\.')}`));
+    assert.match(
+      mbox(['deliverd', '--status'], { env }).stdout,
+      new RegExp(`paused: ${a1.replace(/\./g, '\\.')}`),
+    );
 
     assert.equal(mbox(['pause', '--all'], { env }).code, 0);
     await until(() => logOf(env).includes('delivery paused for all sessions'), 'daemon saw --all');
@@ -396,10 +575,16 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
 
     const r = mbox(['resume'], { env });
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /delivery resumed for all sessions on this machine.*Still paused: nothing/);
+    assert.match(
+      r.stdout,
+      /delivery resumed for all sessions on this machine.*Still paused: nothing/,
+    );
     await f1.waitFor((f) => f.messages().length === 1);
     await f2.waitFor((f) => f.messages().length === 2);
-    assert.deepEqual(f1.messages().map((m) => m.body), ['held for a1']);
+    assert.deepEqual(
+      f1.messages().map((m) => m.body),
+      ['held for a1'],
+    );
     assert.match(logOf(env), /delivery paused for all sessions[\s\S]*delivery not paused/);
     assert.ok(!fs.existsSync(statePath(env, 'paused.json')));
   });
@@ -408,7 +593,10 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     const env = bobMachine({ AGENT_MAILBOX_DELIVERD_IDLE_MS: '1500' });
     const sid = 'd-idle-8888';
     const fake = await inbox(sid);
-    const { address } = sessionStart(env, sid, projectDir('idle'), { socket: fake.path, hostPid: fakeHost().pid });
+    const { address } = sessionStart(env, sid, projectDir('idle'), {
+      socket: fake.path,
+      hostPid: fakeHost().pid,
+    });
     await until(() => peers().includes(address), 'announced');
     const pid = daemonPid(env);
     await sleep(2500);
@@ -416,6 +604,9 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     sessionEnd(env, sid);
     await until(() => !alive(pid), 'idle exit', 10000);
     assert.match(logOf(env), /stopping \(idle\)/);
-    assert.equal(mbox(['deliverd', '--status'], { env }).stdout.split('\n')[0], 'deliverd not running');
+    assert.equal(
+      mbox(['deliverd', '--status'], { env }).stdout.split('\n')[0],
+      'deliverd not running',
+    );
   });
 });

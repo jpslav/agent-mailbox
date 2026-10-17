@@ -14,7 +14,10 @@ export function xdgDir(envVar: string, fallback: string, env: Env = process.env)
 }
 
 export function configPath(env: Env = process.env): string {
-  return env.AGENT_MAILBOX_CONFIG || path.join(xdgDir('XDG_CONFIG_HOME', '.config', env), 'agent-mailbox', 'config.json');
+  return (
+    env.AGENT_MAILBOX_CONFIG ||
+    path.join(xdgDir('XDG_CONFIG_HOME', '.config', env), 'agent-mailbox', 'config.json')
+  );
 }
 
 /**
@@ -40,7 +43,11 @@ export function readConfigFile(env: Env = process.env): ConfigFile | null {
   }
 }
 
-export const splitServers = (s: unknown): string[] => lenientString(s).split(',').map((x) => x.trim().replace(/\/+$/, '')).filter(Boolean);
+export const splitServers = (s: unknown): string[] =>
+  lenientString(s)
+    .split(',')
+    .map((x) => x.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
 
 /**
  * Load config (file, then env overrides). Throws ConfigError if incomplete.
@@ -48,7 +55,11 @@ export const splitServers = (s: unknown): string[] => lenientString(s).split(','
  */
 export function loadConfig(env: Env = process.env): Config {
   const file = readConfigFile(env) || {};
-  const servers = env.AGENT_MAILBOX_SERVERS ? splitServers(env.AGENT_MAILBOX_SERVERS) : (Array.isArray(file.servers) ? file.servers.flatMap(splitServers) : []);
+  const servers = env.AGENT_MAILBOX_SERVERS
+    ? splitServers(env.AGENT_MAILBOX_SERVERS)
+    : Array.isArray(file.servers)
+      ? file.servers.flatMap(splitServers)
+      : [];
   const user = lenientString(env.AGENT_MAILBOX_USER || file.user).trim();
   const password = lenientString(env.AGENT_MAILBOX_PASSWORD || file.password);
   const maxBytes = Number(env.AGENT_MAILBOX_MAX_BYTES || file.maxMessageBytes || 0);
@@ -63,11 +74,19 @@ export function loadConfig(env: Env = process.env): Config {
     );
   }
   if (!USER_RE.test(user)) throw new ConfigError(`user "${user}" is invalid (allowed: a-z 0-9 -)`);
-  return { servers, user, password, maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : null };
+  return {
+    servers,
+    user,
+    password,
+    maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : null,
+  };
 }
 
 /** Write the client config with mode 0600 (it holds the password). */
-export function writeConfig({ servers, user, password }: Pick<Config, 'servers' | 'user' | 'password'>, env: Env = process.env): string {
+export function writeConfig(
+  { servers, user, password }: Pick<Config, 'servers' | 'user' | 'password'>,
+  env: Env = process.env,
+): string {
   const p = configPath(env);
   fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
   const existing = readConfigFile(env) || {};

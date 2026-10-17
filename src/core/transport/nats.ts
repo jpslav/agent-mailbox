@@ -69,7 +69,14 @@ import crypto from 'node:crypto';
 import { connect } from '@nats-io/transport-node';
 import type { ConnectionOptions, NatsConnection, Subscription } from '@nats-io/transport-node';
 import { jetstream, jetstreamManager } from '@nats-io/jetstream';
-import type { ConsumerConfig, ConsumerInfo, ConsumerMessages, DirectBatchOptions, JetStreamClient, JetStreamManager } from '@nats-io/jetstream';
+import type {
+  ConsumerConfig,
+  ConsumerInfo,
+  ConsumerMessages,
+  DirectBatchOptions,
+  JetStreamClient,
+  JetStreamManager,
+} from '@nats-io/jetstream';
 import { Kvm } from '@nats-io/kv';
 import type { KV } from '@nats-io/kv';
 import { SEG_RE } from '../addr.js';
@@ -101,17 +108,21 @@ const DOCTOR_LABEL = 'mbox-doctor';
 function parseAddr(s: unknown): [string, string, string] | null {
   if (typeof s !== 'string') return null;
   const parts = s.split('.');
-  return parts.length === 3 && parts.every((p) => SEG_RE.test(p)) ? (parts as [string, string, string]) : null;
+  return parts.length === 3 && parts.every((p) => SEG_RE.test(p))
+    ? (parts as [string, string, string])
+    : null;
 }
 
 /** MBX_<USER>: users are [a-z0-9-]+ (no '_'), so mapping '-' to '_' cannot collide. */
-export const streamFor = (user: string): string => `${PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, '_')}`;
+export const streamFor = (user: string): string =>
+  `${PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, '_')}`;
 
 export function subjectFor(to: string, fromUser: string): string {
   if (!SEG_RE.test(fromUser || '')) throw new Error(`invalid sender user "${fromUser}"`);
   if (to === 'all') return `${PREFIX}.all.${fromUser}`;
   const p = parseAddr(to);
-  if (!p) throw new Error(`invalid address "${to}" (expected <user>.<host>.<label>, each [a-z0-9-]+)`);
+  if (!p)
+    throw new Error(`invalid address "${to}" (expected <user>.<host>.<label>, each [a-z0-9-]+)`);
   if (p[0] === 'all') throw new Error(`invalid address "${to}": "all" is reserved`);
   return `${PREFIX}.${p.join('.')}.${fromUser}`;
 }
@@ -121,8 +132,10 @@ export function parseSubject(subject: string): { to: string; sender: string } | 
   const t = String(subject || '').split('.');
   if (t[0] !== PREFIX) return null;
   const [, second, third] = t;
-  if (t.length === 3 && second === 'all' && third !== undefined && SEG_RE.test(third)) return { to: 'all', sender: third };
-  if (t.length === 5 && t.slice(1).every((x) => SEG_RE.test(x))) return { to: t.slice(1, 4).join('.'), sender: t[4]! }; // length is 5
+  if (t.length === 3 && second === 'all' && third !== undefined && SEG_RE.test(third))
+    return { to: 'all', sender: third };
+  if (t.length === 5 && t.slice(1).every((x) => SEG_RE.test(x)))
+    return { to: t.slice(1, 4).join('.'), sender: t[4]! }; // length is 5
   return null;
 }
 
@@ -133,17 +146,22 @@ export function consumerName(sid: string): string {
   return `s-${crypto.createHash('sha256').update(s).digest('hex').slice(0, 32)}`;
 }
 
-const sessionShort = (sid: string): string => crypto.createHash('sha256').update(String(sid)).digest('hex').slice(0, 12);
-export const presenceKey = (user: string, host: string, sid: string): string => `${user}.${host}.${sessionShort(sid)}`;
+const sessionShort = (sid: string): string =>
+  crypto.createHash('sha256').update(String(sid)).digest('hex').slice(0, 12);
+export const presenceKey = (user: string, host: string, sid: string): string =>
+  `${user}.${host}.${sessionShort(sid)}`;
 
-const maxLabelLen = (user: string, host: string): number => MAX_ADDR_LEN - (user.length + 1 + host.length + 1);
+const maxLabelLen = (user: string, host: string): number =>
+  MAX_ADDR_LEN - (user.length + 1 + host.length + 1);
 
 // ---------------------------------------------------------------- errors
 export class TooLargeError extends Error {
   readonly tooLarge = true;
 
   constructor(size: number, limit: number) {
-    super(`message is ${size} bytes but the server accepts at most ${limit} bytes per message (max_payload). Send less, or raise max_payload on the server.`);
+    super(
+      `message is ${size} bytes but the server accepts at most ${limit} bytes per message (max_payload). Send less, or raise max_payload on the server.`,
+    );
   }
 }
 
@@ -166,23 +184,37 @@ interface ErrorShape {
 /** A thrown value, viewed through ErrorShape. */
 const shape = (e: unknown): ErrorShape | null | undefined => e as ErrorShape | null | undefined;
 
-const isPermission = (e: unknown): boolean => shape(e)?.name === 'PermissionViolationError' || /permissions violation/i.test(String(shape(e)?.message || ''));
-const isAuth = (e: unknown): boolean => shape(e)?.name === 'AuthorizationError' || /authorization violation|authentication/i.test(String(shape(e)?.message || ''));
-const isNotFound = (e: unknown): boolean => shape(e)?.code === 10014 || shape(e)?.api_error?.err_code === 10014 || /consumer not found/i.test(String(shape(e)?.message || ''));
+const isPermission = (e: unknown): boolean =>
+  shape(e)?.name === 'PermissionViolationError' ||
+  /permissions violation/i.test(String(shape(e)?.message || ''));
+const isAuth = (e: unknown): boolean =>
+  shape(e)?.name === 'AuthorizationError' ||
+  /authorization violation|authentication/i.test(String(shape(e)?.message || ''));
+const isNotFound = (e: unknown): boolean =>
+  shape(e)?.code === 10014 ||
+  shape(e)?.api_error?.err_code === 10014 ||
+  /consumer not found/i.test(String(shape(e)?.message || ''));
 
 /** Flag credential / permission errors so callers can say "auth problem" (`.authProblem`). */
 function tag<E>(e: E): E {
-  if (e && typeof e === 'object' && (isPermission(e) || isAuth(e))) (e as ErrorShape).authProblem = true;
+  if (e && typeof e === 'object' && (isPermission(e) || isAuth(e)))
+    (e as ErrorShape).authProblem = true;
   return e;
 }
 
 export function explainError(e: unknown): string {
   const err = shape(e);
   if (err?.tooLarge) return err.message ?? '';
-  if (isAuth(e)) return 'authentication failed: the user name or password is wrong (or the user was removed). Re-run `mbox setup` with the credentials from the mailbox admin.';
+  if (isAuth(e))
+    return 'authentication failed: the user name or password is wrong (or the user was removed). Re-run `mbox setup` with the credentials from the mailbox admin.';
   if (isPermission(e)) {
     const m = String(err?.message || '').match(/(Publish|Subscription) to "([^"]+)"/i);
-    const what = err?.operation && err.subject ? ` (${err.operation} ${err.subject})` : m ? ` (${m[1]!.toLowerCase()} ${m[2]})` : ''; // a match has both groups
+    const what =
+      err?.operation && err.subject
+        ? ` (${err.operation} ${err.subject})`
+        : m
+          ? ` (${m[1]!.toLowerCase()} ${m[2]})`
+          : ''; // a match has both groups
     return `permission denied by the server${what}. Ask the mailbox admin to check your user's permissions.`;
   }
   if (err?.name === 'TimeoutError') return 'request timed out (is the server reachable?)';
@@ -190,7 +222,12 @@ export function explainError(e: unknown): string {
   if (err?.name === 'NoRespondersError' || /no responders/i.test(String(err?.message || ''))) {
     return 'the server has no stream for that address (JetStream did not answer). Check the recipient user exists, or ask the admin to run `mbox-admin.sh add-user`.';
   }
-  if (err?.name === 'ConnectionError' || /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|connection refused/i.test(String(err?.message || '') + String(err?.cause?.code || ''))) {
+  if (
+    err?.name === 'ConnectionError' ||
+    /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|connection refused/i.test(
+      String(err?.message || '') + String(err?.cause?.code || ''),
+    )
+  ) {
     return `cannot reach the mailbox server (${err?.message}${err?.cause?.code ? `, ${err.cause.code}` : ''})`;
   }
   return err?.message || String(e);
@@ -199,7 +236,8 @@ export function explainError(e: unknown): string {
 // ---------------------------------------------------------------- config
 /** A server URL must be nats://host:port or tls://host:port. */
 export function validateServer(server: string): void {
-  if (!/^(nats|tls):\/\/[^\s/:]+(:\d+)?\/?$/.test(String(server))) throw new Error(`server must look like nats://host:4222, got "${server}"`);
+  if (!/^(nats|tls):\/\/[^\s/:]+(:\d+)?\/?$/.test(String(server)))
+    throw new Error(`server must look like nats://host:4222, got "${server}"`);
 }
 
 const td = new TextDecoder();
@@ -253,7 +291,10 @@ interface Shared {
   subs: Set<(reason: unknown) => void>;
 }
 
-export function createTransport(cfg: TransportConfig, { multiplex = false }: TransportOptions = {}): Transport {
+export function createTransport(
+  cfg: TransportConfig,
+  { multiplex = false }: TransportOptions = {},
+): Transport {
   const servers = Array.isArray(cfg.servers) ? cfg.servers : [cfg.servers];
   if (!servers.length) throw new Error('no server configured');
   servers.forEach(validateServer);
@@ -280,17 +321,25 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
       if (shared === pending) shared = null; // else another caller already started a new one
     }
     shared = (async () => {
-      const nc = await connect(connOpts({ ...(timeoutMs ? { timeout: timeoutMs } : {}), ...(multiplex ? { pingInterval: 20000, maxPingOut: 2 } : {}) }));
+      const nc = await connect(
+        connOpts({
+          ...(timeoutMs ? { timeout: timeoutMs } : {}),
+          ...(multiplex ? { pingInterval: 20000, maxPingOut: 2 } : {}),
+        }),
+      );
       const js = jetstream(nc, { checkAPI: false, timeout: timeoutMs || 10000 });
       const jsm = await jetstreamManager(nc, { checkAPI: false, timeout: timeoutMs || 10000 });
       const s: Shared = { nc, js, jsm, kv: null, subs: new Set() };
       if (multiplex) {
         // One status watcher per shared connection: a permission error, or the connection ending,
         // fails every subscription riding on it (each then reconnects on its own schedule).
-        void nc.closed().then((err) => { for (const f of s.subs) f(tag(err || new Error('connection closed'))); });
+        void nc.closed().then((err) => {
+          for (const f of s.subs) f(tag(err || new Error('connection closed')));
+        });
         (async () => {
           for await (const st of nc.status()) {
-            if (st.type === 'error' && isPermission(st.error)) for (const f of s.subs) f(tag(st.error));
+            if (st.type === 'error' && isPermission(st.error))
+              for (const f of s.subs) f(tag(st.error));
           }
         })().catch(() => {});
       }
@@ -315,30 +364,53 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
   }
 
   /** Publish raw bytes to a subject with a dedupe id; size-checked against the server's max_payload. */
-  async function jsPublish(s: Shared, subject: string, data: Uint8Array, msgID: string, timeoutMs?: number): Promise<{ seq: number }> {
+  async function jsPublish(
+    s: Shared,
+    subject: string,
+    data: Uint8Array,
+    msgID: string,
+    timeoutMs?: number,
+  ): Promise<{ seq: number }> {
     const limit = s.nc.info?.max_payload;
     const overhead = 64 + msgID.length; // the dedupe header travels with the payload
-    if (limit && data.length + overhead > limit) throw new TooLargeError(data.length, limit - overhead);
+    if (limit && data.length + overhead > limit)
+      throw new TooLargeError(data.length, limit - overhead);
     try {
       return await s.js.publish(subject, data, { msgID, timeout: timeoutMs || 10000 });
     } catch (e) {
-      if (/max_payload|maximum payload/i.test(String(shape(e)?.message))) throw new TooLargeError(data.length, limit! - overhead); // the server named its limit
+      if (/max_payload|maximum payload/i.test(String(shape(e)?.message)))
+        throw new TooLargeError(data.length, limit! - overhead); // the server named its limit
       throw tag(e);
     }
   }
 
   // ---- publish ----
-  async function publish(to: string, envelope: Envelope, { timeoutMs }: { timeoutMs?: number } = {}): Promise<{ id: string }> {
+  async function publish(
+    to: string,
+    envelope: Envelope,
+    { timeoutMs }: { timeoutMs?: number } = {},
+  ): Promise<{ id: string }> {
     const subject = subjectFor(to, user);
     const id = String(envelope.id || crypto.randomUUID());
     const s = await conn();
     try {
-      await jsPublish(s, subject, new TextEncoder().encode(JSON.stringify(envelope)), id, timeoutMs);
+      await jsPublish(
+        s,
+        subject,
+        new TextEncoder().encode(JSON.stringify(envelope)),
+        id,
+        timeoutMs,
+      );
     } catch (e) {
-      if (shape(e)?.name === 'NoRespondersError' || /no responders|jetstream is not enabled/i.test(String(shape(e)?.message))) {
+      if (
+        shape(e)?.name === 'NoRespondersError' ||
+        /no responders|jetstream is not enabled/i.test(String(shape(e)?.message))
+      ) {
         const who = to === 'all' ? 'broadcast' : `user "${parseAddr(to)?.[0]}"`; // `to` is a valid address: subjectFor checked it
         // eslint-disable-next-line preserve-caught-error -- the cause is left off on purpose: explainError() classifies an error by its cause's code, and this message must stand alone
-        throw new Error(`the server has no mailbox stream for ${who}, so nothing stored the message. Check the address, or ask the admin to run mbox-admin.sh add-user.`);
+        throw new Error(
+          `the server has no mailbox stream for ${who}, so nothing stored the message. Check the address, or ask the admin to run mbox-admin.sh add-user.`,
+        );
       }
       throw e;
     }
@@ -346,7 +418,10 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
   }
 
   // ---- deliveries ----
-  const delivery = ({ subject, seq, stream, timeMs, data, msgId }: StoredMessage, cursor: Cursor): Delivery => {
+  const delivery = (
+    { subject, seq, stream, timeMs, data, msgId }: StoredMessage,
+    cursor: Cursor,
+  ): Delivery => {
     const p = parseSubject(subject) || { to: subject, sender: null };
     return {
       id: msgId || `${stream}:${seq}`,
@@ -359,12 +434,23 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
   };
 
   /** Direct-get a batch of stored messages (no consumer needed). */
-  async function directBatch(jsm: JetStreamManager, stream: string, opts: DirectBatchOptions): Promise<StoredMessage[]> {
+  async function directBatch(
+    jsm: JetStreamManager,
+    stream: string,
+    opts: DirectBatchOptions,
+  ): Promise<StoredMessage[]> {
     const out: StoredMessage[] = [];
     try {
       const it = await jsm.direct.getBatch(stream, { batch: 256, ...opts });
       for await (const m of it) {
-        out.push({ subject: m.subject, seq: m.seq, stream, timeMs: m.time.getTime(), data: m.data, msgId: m.header.get('Nats-Msg-Id') || null });
+        out.push({
+          subject: m.subject,
+          seq: m.seq,
+          stream,
+          timeMs: m.time.getTime(),
+          data: m.data,
+          msgId: m.header.get('Nats-Msg-Id') || null,
+        });
       }
     } catch (e) {
       if (!/message not found|no results/i.test(String(shape(e)?.message))) throw e; // nothing (more) stored
@@ -373,7 +459,13 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
   }
 
   /** Page through direct gets from `start` (a start_time or seq query) until `max` messages or the end. */
-  async function directAll(jsm: JetStreamManager, stream: string, start: DirectBatchOptions, filter: string, max: number): Promise<StoredMessage[]> {
+  async function directAll(
+    jsm: JetStreamManager,
+    stream: string,
+    start: DirectBatchOptions,
+    filter: string,
+    max: number,
+  ): Promise<StoredMessage[]> {
     const out: StoredMessage[] = [];
     let q = start;
     while (out.length < max) {
@@ -399,18 +491,33 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
   }
 
   // ---- subscribe ----
-  async function subscribe({ session, addresses, cursor, signal, onOpen, onMessage, redeliverAfterMs = 60000, broadcastPollMs = 30000 }: SubscribeOptions): Promise<never> {
+  async function subscribe({
+    session,
+    addresses,
+    cursor,
+    signal,
+    onOpen,
+    onMessage,
+    redeliverAfterMs = 60000,
+    broadcastPollMs = 30000,
+  }: SubscribeOptions): Promise<never> {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const name = consumerName(session);
     const own = addresses.filter((a) => a !== 'all');
-    for (const a of own) if (parseAddr(a)?.[0] !== user) throw new Error(`address ${a} does not belong to user ${user}`);
+    for (const a of own)
+      if (parseAddr(a)?.[0] !== user)
+        throw new Error(`address ${a} does not belong to user ${user}`);
     const filters = [...new Set(own.map((a) => `${PREFIX}.${a}.*`))].sort();
     const wantAll = addresses.includes('all');
     const ackWait = Math.max(1000, redeliverAfterMs) * NS;
     // The cursor is opaque to the core but ours: it was made by now() or a delivery, and may have
     // been through a file, so each field is read defensively.
     const given = cursor as Partial<NatsCursor> | null | undefined;
-    const cur: NatsCursor = { u: given?.u ?? null, a: given?.a ?? null, t: given?.t ?? new Date().toISOString() };
+    const cur: NatsCursor = {
+      u: given?.u ?? null,
+      a: given?.a ?? null,
+      t: given?.t ?? new Date().toISOString(),
+    };
 
     let nc: NatsConnection;
     let mux: Shared | null = null; // the shared connection's record, in multiplex mode
@@ -467,14 +574,21 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
         if (!isNotFound(e)) throw tag(e);
       }
       if (info) {
-        const have = [...(info.config.filter_subjects || (info.config.filter_subject ? [info.config.filter_subject] : []))].sort();
+        const have = [
+          ...(info.config.filter_subjects ||
+            (info.config.filter_subject ? [info.config.filter_subject] : [])),
+        ].sort();
         if (JSON.stringify(have) !== JSON.stringify(filters) || info.config.ack_wait !== ackWait) {
-          await jsm.consumers.update(ownStream, name, { filter_subjects: filters, ack_wait: ackWait });
+          await jsm.consumers.update(ownStream, name, {
+            filter_subjects: filters,
+            ack_wait: ackWait,
+          });
         }
       } else {
-        const start: Partial<ConsumerConfig> = cur.u !== null && cur.u !== undefined
-          ? { deliver_policy: 'by_start_sequence', opt_start_seq: Number(cur.u) + 1 }
-          : { deliver_policy: 'by_start_time', opt_start_time: cur.t };
+        const start: Partial<ConsumerConfig> =
+          cur.u !== null && cur.u !== undefined
+            ? { deliver_policy: 'by_start_sequence', opt_start_seq: Number(cur.u) + 1 }
+            : { deliver_policy: 'by_start_time', opt_start_time: cur.t };
         await jsm.consumers.add(ownStream, {
           name,
           durable_name: name,
@@ -499,17 +613,35 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
             cur.u = m.seq;
             return onMessage(
               delivery(
-                { subject: m.subject, seq: m.seq, stream: ownStream, timeMs: Math.floor(m.info.timestampNanos / NS), data: m.data, msgId: m.headers?.get('Nats-Msg-Id') || null },
+                {
+                  subject: m.subject,
+                  seq: m.seq,
+                  stream: ownStream,
+                  timeMs: Math.floor(m.info.timestampNanos / NS),
+                  data: m.data,
+                  msgId: m.headers?.get('Nats-Msg-Id') || null,
+                },
                 { ...cur },
               ),
             );
           })) as { ackAfter?: Promise<unknown> } | null | undefined;
-          if (res && typeof res === 'object' && res.ackAfter && typeof res.ackAfter.then === 'function') {
+          if (
+            res &&
+            typeof res === 'object' &&
+            res.ackAfter &&
+            typeof res.ackAfter.then === 'function'
+          ) {
             // Deferred: ack once the caller has delivered it; on rejection hand it back (nak with
             // a short delay, so a closing subscription does not get it straight back).
             const settled = res.ackAfter.then(
               () => m.ackAck({ timeout: 5000 }).catch(() => {}),
-              () => { try { m.nak(1000); } catch { /* connection gone: redelivered after ack_wait */ } },
+              () => {
+                try {
+                  m.nak(1000);
+                } catch {
+                  /* connection gone: redelivered after ack_wait */
+                }
+              },
             );
             pendingAcks.add(settled);
             void settled.finally(() => pendingAcks.delete(settled));
@@ -527,13 +659,22 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
         let running = false;
         let again = false;
         const catchUp = async (retries = 0) => {
-          if (running) { again = true; return; }
+          if (running) {
+            again = true;
+            return;
+          }
           running = true;
           try {
             let got = 0;
             for (;;) {
-              const q = cur.a !== null && cur.a !== undefined ? { seq: Number(cur.a) + 1 } : { start_time: cur.t };
-              const batch = await directBatch(jsm, ALL_STREAM, { ...q, next_by_subj: `${PREFIX}.all.*` });
+              const q =
+                cur.a !== null && cur.a !== undefined
+                  ? { seq: Number(cur.a) + 1 }
+                  : { start_time: cur.t };
+              const batch = await directBatch(jsm, ALL_STREAM, {
+                ...q,
+                next_by_subj: `${PREFIX}.all.*`,
+              });
               for (const m of batch) {
                 await serial(async () => {
                   cur.a = m.seq;
@@ -543,12 +684,16 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
               got += batch.length;
               if (batch.length < 256) break;
             }
-            if (!got && retries > 0) setTimeout(() => void catchUp(retries - 1).catch(() => {}), 150).unref?.();
+            if (!got && retries > 0)
+              setTimeout(() => void catchUp(retries - 1).catch(() => {}), 150).unref?.();
           } catch (e) {
             if (!stopped) fail(tag(e));
           } finally {
             running = false;
-            if (again && !stopped) { again = false; void catchUp(); }
+            if (again && !stopped) {
+              again = false;
+              void catchUp();
+            }
           }
         };
         wakeSub = nc.subscribe(`${PREFIX}.all.*`, { callback: () => void catchUp(3) });
@@ -569,26 +714,42 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
       signal?.removeEventListener('abort', onAbort);
       fail(new Error('closed'));
       if (pendingAcks.size && !nc.isClosed()) {
-        await Promise.race([Promise.allSettled([...pendingAcks]), new Promise((r) => setTimeout(r, 3000).unref?.())]);
+        await Promise.race([
+          Promise.allSettled([...pendingAcks]),
+          new Promise((r) => setTimeout(r, 3000).unref?.()),
+        ]);
       }
       if (mux) {
         // Shared connection: end only this subscription's pieces.
         mux.subs.delete(fail);
-        try { messages?.stop(); } catch { /* already ended */ }
-        try { wakeSub?.unsubscribe(); } catch { /* already ended */ }
+        try {
+          messages?.stop();
+        } catch {
+          /* already ended */
+        }
+        try {
+          wakeSub?.unsubscribe();
+        } catch {
+          /* already ended */
+        }
       } else if (!nc.isClosed()) await nc.close().catch(() => {});
     }
   }
 
   // ---- poll ----
-  async function poll(addresses: string[], { lookbackMs, max = 256 }: PollOptions): Promise<Delivery[]> {
+  async function poll(
+    addresses: string[],
+    { lookbackMs, max = 256 }: PollOptions,
+  ): Promise<Delivery[]> {
     const s = await conn();
     const start_time = new Date(Date.now() - lookbackMs).toISOString();
     const out: StoredMessage[] = [];
     for (const a of [...new Set(addresses)]) {
       try {
-        if (a === 'all') out.push(...(await directAll(s.jsm, ALL_STREAM, { start_time }, `${PREFIX}.all.*`, max)));
-        else out.push(...(await directAll(s.jsm, ownStream, { start_time }, `${PREFIX}.${a}.*`, max)));
+        if (a === 'all')
+          out.push(...(await directAll(s.jsm, ALL_STREAM, { start_time }, `${PREFIX}.all.*`, max)));
+        else
+          out.push(...(await directAll(s.jsm, ownStream, { start_time }, `${PREFIX}.${a}.*`, max)));
       } catch (e) {
         throw tag(e);
       }
@@ -618,12 +779,16 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
     async depart(rec, { timeoutMs } = {}) {
       const s = await conn({ timeoutMs });
       const kv = await kvOf(s);
-      await kv.delete(keyOf(rec)).catch((e) => { throw tag(e); });
+      await kv.delete(keyOf(rec)).catch((e) => {
+        throw tag(e);
+      });
     },
     async update(rec, opts) {
       const s = await conn(opts);
       const kv = await kvOf(s);
-      const e = await kv.get(keyOf(rec)).catch((err) => { throw tag(err); });
+      const e = await kv.get(keyOf(rec)).catch((err) => {
+        throw tag(err);
+      });
       if (e && e.operation === 'PUT') await put(rec, opts);
     },
     async list() {
@@ -631,7 +796,9 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
       const peers: PresenceEntry[] = [];
       let it: Awaited<ReturnType<JetStreamManager['direct']['getLastMessagesFor']>>;
       try {
-        it = await s.jsm.direct.getLastMessagesFor(BUCKET_STREAM, { multi_last: [`$KV.${BUCKET}.>`] });
+        it = await s.jsm.direct.getLastMessagesFor(BUCKET_STREAM, {
+          multi_last: [`$KV.${BUCKET}.>`],
+        });
       } catch (e) {
         throw tag(e);
       }
@@ -652,7 +819,9 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
         peers.push({
           session: typeof j.session === 'string' ? j.session : key,
           address: j.address as string, // parseAddr accepted it, so it is a string
-          aliases: Array.isArray(j.aliases) ? (j.aliases as unknown[]).filter((a): a is string => parseAddr(a)?.[0] === keyUser) : [],
+          aliases: Array.isArray(j.aliases)
+            ? (j.aliases as unknown[]).filter((a): a is string => parseAddr(a)?.[0] === keyUser)
+            : [],
           agent: typeof j.agent === 'string' ? j.agent : null,
           user: keyUser,
           host: addr[1],
@@ -670,7 +839,8 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
   // ---- diagnose ----
   async function diagnose({ host }: { user: string; host: string }): Promise<DiagnoseCheck[]> {
     const checks: DiagnoseCheck[] = [];
-    const add = (ok: boolean, name: string, hint?: string): number => checks.push({ ok, name, hint });
+    const add = (ok: boolean, name: string, hint?: string): number =>
+      checks.push({ ok, name, hint });
     let s;
     try {
       s = await conn({ timeoutMs: 5000 });
@@ -689,14 +859,24 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
       await s.jsm.streams.info(ownStream);
       add(true, `own mailbox stream ${ownStream} is accessible`);
     } catch (e) {
-      add(false, `own mailbox stream ${ownStream}`, `${explainError(e)} (the admin creates it with mbox-admin.sh add-user)`);
+      add(
+        false,
+        `own mailbox stream ${ownStream}`,
+        `${explainError(e)} (the admin creates it with mbox-admin.sh add-user)`,
+      );
     }
     try {
       const subject = `${PREFIX}.${user}.${host}.${DOCTOR_LABEL}.${user}`;
       const id = `doctor-${crypto.randomUUID()}`;
-      const ack = await jsPublish(s, subject, new TextEncoder().encode(`doctor ${new Date().toISOString()}`), id);
+      const ack = await jsPublish(
+        s,
+        subject,
+        new TextEncoder().encode(`doctor ${new Date().toISOString()}`),
+        id,
+      );
       const back = await s.jsm.direct.getMessage(ownStream, { seq: ack.seq });
-      if (back && back.header.get('Nats-Msg-Id') === id) add(true, 'test message to self published and read back');
+      if (back && back.header.get('Nats-Msg-Id') === id)
+        add(true, 'test message to self published and read back');
       else add(false, 'test message to self', 'published but could not read it back');
     } catch (e) {
       add(false, 'test message to self', explainError(e));
@@ -721,14 +901,31 @@ export function createTransport(cfg: TransportConfig, { multiplex = false }: Tra
     const other = `not-${user}`.slice(0, 40);
     try {
       await s.jsm.streams.info(streamFor(other));
-      add(false, "isolation: could query another user's mailbox stream", 'your account has broader permissions than a mailbox user should; ask the admin to check users.conf');
+      add(
+        false,
+        "isolation: could query another user's mailbox stream",
+        'your account has broader permissions than a mailbox user should; ask the admin to check users.conf',
+      );
     } catch (e) {
-      if (isPermission(e)) add(true, "isolation: another user's mailbox is not readable (permission denied, as expected)");
+      if (isPermission(e))
+        add(
+          true,
+          "isolation: another user's mailbox is not readable (permission denied, as expected)",
+        );
       else add(false, 'isolation check', `expected a permission error, got: ${explainError(e)}`);
     }
     return checks;
   }
 
-  return { publish, subscribe, poll, now, presence, limits: { maxLabelLen }, explainError, diagnose, close };
+  return {
+    publish,
+    subscribe,
+    poll,
+    now,
+    presence,
+    limits: { maxLabelLen },
+    explainError,
+    diagnose,
+    close,
+  };
 }
-

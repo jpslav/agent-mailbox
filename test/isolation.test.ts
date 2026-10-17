@@ -25,10 +25,17 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
     ajs = jetstream(alice, { checkAPI: false, timeout: 3000 });
     // fixtures owned by bob: a message in his stream and a durable consumer on it
     const bob = await b.conn('bob');
-    await jetstream(bob, { checkAPI: false }).publish('mbx.bob.build-box.web-1.bob', 'secret for bob');
+    await jetstream(bob, { checkAPI: false }).publish(
+      'mbx.bob.build-box.web-1.bob',
+      'secret for bob',
+    );
     await bob.close();
     const am = await jetstreamManager(admin);
-    await am.consumers.add('MBX_BOB', { durable_name: 'bobsess', ack_policy: 'explicit', filter_subjects: ['mbx.bob.build-box.web-1.*'] });
+    await am.consumers.add('MBX_BOB', {
+      durable_name: 'bobsess',
+      ack_policy: 'explicit',
+      filter_subjects: ['mbx.bob.build-box.web-1.*'],
+    });
   });
   after(async () => {
     await alice?.close();
@@ -38,13 +45,20 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
 
   /** A request alice sends must be refused by the server's permissions (not by JetStream). */
   async function denied(subject: string, body: unknown = ''): Promise<void> {
-    await assert.rejects(alice.request(subject, enc(body), { timeout: 3000 }), /Permissions Violation for Publish to/, subject);
+    await assert.rejects(
+      alice.request(subject, enc(body), { timeout: 3000 }),
+      /Permissions Violation for Publish to/,
+      subject,
+    );
   }
   /** A core subscription alice makes must be refused. */
   async function subDenied(subject: string): Promise<void> {
     const sub = alice.subscribe(subject);
     const res = await Promise.race([sub.closed, sleep(2000).then(() => 'still open')]);
-    assert.ok(res instanceof Error && /Permissions Violation for Subscription/.test(res.message), `${subject}: ${String(res)}`);
+    assert.ok(
+      res instanceof Error && /Permissions Violation for Subscription/.test(res.message),
+      `${subject}: ${String(res)}`,
+    );
   }
   async function count(stream: string): Promise<number> {
     return (await (await jetstreamManager(admin)).streams.info(stream)).state.messages;
@@ -57,12 +71,15 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
       await subDenied('_INBOX_bob.>');
       await subDenied('>');
     });
-    it("create a consumer on MBX_BOB (any API form)", async () => {
+    it('create a consumer on MBX_BOB (any API form)', async () => {
       const cfg = { stream_name: 'MBX_BOB', config: { durable_name: 'x', ack_policy: 'explicit' } };
       await denied('$JS.API.CONSUMER.DURABLE.CREATE.MBX_BOB.x', cfg);
       await denied('$JS.API.CONSUMER.CREATE.MBX_BOB.x', cfg);
       await denied('$JS.API.CONSUMER.CREATE.MBX_BOB.x.mbx.bob.>', cfg);
-      await denied('$JS.API.CONSUMER.CREATE.MBX_BOB', { stream_name: 'MBX_BOB', config: { ack_policy: 'none' } });
+      await denied('$JS.API.CONSUMER.CREATE.MBX_BOB', {
+        stream_name: 'MBX_BOB',
+        config: { ack_policy: 'none' },
+      });
     });
     it("read or delete bob's consumer", async () => {
       await denied('$JS.API.CONSUMER.INFO.MBX_BOB.bobsess');
@@ -91,9 +108,18 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
       await denied('$JS.API.STREAM.CREATE.MBX_EVIL', { name: 'MBX_EVIL', subjects: ['mbx.bob.>'] });
     });
     it('create consumers on the shared broadcast stream or the presence bucket', async () => {
-      await denied('$JS.API.CONSUMER.DURABLE.CREATE.MBX_ALL.x', { stream_name: 'MBX_ALL', config: { durable_name: 'x', ack_policy: 'none' } });
-      await denied('$JS.API.CONSUMER.CREATE.MBX_ALL.x', { stream_name: 'MBX_ALL', config: { name: 'x', ack_policy: 'none' } });
-      await denied('$JS.API.CONSUMER.CREATE.KV_presence.x', { stream_name: 'KV_presence', config: { name: 'x', ack_policy: 'none' } });
+      await denied('$JS.API.CONSUMER.DURABLE.CREATE.MBX_ALL.x', {
+        stream_name: 'MBX_ALL',
+        config: { durable_name: 'x', ack_policy: 'none' },
+      });
+      await denied('$JS.API.CONSUMER.CREATE.MBX_ALL.x', {
+        stream_name: 'MBX_ALL',
+        config: { name: 'x', ack_policy: 'none' },
+      });
+      await denied('$JS.API.CONSUMER.CREATE.KV_presence.x', {
+        stream_name: 'KV_presence',
+        config: { name: 'x', ack_policy: 'none' },
+      });
     });
     it('publish with a spoofed sender token', async () => {
       const before = await count('MBX_BOB');
@@ -106,35 +132,88 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
     it("write bob's presence entries", async () => {
       const h = headers();
       h.set('KV-Operation', 'DEL');
-      await assert.rejects(ajs.publish('$KV.presence.bob.build-box.abc', '{}'), /Permissions Violation/);
-      await assert.rejects(ajs.publish('$KV.presence.bob.build-box.abc', '', { headers: h }), /Permissions Violation/);
+      await assert.rejects(
+        ajs.publish('$KV.presence.bob.build-box.abc', '{}'),
+        /Permissions Violation/,
+      );
+      await assert.rejects(
+        ajs.publish('$KV.presence.bob.build-box.abc', '', { headers: h }),
+        /Permissions Violation/,
+      );
     });
     it('forge into another stream through a push consumer on her own stream', async () => {
       // A push consumer's deliveries are published by the server; they must not be able to land
       // in bob's stream, the broadcast stream or the presence bucket with a fake sender token.
-      await ajs.publish('mbx.alice.laptop.x.alice', JSON.stringify({ v: 1, id: 'f1', from: 'carol.h.x', body: 'forged' }));
-      const counts = async () => [await count('MBX_BOB'), await count('MBX_ALL'), await count('KV_presence')];
+      await ajs.publish(
+        'mbx.alice.laptop.x.alice',
+        JSON.stringify({ v: 1, id: 'f1', from: 'carol.h.x', body: 'forged' }),
+      );
+      const counts = async () => [
+        await count('MBX_BOB'),
+        await count('MBX_ALL'),
+        await count('KV_presence'),
+      ];
       const before = await counts();
       const bob = await b.conn('bob');
       bob.subscribe('mbx.bob.>');
       bob.subscribe('mbx.all.*');
       await bob.flush();
-      const targets: Array<[string, string]> = [['p1', 'mbx.bob.h.l.carol'], ['p2', 'mbx.all.carol'], ['p3', '$KV.presence.carol.h.x']];
+      const targets: Array<[string, string]> = [
+        ['p1', 'mbx.bob.h.l.carol'],
+        ['p2', 'mbx.all.carol'],
+        ['p3', '$KV.presence.carol.h.x'],
+      ];
       for (const [n, target] of targets) {
-        const r = await alice.request(`$JS.API.CONSUMER.DURABLE.CREATE.MBX_ALICE.${n}`, enc({ stream_name: 'MBX_ALICE', config: { durable_name: n, deliver_subject: target, ack_policy: 'none', deliver_policy: 'all' } }), { timeout: 3000 });
+        const r = await alice.request(
+          `$JS.API.CONSUMER.DURABLE.CREATE.MBX_ALICE.${n}`,
+          enc({
+            stream_name: 'MBX_ALICE',
+            config: {
+              durable_name: n,
+              deliver_subject: target,
+              ack_policy: 'none',
+              deliver_policy: 'all',
+            },
+          }),
+          { timeout: 3000 },
+        );
         assert.ok(r.string().length > 0);
       }
       // control: the same kind of consumer delivering to alice's own inbox does deliver
       const ctl = alice.subscribe('_INBOX_alice.ctl', { max: 1 });
-      await alice.request('$JS.API.CONSUMER.DURABLE.CREATE.MBX_ALICE.p0', enc({ stream_name: 'MBX_ALICE', config: { durable_name: 'p0', deliver_subject: '_INBOX_alice.ctl', ack_policy: 'none', deliver_policy: 'all' } }), { timeout: 3000 });
+      await alice.request(
+        '$JS.API.CONSUMER.DURABLE.CREATE.MBX_ALICE.p0',
+        enc({
+          stream_name: 'MBX_ALICE',
+          config: {
+            durable_name: 'p0',
+            deliver_subject: '_INBOX_alice.ctl',
+            ack_policy: 'none',
+            deliver_policy: 'all',
+          },
+        }),
+        { timeout: 3000 },
+      );
       for await (const m of ctl) assert.match(m.string(), /forged/);
       await sleep(1500);
       assert.deepEqual(await counts(), before);
       await bob.close();
     });
     it('authenticate with a wrong password or anonymously', async () => {
-      await assert.rejects(connect({ servers: b.url, user: 'alice', pass: 'wrong-password-1234', reconnect: false, timeout: 2000 }), /Authorization Violation/i);
-      await assert.rejects(connect({ servers: b.url, reconnect: false, timeout: 2000 }), /Authorization Violation/i);
+      await assert.rejects(
+        connect({
+          servers: b.url,
+          user: 'alice',
+          pass: 'wrong-password-1234',
+          reconnect: false,
+          timeout: 2000,
+        }),
+        /Authorization Violation/i,
+      );
+      await assert.rejects(
+        connect({ servers: b.url, reconnect: false, timeout: 2000 }),
+        /Authorization Violation/i,
+      );
     });
   });
 
@@ -150,13 +229,19 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
     it('read her own stream through her own durable consumer, and ack', async () => {
       await ajs.publish('mbx.alice.laptop.web-2.alice', 'note to self');
       const jsm = await jetstreamManager(alice, { checkAPI: false });
-      await jsm.consumers.add('MBX_ALICE', { durable_name: 'mine', ack_policy: 'explicit', filter_subjects: ['mbx.alice.laptop.web-2.*'] });
+      await jsm.consumers.add('MBX_ALICE', {
+        durable_name: 'mine',
+        ack_policy: 'explicit',
+        filter_subjects: ['mbx.alice.laptop.web-2.*'],
+      });
       const c = await ajs.consumers.get('MBX_ALICE', 'mine');
       const m = await c.next({ expires: 3000 });
       assert.ok(m);
       assert.equal(m.string(), 'note to self');
       assert.equal(await m.ackAck(), true);
-      await jsm.consumers.update('MBX_ALICE', 'mine', { filter_subjects: ['mbx.alice.laptop.web-2.*', 'mbx.alice.laptop.alias.*'] });
+      await jsm.consumers.update('MBX_ALICE', 'mine', {
+        filter_subjects: ['mbx.alice.laptop.web-2.*', 'mbx.alice.laptop.alias.*'],
+      });
       assert.equal((await jsm.streams.info('MBX_ALICE')).config.name, 'MBX_ALICE');
       const d = await jsm.direct.getMessage('MBX_ALICE', { seq: m.seq });
       assert.ok(d);
@@ -165,12 +250,18 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
     });
     it('read broadcasts by direct get, write her own presence entry and read the whole bucket', async () => {
       const jsm = await jetstreamManager(alice, { checkAPI: false });
-      const it2 = await jsm.direct.getBatch('MBX_ALL', { seq: 1, batch: 10, next_by_subj: 'mbx.all.*' });
+      const it2 = await jsm.direct.getBatch('MBX_ALL', {
+        seq: 1,
+        batch: 10,
+        next_by_subj: 'mbx.all.*',
+      });
       const got: string[] = [];
       for await (const m of it2) got.push(m.string());
       assert.ok(got.includes('hi all'));
       await ajs.publish('$KV.presence.alice.laptop.abc', '{"address":"alice.laptop.x"}');
-      const it3 = await jsm.direct.getLastMessagesFor('KV_presence', { multi_last: ['$KV.presence.>'] });
+      const it3 = await jsm.direct.getLastMessagesFor('KV_presence', {
+        multi_last: ['$KV.presence.>'],
+      });
       const keys: string[] = [];
       for await (const m of it3) keys.push(m.subject);
       assert.ok(keys.includes('$KV.presence.alice.laptop.abc'));
@@ -191,7 +282,15 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
       assert.match(perms, /"_INBOX_carol\.>"/);
       assert.match(b.admin(['remove-user', 'carol']).out, /removed user carol/);
       let still = true; // the reload signal is asynchronous
-      for (let i = 0; i < 20 && still; i++) still = await b.conn('carol').then((nc) => nc.close().then(() => sleep(100)).then(() => true), () => false);
+      for (let i = 0; i < 20 && still; i++)
+        still = await b.conn('carol').then(
+          (nc) =>
+            nc
+              .close()
+              .then(() => sleep(100))
+              .then(() => true),
+          () => false,
+        );
       await assert.rejects(b.conn('carol'), /Authorization Violation/i);
       assert.notEqual(b.admin(['add-user', 'all'], { check: false }).code, 0); // reserved
       assert.notEqual(b.admin(['add-user', 'Bad_Name'], { check: false }).code, 0);
@@ -232,7 +331,12 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
             `exit $rc\n`,
           { mode: 0o755 },
         );
-        const env = { NATS_BIN: shim, REAL_NATS: SERVER.natsBin, MARK: path.join(b2.dir, 'lost-once'), MBOX_RELOAD_SETTLE: '0.2' };
+        const env = {
+          NATS_BIN: shim,
+          REAL_NATS: SERVER.natsBin,
+          MARK: path.join(b2.dir, 'lost-once'),
+          MBOX_RELOAD_SETTLE: '0.2',
+        };
         const out = b2.admin(['init'], { env }).out;
         assert.match(out, /reloaded nats-server/);
         assert.ok(fs.existsSync(env.MARK), 'the shim never ran: the test proves nothing');

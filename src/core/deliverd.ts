@@ -24,10 +24,35 @@ import { formatBatch } from './envelope.js';
 import { isPaused, pausePath, readPause } from './pause.js';
 import { openReceiver } from './receiver.js';
 import type { Receiver } from './receiver.js';
-import { deliverdLockPath, deregister, listRegistrations, registrationsDir, sameRegistration } from './registrations.js';
-import { acquireFileLock, acquireLock, awaitExit, ensureSession, mkdirp, pidAlive, readState, stateDir, waiterPid } from './state.js';
+import {
+  deliverdLockPath,
+  deregister,
+  listRegistrations,
+  registrationsDir,
+  sameRegistration,
+} from './registrations.js';
+import {
+  acquireFileLock,
+  acquireLock,
+  awaitExit,
+  ensureSession,
+  mkdirp,
+  pidAlive,
+  readState,
+  stateDir,
+  waiterPid,
+} from './state.js';
 import type { HeldLock } from './state.js';
-import type { Config, Delivery, DeliveryCapability, DeliveryResult, Env, Message, Registration, Transport } from './types.js';
+import type {
+  Config,
+  Delivery,
+  DeliveryCapability,
+  DeliveryResult,
+  Env,
+  Message,
+  Registration,
+  Transport,
+} from './types.js';
 
 export interface DeliverdOptions {
   drainMs: number;
@@ -66,9 +91,13 @@ export function fileLog(file: string, maxBytes = 256 * 1024): (msg: string) => v
     try {
       try {
         if (fs.statSync(file).size + line.length > maxBytes) fs.renameSync(file, `${file}.1`);
-      } catch { /* no log yet */ }
+      } catch {
+        /* no log yet */
+      }
       fs.appendFileSync(file, line, { mode: 0o600 });
-    } catch { /* logging must never break delivery */ }
+    } catch {
+      /* logging must never break delivery */
+    }
   };
 }
 
@@ -118,7 +147,13 @@ export interface RunDeliverdInput {
  * @param log         (line) -> void; never given endpoints or other secrets
  * @returns exit code
  */
-export async function runDeliverd({ cfg, transport, deliveryFor, env = process.env, log = () => {} }: RunDeliverdInput): Promise<number> {
+export async function runDeliverd({
+  cfg,
+  transport,
+  deliveryFor,
+  env = process.env,
+  log = () => {},
+}: RunDeliverdInput): Promise<number> {
   const opt = deliverdOptions(env);
   mkdirp(stateDir(env));
   const acquired = acquireFileLock(deliverdLockPath(env));
@@ -169,7 +204,15 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
     const addr = () => rx?.state().address || current.address;
     const names = () => (rx ? [rx.state().address, ...rx.state().aliases] : [current.address]);
 
-    const w: Worker = { sid, update, stop, kick, get reg() { return current; } };
+    const w: Worker = {
+      sid,
+      update,
+      stop,
+      kick,
+      get reg() {
+        return current;
+      },
+    };
 
     /** ms until the rate window has room again (0 if it has room now). */
     function windowWait(now = Date.now()): number {
@@ -182,7 +225,13 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       if (!pending.some((p) => p.fresh)) return;
       const wait = windowWait();
       if (wait > 0 && !noticed) owedNotice = true; // held by the rate limit: say so when it goes out
-      drainTimer = setTimeout(() => { drainTimer = undefined; void flush(); }, Math.max(delayMs, wait));
+      drainTimer = setTimeout(
+        () => {
+          drainTimer = undefined;
+          void flush();
+        },
+        Math.max(delayMs, wait),
+      );
     }
 
     /** Pause state changed: deliver what is waiting (or note the pause). */
@@ -201,10 +250,14 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
         return undefined;
       }
       // Redelivered while waiting, or while its delivery is in flight (not yet recorded as seen).
-      if (fresh && (inflight.has(m.id) || pending.some((p) => p.fresh && p.message.id === m.id))) fresh = false;
+      if (fresh && (inflight.has(m.id) || pending.some((p) => p.fresh && p.message.id === m.id)))
+        fresh = false;
       let resolve!: () => void;
       let reject!: (e: Error) => void;
-      const ackAfter = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+      const ackAfter = new Promise<void>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
       ackAfter.catch(() => {});
       pending.push({ delivery: d, message: m, fresh, resolve, reject });
       if (pending.length >= 500 && !flushing && !retryTimer) {
@@ -219,7 +272,8 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       if (flushing || stopped || !rx) return;
       const address = addr();
       if (isPaused(pauseState, names())) {
-        if (!pausedNoted) log(`${address}: delivery paused (${pending.filter((p) => p.fresh).length} waiting)`);
+        if (!pausedNoted)
+          log(`${address}: delivery paused (${pending.filter((p) => p.fresh).length} waiting)`);
         pausedNoted = true;
         return; // kick() on resume
       }
@@ -237,11 +291,20 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       // Runaway guard: at most the window's remaining room of fresh messages in this delivery.
       const room = opt.maxPerMin - sent.length;
       let cut = all.length;
-      for (let i = 0, n = 0; i < all.length; i++) if (all[i]!.fresh && ++n > room) { cut = i; break; }
+      for (let i = 0, n = 0; i < all.length; i++)
+        if (all[i]!.fresh && ++n > room) {
+          cut = i;
+          break;
+        }
       const items = all.slice(0, cut);
       const held = all.slice(cut);
       const heldFresh = held.filter((p) => p.fresh).length;
-      const fitted = formatBatch(items, { address, maxChars: opt.maxChars, note: '', later: 'in the next delivery' });
+      const fitted = formatBatch(items, {
+        address,
+        maxChars: opt.maxChars,
+        note: '',
+        later: 'in the next delivery',
+      });
       const { count, shown } = fitted;
       let { text } = fitted;
       const batch = items.slice(0, count);
@@ -259,7 +322,13 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       text += throttleNote;
       if (text) {
         const msgs = batch.filter((b) => b.fresh).map((b) => b.message);
-        const meta = { sid, address, count: shown, ids: msgs.map((m) => m.id), senders: [...new Set(msgs.map((m) => m.from))] };
+        const meta = {
+          sid,
+          address,
+          count: shown,
+          ids: msgs.map((m) => m.id),
+          senders: [...new Set(msgs.map((m) => m.from))],
+        };
         try {
           await cap.deliver(current.endpoint, text, meta);
         } catch (e) {
@@ -279,7 +348,10 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
         noticed = true;
         owedNotice = false;
       } else if (!heldFresh && !owedNotice) noticed = false; // the episode is over
-      if (text) log(`delivered ${plural(shown, 'message')} to ${address}${failingSince ? ` (after ${plural(failures, 'failed attempt')})` : ''}`);
+      if (text)
+        log(
+          `delivered ${plural(shown, 'message')} to ${address}${failingSince ? ` (after ${plural(failures, 'failed attempt')})` : ''}`,
+        );
       failingSince = null;
       failures = 0;
       lastErr = '';
@@ -308,14 +380,22 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       failures++;
       const code = errCode(e);
       if (!current.hostPid && Date.now() - failingSince > opt.giveUpMs) {
-        log(`${addr()}: delivery failing for ${Math.round((Date.now() - failingSince) / 60000)} min (${code}) and the session's process is unknown; deregistered`);
+        log(
+          `${addr()}: delivery failing for ${Math.round((Date.now() - failingSince) / 60000)} min (${code}) and the session's process is unknown; deregistered`,
+        );
         deregister(sid, env, { only: current });
         void stop({ depart: true });
         return;
       }
-      if (code !== lastErr || failures % 10 === 1) log(`${addr()}: delivery failed (${code}); retrying in ${Math.round(backoff / 100) / 10}s, unacknowledged`);
+      if (code !== lastErr || failures % 10 === 1)
+        log(
+          `${addr()}: delivery failed (${code}); retrying in ${Math.round(backoff / 100) / 10}s, unacknowledged`,
+        );
       lastErr = code;
-      retryTimer = setTimeout(() => { retryTimer = undefined; void flush(); }, backoff);
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        void flush();
+      }, backoff);
       backoff = Math.min(backoff * 2, opt.maxRetryMs);
     }
 
@@ -366,7 +446,10 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
     async function start() {
       const got = acquireLock(sid, env);
       if (!got.ok) {
-        note(`watched:${sid}`, `${current.address}: already received by another process (pid ${got.pid}, e.g. mbox watch); not serving it`);
+        note(
+          `watched:${sid}`,
+          `${current.address}: already received by another process (pid ${got.pid}, e.g. mbox watch); not serving it`,
+        );
         sessLock = null;
         if (workers.get(sid) === w) workers.delete(sid);
         stopped = Promise.resolve();
@@ -378,10 +461,25 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
       const waiter = waiterPid(sid, env);
       if (waiter) await awaitExit(waiter, 10000);
       try {
-        const st = readState(sid, env) || (await ensureSession({ sid, cfg, transport, cwd: current.cwd || stateDir(env), hostPid: current.hostPid, env }));
+        const st =
+          readState(sid, env) ||
+          (await ensureSession({
+            sid,
+            cfg,
+            transport,
+            cwd: current.cwd || stateDir(env),
+            hostPid: current.hostPid,
+            env,
+          }));
         if (stopped) return;
         rx = await openReceiver({
-          cfg, transport, sid, st, agent: current.agent, hostPid: current.hostPid, env,
+          cfg,
+          transport,
+          sid,
+          st,
+          agent: current.agent,
+          hostPid: current.hostPid,
+          env,
           keepTransport: true,
           onMessage,
           onStatus(kind, hint) {
@@ -420,7 +518,10 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
     for (const reg of regs) {
       const cap = deliveryFor(reg.agent);
       if (!cap || cap.kind !== reg.endpoint.kind) {
-        note(`nocap:${reg.sid}`, `${reg.address}: no delivery for agent "${reg.agent}" endpoint kind "${String(reg.endpoint.kind)}"; skipped`);
+        note(
+          `nocap:${reg.sid}`,
+          `${reg.address}: no delivery for agent "${reg.agent}" endpoint kind "${String(reg.endpoint.kind)}"; skipped`,
+        );
         continue;
       }
       present.add(reg.sid);
@@ -430,7 +531,8 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
         continue;
       }
       if (reg.hostPid && !pidAlive(reg.hostPid)) {
-        if (deregister(reg.sid, env, { only: reg })) log(`${reg.address}: session process ${reg.hostPid} is gone; deregistered`);
+        if (deregister(reg.sid, env, { only: reg }))
+          log(`${reg.address}: session process ${reg.hostPid} is gone; deregistered`);
         present.delete(reg.sid);
         continue;
       }
@@ -449,7 +551,10 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
   function scanSoon(ms = 100): void {
     if (scanTimer || stopping) return;
-    scanTimer = setTimeout(() => { scanTimer = null; scan(); }, ms);
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      scan();
+    }, ms);
   }
 
   async function shutdown(why: string): Promise<void> {
@@ -458,7 +563,11 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
     log(`stopping (${why})`);
     if (scanTimer) clearTimeout(scanTimer);
     timers.forEach((t) => clearInterval(t));
-    try { watcher?.close(); } catch { /* */ }
+    try {
+      watcher?.close();
+    } catch {
+      /* */
+    }
     await Promise.all([...workers.values()].map((w) => w.stop({ depart: false })));
     lock.release();
     await transport.close?.().catch(() => {});
@@ -469,25 +578,50 @@ export async function runDeliverd({ cfg, transport, deliveryFor, env = process.e
   try {
     watcher = fs.watch(registrationsDir(env), () => scanSoon());
     watcher.on('error', () => {});
-  } catch { /* the slow rescan still covers it */ }
+  } catch {
+    /* the slow rescan still covers it */
+  }
   timers.push(setInterval(scan, opt.rescanMs));
   // `mbox pause` / `mbox resume`: re-read the pause file when it changes.
   let pauseSig = '';
-  timers.push(setInterval(() => {
-    let sig: string;
-    try { sig = String(fs.statSync(pausePath(env)).mtimeMs); } catch { sig = 'none'; }
-    if (sig === pauseSig) return;
-    const first = pauseSig === '';
-    pauseSig = sig;
-    pauseState = readPause(env);
-    if (first) return;
-    log(pauseState.all ? 'delivery paused for all sessions' : pauseState.addresses.length ? `delivery paused for ${pauseState.addresses.join(', ')}` : 'delivery not paused');
-    for (const w of workers.values()) w.kick();
-  }, opt.pausePollMs));
-  timers.push(setInterval(() => {
-    lock.touch();
-    if (!stopping && idleSince !== null && !workers.size && Date.now() - idleSince >= opt.idleExitMs) void shutdown('idle');
-  }, Math.max(50, Math.min(5000, Math.floor(opt.idleExitMs / 4)))));
+  timers.push(
+    setInterval(() => {
+      let sig: string;
+      try {
+        sig = String(fs.statSync(pausePath(env)).mtimeMs);
+      } catch {
+        sig = 'none';
+      }
+      if (sig === pauseSig) return;
+      const first = pauseSig === '';
+      pauseSig = sig;
+      pauseState = readPause(env);
+      if (first) return;
+      log(
+        pauseState.all
+          ? 'delivery paused for all sessions'
+          : pauseState.addresses.length
+            ? `delivery paused for ${pauseState.addresses.join(', ')}`
+            : 'delivery not paused',
+      );
+      for (const w of workers.values()) w.kick();
+    }, opt.pausePollMs),
+  );
+  timers.push(
+    setInterval(
+      () => {
+        lock.touch();
+        if (
+          !stopping &&
+          idleSince !== null &&
+          !workers.size &&
+          Date.now() - idleSince >= opt.idleExitMs
+        )
+          void shutdown('idle');
+      },
+      Math.max(50, Math.min(5000, Math.floor(opt.idleExitMs / 4))),
+    ),
+  );
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => void shutdown(sig));
   scan();
   return done;

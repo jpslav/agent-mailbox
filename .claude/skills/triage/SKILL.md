@@ -76,6 +76,7 @@ Dependabot opens weekly PRs for npm and GitHub Actions, with minor and patch upd
    - Read the upstream changelog before accepting a major version, and for anything in the
      `@nats-io` packages (the transport seam, `src/core/transport/nats.ts`, is the only consumer).
    - A bump that changes how authentication or permissions behave is `needs-owner`.
+
 4. Merge when CI is green and the rules above are met: `gh pr merge <n> --merge`. Never squash.
    Close PRs you decide against with a comment; Dependabot stops re-opening ignored versions only
    if told (`@dependabot ignore this major version`).

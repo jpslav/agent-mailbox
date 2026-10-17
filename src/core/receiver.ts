@@ -7,12 +7,27 @@ import { BROADCAST } from './addr.js';
 import { parseDelivery } from './envelope.js';
 import { HEARTBEAT_MS, presenceRecord } from './registry.js';
 import { pidAlive, readCursor, readState, statePath, writeCursor } from './state.js';
-import type { Config, Delivery, DeliveryResult, Env, Message, SessionState, Transport } from './types.js';
+import type {
+  Config,
+  Delivery,
+  DeliveryResult,
+  Env,
+  Message,
+  SessionState,
+  Transport,
+} from './types.js';
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise<void>((resolve) => {
     const t = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t);
+        resolve();
+      },
+      { once: true },
+    );
   });
 
 const jitter = (ms: number): number => Math.round(ms * (0.75 + Math.random() * 0.5));
@@ -51,7 +66,11 @@ export interface OpenReceiverInput {
   env?: Env;
   /** stop() leaves the transport open (a process that serves several sessions on one). */
   keepTransport?: boolean;
-  onMessage: (delivery: Delivery, message: Message, fresh: boolean) => DeliveryResult | Promise<DeliveryResult>;
+  onMessage: (
+    delivery: Delivery,
+    message: Message,
+    fresh: boolean,
+  ) => DeliveryResult | Promise<DeliveryResult>;
   onStatus?: (kind: 'lost' | 'restored', hint?: string) => void;
   onTick?: () => void;
   onHostGone?: () => void;
@@ -84,7 +103,20 @@ export interface Receiver {
  * delivered (cursor + recently delivered ids) on disk; call it before acknowledging.
  * keepTransport: stop() leaves the transport open (a process that serves several sessions on one).
  */
-export async function openReceiver({ cfg, transport, sid, st: initial, agent = 'unknown', hostPid = null, env = process.env, keepTransport = false, onMessage, onStatus = () => {}, onTick = () => {}, onHostGone = () => {} }: OpenReceiverInput): Promise<Receiver> {
+export async function openReceiver({
+  cfg,
+  transport,
+  sid,
+  st: initial,
+  agent = 'unknown',
+  hostPid = null,
+  env = process.env,
+  keepTransport = false,
+  onMessage,
+  onStatus = () => {},
+  onTick = () => {},
+  onHostGone = () => {},
+}: OpenReceiverInput): Promise<Receiver> {
   const opt = receiverOptions(env);
   let st = initial;
   const stop = new AbortController();
@@ -104,7 +136,11 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
       if (oldest.done) break;
       seen.delete(oldest.value);
     }
-    try { writeCursor(sid, { cursor, seen: Object.fromEntries(seen) }, env); } catch { /* disk issue: dedupe still in memory */ }
+    try {
+      writeCursor(sid, { cursor, seen: Object.fromEntries(seen) }, env);
+    } catch {
+      /* disk issue: dedupe still in memory */
+    }
   };
   function commit(items: CommitItem[]): void {
     for (const { delivery: d, message: m } of items) {
@@ -118,7 +154,9 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
   const isSelf = (from: string): boolean => st.address === from || st.aliases.includes(from);
 
   const post = (kind: 'announce' | 'heartbeat' | 'depart', timeoutMs: number): Promise<void> =>
-    transport.presence[kind](presenceRecord(st, { sid, cfg, agent }), { timeoutMs }).catch(() => {});
+    transport.presence[kind](presenceRecord(st, { sid, cfg, agent }), { timeoutMs }).catch(
+      () => {},
+    );
 
   // ---- announce ----
   await post('announce', 5000);
@@ -126,7 +164,11 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
   // ---- housekeeping timers ----
   timers.push(setInterval(() => void post('heartbeat', 5000), opt.heartbeatMs));
   let lastMtime = 0;
-  try { lastMtime = fs.statSync(statePath(sid, env)).mtimeMs; } catch { /* */ }
+  try {
+    lastMtime = fs.statSync(statePath(sid, env)).mtimeMs;
+  } catch {
+    /* */
+  }
   timers.push(
     setInterval(() => {
       onTick();
@@ -142,12 +184,18 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
             void post('heartbeat', 5000);
           }
         }
-      } catch { /* state file briefly missing */ }
+      } catch {
+        /* state file briefly missing */
+      }
     }, opt.pollMs),
   );
   // Orphan guard: when the agent adapter can name the host (agent) process, stop once it is gone.
   if (hostPid) {
-    timers.push(setInterval(() => { if (!stopping && !pidAlive(hostPid)) onHostGone(); }, opt.pidCheckMs));
+    timers.push(
+      setInterval(() => {
+        if (!stopping && !pidAlive(hostPid)) onHostGone();
+      }, opt.pidCheckMs),
+    );
   }
   timers.forEach((t) => t.unref?.());
 
@@ -180,18 +228,31 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
             clearTimeout(restoredTimer);
             clearTimeout(stableTimer);
             restoredTimer = setTimeout(() => {
-              if (lost) { lost = false; onStatus('restored'); }
+              if (lost) {
+                lost = false;
+                onStatus('restored');
+              }
             }, opt.restoredAfterMs);
-            stableTimer = setTimeout(() => { backoff = 1000; }, opt.stableAfterMs);
+            stableTimer = setTimeout(() => {
+              backoff = 1000;
+            }, opt.stableAfterMs);
           },
           onMessage: handle,
         });
       } catch (e) {
         if (stopping) break;
-        if (reconnectRequested) { reconnectRequested = false; continue; }
+        if (reconnectRequested) {
+          reconnectRequested = false;
+          continue;
+        }
         if (!lost) {
           lost = true;
-          onStatus('lost', (e as { authProblem?: unknown } | null | undefined)?.authProblem ? (transport.explainError(e).split(':')[0] ?? '') : '');
+          onStatus(
+            'lost',
+            (e as { authProblem?: unknown } | null | undefined)?.authProblem
+              ? (transport.explainError(e).split(':')[0] ?? '')
+              : '',
+          );
         }
       } finally {
         clearTimeout(restoredTimer);
@@ -199,7 +260,10 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
         stop.signal.removeEventListener('abort', link);
       }
       if (stopping) break;
-      if (reconnectRequested) { reconnectRequested = false; continue; }
+      if (reconnectRequested) {
+        reconnectRequested = false;
+        continue;
+      }
       await sleep(jitter(backoff), stop.signal);
       backoff = Math.min(backoff * 2, opt.maxBackoffMs);
     }

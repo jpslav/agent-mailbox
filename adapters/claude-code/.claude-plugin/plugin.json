@@ -7,10 +7,5 @@
     "name": "jpslav"
   },
   "license": "MIT",
-  "keywords": [
-    "messaging",
-    "multi-session",
-    "nats",
-    "hooks"
-  ]
+  "keywords": ["messaging", "multi-session", "nats", "hooks"]
 }

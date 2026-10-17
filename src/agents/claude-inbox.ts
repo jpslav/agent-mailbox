@@ -31,10 +31,17 @@ export function endpointFromEnv(env: Env): InboxEndpoint | null {
   let p = env.CLAUDE_CODE_MESSAGING_SOCKET;
   if (typeof p !== 'string' || !p) return null;
   if (p.startsWith('uds:')) {
-    try { p = decodeURIComponent(p.slice(4)); } catch { return null; }
+    try {
+      p = decodeURIComponent(p.slice(4));
+    } catch {
+      return null;
+    }
   }
   if (!p.startsWith('/')) return null; // native Windows named pipes: unsupported
-  const token = typeof env.CLAUDE_CODE_MESSAGING_TOKEN === 'string' && env.CLAUDE_CODE_MESSAGING_TOKEN ? env.CLAUDE_CODE_MESSAGING_TOKEN : null;
+  const token =
+    typeof env.CLAUDE_CODE_MESSAGING_TOKEN === 'string' && env.CLAUDE_CODE_MESSAGING_TOKEN
+      ? env.CLAUDE_CODE_MESSAGING_TOKEN
+      : null;
   return { kind: ENDPOINT_KIND, path: p, token };
 }
 
@@ -45,13 +52,19 @@ export function senderName(senders: readonly string[] = []): string {
 }
 
 /** The message text Claude sees: mail blocks wrapped as one cross-session message. */
-export function inboxContent(text: string, { senders = [] }: { senders?: readonly string[] } = {}): string {
+export function inboxContent(
+  text: string,
+  { senders = [] }: { senders?: readonly string[] } = {},
+): string {
   const name = senderName(senders);
   const lead =
-    'Agent mailbox delivery (the mbox CLI, not Claude Code\'s own cross-session messaging). ' +
+    "Agent mailbox delivery (the mbox CLI, not Claude Code's own cross-session messaging). " +
     'Reply with `mbox send <from> --re <id> "<text>"`; SendMessage cannot reach mailbox addresses.';
   // A body must not close the wrapper early (Claude Code escapes it the same way, "<\/...").
-  const body = `${lead}\n${String(text).replace(/\n+$/, '')}`.replace(new RegExp(`<(?=/${TAG})`, 'gi'), '<\\');
+  const body = `${lead}\n${String(text).replace(/\n+$/, '')}`.replace(
+    new RegExp(`<(?=/${TAG})`, 'gi'),
+    '<\\',
+  );
   return `<${TAG} from-name="${name}">\n${body}\n</${TAG}>`;
 }
 
@@ -64,20 +77,38 @@ interface InboxUserLine {
 }
 
 /** The JSON lines for one delivery (auth line first when there is a token). */
-export function inboxLines(endpoint: Endpoint, text: string, meta: Partial<DeliveryMeta> = {}): string {
+export function inboxLines(
+  endpoint: Endpoint,
+  text: string,
+  meta: Partial<DeliveryMeta> = {},
+): string {
   const content = inboxContent(text, meta);
-  const msg: InboxUserLine = { type: 'user', message: { role: 'user', content }, from: `mbox:${senderName(meta.senders)}` };
+  const msg: InboxUserLine = {
+    type: 'user',
+    message: { role: 'user', content },
+    from: `mbox:${senderName(meta.senders)}`,
+  };
   if (meta.sid) msg.session_id = meta.sid; // Claude Code drops it if the session changed (e.g. /clear)
   const line = JSON.stringify(msg) + '\n';
-  if (line.length > MAX_LINE_CHARS) throw Object.assign(new Error(`message too large for the inbox socket (${line.length} characters)`), { code: 'ETOOBIG' });
-  return (endpoint.token ? JSON.stringify({ type: 'auth', token: endpoint.token }) + '\n' : '') + line;
+  if (line.length > MAX_LINE_CHARS)
+    throw Object.assign(
+      new Error(`message too large for the inbox socket (${line.length} characters)`),
+      { code: 'ETOOBIG' },
+    );
+  return (
+    (endpoint.token ? JSON.stringify({ type: 'auth', token: endpoint.token }) + '\n' : '') + line
+  );
 }
 
 /**
  * Connect, write, end, and resolve once Claude Code has closed its side (it has read everything).
  * Rejects with the socket error (ENOENT: no socket file; ECONNREFUSED: nobody listening) or ETIMEDOUT.
  */
-export function postToSocket(socketPath: string, payload: string, { timeoutMs = 10000 }: { timeoutMs?: number } = {}): Promise<void> {
+export function postToSocket(
+  socketPath: string,
+  payload: string,
+  { timeoutMs = 10000 }: { timeoutMs?: number } = {},
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let done = false;
     const sock = net.createConnection({ path: socketPath });
@@ -89,10 +120,19 @@ export function postToSocket(socketPath: string, payload: string, { timeoutMs = 
       if (err) reject(err);
       else resolve();
     };
-    const timer = setTimeout(() => finish(Object.assign(new Error('inbox socket did not answer'), { code: 'ETIMEDOUT' })), timeoutMs);
+    const timer = setTimeout(
+      () => finish(Object.assign(new Error('inbox socket did not answer'), { code: 'ETIMEDOUT' })),
+      timeoutMs,
+    );
     sock.on('connect', () => sock.end(payload));
     sock.on('error', (e) => finish(e));
-    sock.on('close', (hadError) => finish(hadError ? Object.assign(new Error('inbox socket closed with an error'), { code: 'ECONNRESET' }) : undefined));
+    sock.on('close', (hadError) =>
+      finish(
+        hadError
+          ? Object.assign(new Error('inbox socket closed with an error'), { code: 'ECONNRESET' })
+          : undefined,
+      ),
+    );
     sock.resume(); // it writes nothing today; never let a reply stall us
   });
 }
@@ -100,12 +140,18 @@ export function postToSocket(socketPath: string, payload: string, { timeoutMs = 
 export const inboxDelivery: DeliveryCapability = {
   kind: ENDPOINT_KIND,
   /** Variables that name one session; the shared daemon must not inherit them. */
-  sessionEnv: ['CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_PID'],
+  sessionEnv: [
+    'CLAUDE_CODE_SESSION_ID',
+    'CLAUDE_CODE_MESSAGING_SOCKET',
+    'CLAUDE_CODE_MESSAGING_TOKEN',
+    'CLAUDE_PID',
+  ],
   endpointFromHook(_input, env) {
     return endpointFromEnv(env);
   },
   async deliver(endpoint, text, meta) {
-    if (!endpoint || endpoint.kind !== ENDPOINT_KIND || typeof endpoint.path !== 'string') throw Object.assign(new Error('not an inbox socket endpoint'), { code: 'EINVAL' });
+    if (!endpoint || endpoint.kind !== ENDPOINT_KIND || typeof endpoint.path !== 'string')
+      throw Object.assign(new Error('not an inbox socket endpoint'), { code: 'EINVAL' });
     await postToSocket(endpoint.path, inboxLines(endpoint, text, meta));
   },
 };

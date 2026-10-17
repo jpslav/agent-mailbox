@@ -123,7 +123,7 @@ owner's decision. When in doubt, label it.
 - **Ruleset `protect-main`** on the default branch: no deletion and no force-push; pull requests
   required, with 0 approvals, review threads resolved, and merge method "merge" only; required
   status checks are the four CI jobs `test (ubuntu-latest, node 20)`, `test (ubuntu-latest, node
-  22)`, `test (macos-latest, node 20)` and `test (macos-latest, node 22)`, strict (the branch must
+22)`, `test (macos-latest, node 20)` and `test (macos-latest, node 22)`, strict (the branch must
   be up to date); the admin role can bypass only when merging PRs.
 - **Secret scanning and push protection**, **Dependabot alerts and security updates** are on.
 - The label **`needs-owner`** exists.

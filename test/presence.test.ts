@@ -3,7 +3,17 @@
 // alive even when the machine stalls for a second or two).
 import assert from 'node:assert/strict';
 import { after, before } from 'node:test';
-import { Broker, Watcher, findServer, makeEnv, mbox, projectDir, sessionAddr, sleep, type MachineEnv } from './helpers.js';
+import {
+  Broker,
+  Watcher,
+  findServer,
+  makeEnv,
+  mbox,
+  projectDir,
+  sessionAddr,
+  sleep,
+  type MachineEnv,
+} from './helpers.js';
 import { describe, it } from './suite.js';
 
 const SERVER = findServer();
@@ -39,7 +49,10 @@ describe('presence', { skip: SERVER.skip }, () => {
       assert.match(list, /ADDRESS\s+ALIASES\s+AGENT\s+USER@HOST\s+CWD\s+LAST SEEN/);
       assert.ok(list.includes(a1) && list.includes(a2), list);
       assert.match(list, /claude-code\s+bob@/);
-      const amb = mbox(['send', 'peer-', 'x'], { env: { ...aliceEnv, AGENT_MAILBOX_SESSION: 'alicesess-6' }, cwd: d1 });
+      const amb = mbox(['send', 'peer-', 'x'], {
+        env: { ...aliceEnv, AGENT_MAILBOX_SESSION: 'alicesess-6' },
+        cwd: d1,
+      });
       assert.notEqual(amb.code, 0);
       assert.match(amb.stderr, /ambiguous/);
       assert.ok(amb.stderr.includes(a1) && amb.stderr.includes(a2), amb.stderr);
@@ -63,7 +76,7 @@ describe('presence', { skip: SERVER.skip }, () => {
     w.proc.kill('SIGKILL'); // no depart
     await w.exited;
     let gone = false;
-    for (const t0 = Date.now(); Date.now() - t0 < 30000 && !gone; ) {
+    for (const t0 = Date.now(); Date.now() - t0 < 30000 && !gone;) {
       await sleep(250);
       gone = !peers().includes(addr);
     }

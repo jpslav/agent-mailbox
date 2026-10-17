@@ -5,7 +5,22 @@ import { after, before } from 'node:test';
 import { jetstreamManager, type JetStreamManager } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { consumerName } from '../src/core/transport/nats.js';
-import { Broker, Waiter, Watcher, at, findServer, makeEnv, mbox, projectDir, send, sessionAddr, sleep, waitForWaiter, type MachineEnv, type WaiterOptions } from './helpers.js';
+import {
+  Broker,
+  Waiter,
+  Watcher,
+  at,
+  findServer,
+  makeEnv,
+  mbox,
+  projectDir,
+  send,
+  sessionAddr,
+  sleep,
+  waitForWaiter,
+  type MachineEnv,
+  type WaiterOptions,
+} from './helpers.js';
 import { describe, it } from './suite.js';
 
 const SERVER = findServer();
@@ -20,9 +35,17 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
   const track = <P extends Watcher | Waiter>(p: P): P => (procs.push(p), p);
   const bodies = (w: Watcher | Waiter): string[] => w.messages().map((m) => m.body);
   const peers = (): string => mbox(['peers'], { env: aliceEnv }).stdout;
-  const ackPending = async (sid: string): Promise<number> => (await jsm.consumers.info('MBX_BOB', consumerName(sid))).num_ack_pending;
-  const waiter = (env: MachineEnv, session: string, cwd: string, maxWait = '30', extra: WaiterOptions = {}): Waiter => track(new Waiter(env, { session, cwd, args: ['--max-wait', maxWait], ...extra }));
-  const mail = (to: string, text: string, from = 'alice-w'): void => assert.equal(send(aliceEnv, from, projectDir('alice-w'), to, text).code, 0);
+  const ackPending = async (sid: string): Promise<number> =>
+    (await jsm.consumers.info('MBX_BOB', consumerName(sid))).num_ack_pending;
+  const waiter = (
+    env: MachineEnv,
+    session: string,
+    cwd: string,
+    maxWait = '30',
+    extra: WaiterOptions = {},
+  ): Waiter => track(new Waiter(env, { session, cwd, args: ['--max-wait', maxWait], ...extra }));
+  const mail = (to: string, text: string, from = 'alice-w'): void =>
+    assert.equal(send(aliceEnv, from, projectDir('alice-w'), to, text).code, 0);
 
   before(async () => {
     b = new Broker(SERVER);
@@ -44,7 +67,12 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     for (const t of ['one', 'two\nlines', 'three']) mail(addr, t);
     const w = waiter(bobEnv, 'w-queued', dir);
     assert.equal(await w.result(), 2, w.err);
-    assert.ok(w.err.startsWith(`[mailbox] 3 new messages for ${addr} (mail delivery, not an error):\n[mailbox] message `), w.err);
+    assert.ok(
+      w.err.startsWith(
+        `[mailbox] 3 new messages for ${addr} (mail delivery, not an error):\n[mailbox] message `,
+      ),
+      w.err,
+    );
     assert.deepEqual(bodies(w), ['one', 'two\nlines', 'three']);
     assert.equal(at(w.messages(), 0).verified, 'alice');
     assert.equal(w.out, '');
@@ -138,7 +166,10 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     const addr = sessionAddr(env, 'w-host', dir);
     const w = waiter(env, 'w-host', dir);
     let listed = false;
-    for (let i = 0; i < 50 && !listed; i++) { listed = peers().includes(addr); if (!listed) await sleep(100); }
+    for (let i = 0; i < 50 && !listed; i++) {
+      listed = peers().includes(addr);
+      if (!listed) await sleep(100);
+    }
     assert.ok(listed, 'presence entry while waiting');
     parent.kill('SIGKILL');
     assert.equal(await w.result(5000), 0);
@@ -169,12 +200,21 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     assert.ok(w.err.length <= 8000, `stderr is ${w.err.length} chars`);
     const [m] = w.messages();
     assert.ok(m);
-    assert.match(m.body, new RegExp(`\\n\\(truncated: \\d+ more characters\\. Full text: mbox show ${m.id}\\)$`));
+    assert.match(
+      m.body,
+      new RegExp(`\\n\\(truncated: \\d+ more characters\\. Full text: mbox show ${m.id}\\)$`),
+    );
     assert.ok(!m.body.includes('THE END'));
-    const show = mbox(['show', m.id], { env: { ...bobEnv, AGENT_MAILBOX_SESSION: 'w-long' }, cwd: dir });
+    const show = mbox(['show', m.id], {
+      env: { ...bobEnv, AGENT_MAILBOX_SESSION: 'w-long' },
+      cwd: dir,
+    });
     assert.equal(show.code, 0, show.stderr);
     assert.ok(show.stdout.includes(`${body}\n[mailbox] end ${m.id}\n`));
-    const none = mbox(['show', 'no-such-id'], { env: { ...bobEnv, AGENT_MAILBOX_SESSION: 'w-long' }, cwd: dir });
+    const none = mbox(['show', 'no-such-id'], {
+      env: { ...bobEnv, AGENT_MAILBOX_SESSION: 'w-long' },
+      cwd: dir,
+    });
     assert.equal(none.code, 1);
     assert.match(none.stderr, /no message no-such-id/);
   });
@@ -194,7 +234,11 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
       assert.equal(code, 2, w.err.slice(0, 500));
       assert.ok(w.err.length <= 3000, `stderr is ${w.err.length} chars`);
       got.push(...w.messages().map((m) => m.body.split(' ').slice(0, 2).join(' ')));
-      if (++rounds === 1) assert.match(w.err, /\[mailbox\] \d+ more messages did not fit here; they arrive after this turn ends \(or read now: mbox inbox --since \d+m\)\.\n$/);
+      if (++rounds === 1)
+        assert.match(
+          w.err,
+          /\[mailbox\] \d+ more messages did not fit here; they arrive after this turn ends \(or read now: mbox inbox --since \d+m\)\.\n$/,
+        );
       assert.ok(rounds < 12, 'converges');
     }
     assert.ok(rounds > 1, 'needed more than one batch');
@@ -208,7 +252,12 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
   it('--hook-stdin takes the session and cwd from the hook payload; empty or silent stdin does not block', async () => {
     const dir = projectDir('hookdir');
     const noSession = { ...bobEnv };
-    const input = JSON.stringify({ session_id: 'hookw-1234', cwd: dir, hook_event_name: 'Stop', stop_hook_active: false });
+    const input = JSON.stringify({
+      session_id: 'hookw-1234',
+      cwd: dir,
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+    });
     const w = track(new Waiter(noSession, { args: ['--hook-stdin', '--max-wait', '30'], input }));
     await waitForWaiter(bobEnv, 'hookw-1234', w.proc.pid);
     const addr = sessionAddr(bobEnv, 'hookw-1234', projectDir('elsewhere'));
@@ -217,10 +266,24 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     assert.equal(await w.result(), 2, w.err);
     assert.deepEqual(bodies(w), ['via hook payload']);
 
-    const empty = track(new Waiter(bobEnv, { session: 'hookw-1234', cwd: dir, args: ['--hook-stdin', '--max-wait', '30'], stdin: 'ignore' }));
+    const empty = track(
+      new Waiter(bobEnv, {
+        session: 'hookw-1234',
+        cwd: dir,
+        args: ['--hook-stdin', '--max-wait', '30'],
+        stdin: 'ignore',
+      }),
+    );
     await waitForWaiter(bobEnv, 'hookw-1234', empty.proc.pid, 3000);
     await empty.stop();
-    const silent = track(new Waiter(bobEnv, { session: 'hookw-1234', cwd: dir, args: ['--hook-stdin', '--max-wait', '30'], stdin: 'pipe' })); // never closed
+    const silent = track(
+      new Waiter(bobEnv, {
+        session: 'hookw-1234',
+        cwd: dir,
+        args: ['--hook-stdin', '--max-wait', '30'],
+        stdin: 'pipe',
+      }),
+    ); // never closed
     await waitForWaiter(bobEnv, 'hookw-1234', silent.proc.pid, 5000);
     mail(addr, 'still works');
     assert.equal(await silent.result(), 2, silent.err);
@@ -234,7 +297,10 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     sessionAddr(bobEnv, 'w-bc-b', dB);
     const wa = waiter(aliceEnv, 'w-bc-a', dA);
     const wb = waiter(bobEnv, 'w-bc-b', dB);
-    await Promise.all([waitForWaiter(aliceEnv, 'w-bc-a', wa.proc.pid), waitForWaiter(bobEnv, 'w-bc-b', wb.proc.pid)]);
+    await Promise.all([
+      waitForWaiter(aliceEnv, 'w-bc-a', wa.proc.pid),
+      waitForWaiter(bobEnv, 'w-bc-b', wb.proc.pid),
+    ]);
     assert.equal(send(aliceEnv, 'w-bc-a', dA, 'all', 'hello everyone').code, 0);
     assert.equal(await wb.result(), 2, wb.err);
     assert.deepEqual(bodies(wb), ['hello everyone']);
@@ -254,7 +320,15 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     await waitForWaiter(bobEnv, 'w-end', w.proc.pid);
     for (let i = 0; i < 50 && !peers().includes(addr); i++) await sleep(100);
     assert.ok(peers().includes(addr));
-    const r = mbox(['hook', 'claude-code', 'session-end'], { env: bobEnv, input: JSON.stringify({ session_id: 'w-end', cwd: dir, hook_event_name: 'SessionEnd', reason: 'clear' }) });
+    const r = mbox(['hook', 'claude-code', 'session-end'], {
+      env: bobEnv,
+      input: JSON.stringify({
+        session_id: 'w-end',
+        cwd: dir,
+        hook_event_name: 'SessionEnd',
+        reason: 'clear',
+      }),
+    });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout, '');
     assert.equal(await w.result(3000), 0);
@@ -268,7 +342,12 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     mail(addr, 'not now');
     const hookInput = JSON.stringify({ session_id: 'w-p', cwd: dir, hook_event_name: 'Stop' });
     for (const entry of ['sdk-cli', 'claude-desktop']) {
-      const w = track(new Waiter({ ...bobEnv, CLAUDE_CODE_ENTRYPOINT: entry }, { cwd: dir, args: ['--hook-stdin', '--max-wait', '30'], input: hookInput }));
+      const w = track(
+        new Waiter(
+          { ...bobEnv, CLAUDE_CODE_ENTRYPOINT: entry },
+          { cwd: dir, args: ['--hook-stdin', '--max-wait', '30'], input: hookInput },
+        ),
+      );
       assert.equal(await w.result(3000), 0, entry);
       assert.equal(w.err, '', entry);
     }
