@@ -148,6 +148,8 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   after `ack_wait` plus max(5 s, half of `ack_wait`) (90 s with the default) and offers what it
   has, sorted. The server does not always redeliver nak'd messages in the order they were nak'd,
   so the sort matters even after a clean hand-back.
+- Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
+  deleted when the session ends.
 
 ### Delivery order
 
@@ -167,10 +169,9 @@ What a session is guaranteed (DECISIONS.md, "Delivery order across readers"):
 - **Cost:** none while a session has a single reader. When a reader starts with messages
   outstanding, newer mail waits for them: a clean handover hands them back at once (no visible
   delay); a crash, or a message lost in the instant a reader stopped, delays newer mail by up to
-  about `ack_wait` (60 s). Batching and throughput are unchanged (no `max_ack_pending` limit).
+  about `ack_wait` (60 s; the hold ends after 90 s at most). Batching and throughput are
+  unchanged (no `max_ack_pending` limit).
 - Messages carry no sequence number in what the model sees; the wire formats are unchanged.
-- Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
-  deleted when the session ends.
 
 ### Per-user permission block
 
