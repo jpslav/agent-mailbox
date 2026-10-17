@@ -25,7 +25,7 @@ transport interface. This repo adds the `mbox` CLI, a Claude Code plugin and ser
 ```
  agents (adapters)             core (agent- and broker-neutral)          broker transport
  ┌────────────────────┐        ┌──────────────────────────────┐         ┌─────────────────────────┐
- │ claude-code        │        │ addr      <user>.<host>.<label>│        │ nats.js (only file that │
+ │ claude-code        │        │ addr      <user>.<host>.<label>│        │ nats.ts (only file that │
  │  session id, host  │ ─────▶ │ config    servers/user/password│ ──────▶│ knows subjects, streams,│
  │  pid, hooks, push  │        │ state     session identity,   │  the    │ consumers, KV, acks,    │
  │  instructions      │        │           cursor, locks       │interface│ permission errors)      │
@@ -39,24 +39,24 @@ transport interface. This repo adds the `mbox` CLI, a Claude Code plugin and ser
                                  src/core/                                  (tailnet, file storage)
 ```
 
-- **Broker transport** (`src/core/transport/nats.js`): the only place that knows the broker. Core
+- **Broker transport** (`src/core/transport/nats.ts`): the only place that knows the broker. Core
   uses `publish(to, envelope)`, `subscribe({session, addresses, cursor, onMessage, ...})`,
   `poll(addresses, {lookbackMs})`, `now()`, a presence API (`announce/heartbeat/depart/update/list`),
   `diagnose()` and `close()`. The contract (at-least-once delivery, opaque cursor, liveness) is
-  documented at the top of that file; `test/transport.test.js` fails if core, agent or CLI code
+  documented at the top of that file; `test/transport.test.ts` fails if core, agent or CLI code
   starts mentioning subjects, `$JS`, JetStream, consumers or NATS.
 - **Core** (`src/core/`): addresses, config, session state and cursors, the envelope, peer
-  resolution, and the receiving side (`receiver.js`: reconnect/backoff, de-duplication, presence,
+  resolution, and the receiving side (`receiver.ts`: reconnect/backoff, de-duplication, presence,
   orphan guard), used by `deliverd` (the push daemon: one per user and machine, serving every
   registered session, see Delivery), `watch` (a stream of blocks on stdout) and `wait` (block
-  until mail, print one batch, exit). `registrations.js` holds the sessions registered for push
-  delivery, `pause.js` the emergency stop, `guide.js` the text of `mbox guide`.
+  until mail, print one batch, exit). `registrations.ts` holds the sessions registered for push
+  delivery, `pause.ts` the emergency stop, `guide.ts` the text of `mbox guide`.
 - **Agent adapters** (`src/agents/`): a plain object per agent
   `{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput(stdinJson)?, canWait(env)?, delivery?, hooks:{event: async (stdinJson, ctx) -> stdout}, instructions(ctx)}`
   plus the agent's integration files under `adapters/<agent>/` (for Claude Code: the plugin
   manifest, hook config, skill, launcher and the bundled CLI). `delivery` is
   `{kind, sessionEnv, endpointFromHook(stdinJson, env), async deliver(endpoint, text, meta)}`: how
-  to push text into a running session (Claude Code: `src/agents/claude-inbox.js`).
+  to push text into a running session (Claude Code: `src/agents/claude-inbox.ts`).
   Resolution: session = `--session`, `AGENT_MAILBOX_SESSION`, then the first adapter whose
   `detect(env)` is true; agent = `--agent`, `AGENT_MAILBOX_AGENT`, the detected adapter, else
   `unknown`. Addresses never contain the agent; it travels in the message envelope and presence
@@ -93,7 +93,7 @@ A new agent needs three things:
 
 Worked hypothetical (**not implemented**, Codex's real mechanisms may differ): a `codex` adapter
 would set `detect` on a Codex-provided env var, `sessionId` from its session variable, register
-`src/agents/codex.js` in `src/agents/index.js`, and ship `adapters/codex/` with whatever launcher
+`src/agents/codex.ts` in `src/agents/index.ts`, and ship `adapters/codex/` with whatever launcher
 and instructions file Codex loads (for instance an AGENTS.md snippet generated from
 `instructions(ctx)`), with a `delivery` capability if Codex can take text into a running session,
 else running `mbox watch` or `mbox wait` as its notification source. Nothing in `src/core/`
@@ -268,7 +268,7 @@ subscribe allow:
 
 Everything else is denied, including stream create/update/delete/purge, message delete, consumer
 list/delete, any access to other users' streams, consumers or reply inboxes, and consumers on
-`MBX_ALL` or `KV_presence`. `test/isolation.test.js` proves each of these against a real server,
+`MBX_ALL` or `KV_presence`. `test/isolation.test.ts` proves each of these against a real server,
 including that a push consumer on your own stream cannot deliver into someone else's stream with a
 forged sender token. `mbox doctor` repeats the key negative check from the client side.
 
@@ -497,23 +497,34 @@ only), `<id>.lock` (the watcher, or the daemon while it serves the session) and 
 
 ## Development
 
+The source is strict TypeScript (`src/`, `test/`); esbuild bundles it, `tsc` only checks types.
+
 ```sh
 npm ci
-npm run build        # esbuild -> adapters/claude-code/dist/mbox.mjs (commit the result; CI checks it)
-npm test             # node:test; integration suites start real nats-server processes
+npm run typecheck     # tsc --noEmit (strict)
+npm run lint          # ESLint (typescript-eslint, type-checked)
+npm run format:check  # Prettier (npm run format writes)
+npm run build         # esbuild -> adapters/claude-code/dist/mbox.mjs (commit the result; CI checks it)
+npm test              # node:test through tsx; integration suites start real nats-server processes
+npm run test:unit     # only the fast suites that need no nats-server
 ```
+
+`npm ci` also installs two git hooks (simple-git-hooks): pre-commit formats and lints the staged
+files, pre-push runs `typecheck` and `test:unit`. Bypass them in an emergency with `--no-verify`
+or `SKIP_SIMPLE_GIT_HOOKS=1` (see CONTRIBUTING.md). `test/golden*.test.ts` pin the wire formats
+byte for byte.
 
 Integration tests need `nats-server` (>= 2.11) and the `nats` CLI on `PATH` (or `NATS_SERVER_BIN` /
 `NATS_BIN`) and are skipped, not failed, without them. Each suite starts a server from
 `server/nats-server.conf.example` with a temp config dir, temp store dir and a random
 `127.0.0.1` port, provisions it with `server/mbox-admin.sh` (users alice and bob), and runs the
-real CLI as child processes. `test/deliverd.test.js` drives the daemon against `FakeInbox`, a
+real CLI as child processes. `test/deliverd.test.ts` drives the daemon against `FakeInbox`, a
 stand-in for Claude Code's inbox socket that follows the line protocol described in
-`docs/PROTOCOL.md`. See `test/helpers.js`.
+`docs/PROTOCOL.md`. See `test/helpers.ts`.
 Validate the plugin with `claude plugin validate ./adapters/claude-code --strict` and
 `claude plugin validate . --strict`.
 
-CI (`.github/workflows/ci.yml`) runs the tests on Ubuntu and macOS with Node 20 and 22, using pinned,
+CI (`.github/workflows/ci.yml`) runs formatting, lint, type check and the tests on Ubuntu and macOS with Node 20 and 22, using pinned,
 checksum-verified nats-server and natscli release binaries, fails if `npm run build` changes
 `adapters/claude-code/dist`, and checks that the three version fields agree and that a pull request
 changing `dist` also changes the version. See CLAUDE.md for the rules for contributors (and agents), CONTRIBUTING.md for the human-oriented

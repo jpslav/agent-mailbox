@@ -26,7 +26,7 @@ description: Triage open issues and Dependabot pull requests in agent-mailbox - 
    ```
 
 4. **Reproduce** a bug before deciding anything. Prefer a failing test: an integration test with
-   the harness in `test/helpers.js` (a real nats-server, run as in CLAUDE.md "Tests"). For
+   the harness in `test/helpers.ts` (a real nats-server, run as in CLAUDE.md "Tests"). For
    delivery problems in real Claude Code sessions, use the `live-test` skill. Ask the reporter for
    `mbox doctor`, `mbox deliverd --status` and the Claude Code version if the report lacks them.
 5. **Decide**, and say which in a comment on the issue:
@@ -57,7 +57,7 @@ Dependabot opens weekly PRs for npm and GitHub Actions, with minor and patch upd
 
    ```sh
    gh pr checkout <n>
-   npm ci && npm run build && npm test
+   npm ci && npm run typecheck && npm run lint && npm run build && npm test
    git status --short adapters/claude-code/dist
    ```
 
@@ -66,9 +66,15 @@ Dependabot opens weekly PRs for npm and GitHub Actions, with minor and patch upd
      `package.json`, `package-lock.json` and `plugin.json` together (the `release` skill, step 2),
      a CHANGELOG entry, and the rebuilt `dist/` committed on the PR branch. CI rejects the PR
      otherwise ("dist is up to date" or the version check).
-   - `dist/` did not change: no bump needed.
+   - `dist/` did not change: no bump needed (the tooling devDependencies: TypeScript, tsx, ESLint,
+     Prettier, the git hook tools).
+   - Dependencies are pinned to exact versions: keep it that way when updating `package.json`
+     (no `^` or `~`), and take a version published at least two weeks ago
+     (`npm view <pkg> time --json`). `typescript-eslint` supports only some TypeScript versions
+     and several tools have Node engine floors (CI runs Node 20 and 22): read the peer
+     dependencies before accepting a major bump of any of them.
    - Read the upstream changelog before accepting a major version, and for anything in the
-     `@nats-io` packages (the transport seam, `src/core/transport/nats.js`, is the only consumer).
+     `@nats-io` packages (the transport seam, `src/core/transport/nats.ts`, is the only consumer).
    - A bump that changes how authentication or permissions behave is `needs-owner`.
 4. Merge when CI is green and the rules above are met: `gh pr merge <n> --merge`. Never squash.
    Close PRs you decide against with a comment; Dependabot stops re-opening ignored versions only

@@ -7,7 +7,7 @@ details a maintainer needs when something changes or breaks.
 
 ## 1. Claude Code inbox socket (consumed, not owned)
 
-Code: `src/agents/claude-inbox.js` (the writer), `FakeInbox` in `test/helpers.js` (the test
+Code: `src/agents/claude-inbox.ts` (the writer), `FakeInbox` in `test/helpers.ts` (the test
 stand-in). Keep all three in step with this file.
 
 ### What is documented
@@ -102,20 +102,20 @@ Suspect a Claude Code release when any of these appear after an upgrade:
   tags as plain text, or loses `from-name`.
 - A busy indicator or running task appears in sessions that should show none.
 - Messages are delivered as held for approval when they were not before.
-- The `claude-inbox.js` excerpt no longer matches what the bundle prints (search the installed
+- The `claude-inbox.ts` excerpt no longer matches what the bundle prints (search the installed
   bundle for `Ignoring user message with missing or non-string content`).
 
 ### How to re-verify
 
 Run the `live-test` skill (`.claude/skills/live-test/SKILL.md`): two real sessions on a throwaway
-server count 1 to 40 over the mailbox. Pass criteria are in that skill. `test/deliverd.test.js`
+server count 1 to 40 over the mailbox. Pass criteria are in that skill. `test/deliverd.test.ts`
 only proves the daemon against `FakeInbox`; it cannot detect a change in Claude Code. After a
-confirmed change, update `claude-inbox.js`, `FakeInbox`, this file, and DECISIONS.md if the
+confirmed change, update `claude-inbox.ts`, `FakeInbox`, this file, and DECISIONS.md if the
 delivery design changes. Protocol changes are `needs-owner` changes.
 
 ## 2. Mailbox protocol on NATS (owned)
 
-The NATS layout is a transport detail: only `src/core/transport/nats.js` and `server/` know it.
+The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `server/` know it.
 
 ### Subjects and streams
 
@@ -165,7 +165,7 @@ subscribe allow:
 ```
 
 Everything else is denied. Any change here is a `needs-owner` change and needs a negative test in
-`test/isolation.test.js` (see CLAUDE.md).
+`test/isolation.test.ts` (see CLAUDE.md).
 
 ### Envelope v1
 
@@ -188,5 +188,6 @@ JSON in the message payload:
 | `inReplyTo` | the id this replies to, else `null` |
 | `sentAt` | ISO 8601 send time; a message older than 24 hours is flagged stale |
 
-Source of truth: `src/core/envelope.js`. Adding a field is backward compatible if readers ignore
+Source of truth: `src/core/envelope.ts` (the `Envelope` type is in `src/core/types.ts`); the exact
+JSON is pinned by `test/golden.test.ts`. Adding a field is backward compatible if readers ignore
 unknown fields; changing the meaning of one needs a new `v`.

@@ -13,32 +13,52 @@ and `docs/PROTOCOL.md` (wire details). The human repo owner approves security-se
 
 ## Layout
 
+The source is strict TypeScript (`src/`, `test/`); `esbuild` bundles it, `tsc` only type-checks.
+
 - `src/core/`: agent- and broker-neutral logic (addr, config, state, envelope, registry, guide,
   and the receiving side: receiver, used by deliverd, watch and wait; registrations and pause
-  for the push daemon `deliverd`).
-- `src/core/transport/nats.js`: the transport seam, the only file that knows the broker.
-- `src/agents/`: one plain object per agent (`claude-code.js`), registered in `agents/index.js`;
-  `claude-inbox.js` is Claude Code's inbox-socket protocol (the `delivery` capability).
-- `src/cli.js`: the `mbox` command. `scripts/build.mjs` bundles it with esbuild;
+  for the push daemon `deliverd`). `src/core/types.ts` holds the shared contracts: the config,
+  envelope v1, deliveries and messages, session state, registrations, presence entries and the
+  `Transport` interface.
+- `src/core/transport/nats.ts`: the transport seam, the only file that knows the broker.
+- `src/agents/`: one plain object per agent (`claude-code.ts`), registered in `agents/index.ts`;
+  `adapter.ts` defines the `Adapter` interface (`delivery`, `hooks`, `canWait`, `hookInput`, ...);
+  `claude-inbox.ts` is Claude Code's inbox-socket protocol (the `delivery` capability).
+- `src/cli.ts`: the `mbox` command. `scripts/build.mjs` bundles it with esbuild;
   `scripts/check-versions.mjs` is the CI version check.
 - `adapters/<agent>/`: that agent's integration files (`claude-code/`: plugin manifest, hooks,
   skill, `bin/mbox` POSIX-sh launcher, committed `dist/mbox.mjs`).
 - `server/`: `mbox-admin.sh` (users, streams, permissions), `install.sh` (prints install steps),
   `nats-server.conf.example`, `systemd/` and `launchd/` service files.
-- `test/`: `node:test` suites; the integration ones start a real nats-server.
+- `test/`: `node:test` suites in TypeScript, run through `tsx`; the integration ones start a real
+  nats-server. `test/golden.test.ts` and `test/golden-presence.test.ts` pin the wire formats.
+- Tooling at the root: `tsconfig.json` (strict), `eslint.config.mjs`, `.prettierrc` and
+  `.prettierignore`; the git hooks and `lint-staged` are configured in `package.json`.
 - `docs/`: `DECISIONS.md`, `PROTOCOL.md`. `.claude/skills/`: this repo's procedures.
   `.claude/settings.json`: the shared permissions allowlist (routine read-only and build/test
   commands only; nothing that pushes, merges, deletes or publishes).
 
 ## Rules
 
+- **TypeScript, strict, no `any`.** `tsconfig.json` has `strict` and `noUncheckedIndexedAccess`.
+  Untrusted data (parsed JSON from a file, the wire or a hook) is typed `unknown` or a
+  deliberately loose `Untrusted...` interface and checked before use; a cast is acceptable only
+  at such a boundary and with a comment. Keep the contracts in `src/core/types.ts` and
+  `src/agents/adapter.ts` true: change the interface first, then the code. Disable a lint rule
+  only on the line that needs it, with the reason after `--`.
+- **Wire formats are pinned.** `test/golden.test.ts` (envelope v1, a registration file, the
+  inbox-socket line) and `test/golden-presence.test.ts` (a presence KV entry) assert the exact
+  JSON, field names and order. A change to one of those expectations is a change to the wire
+  format: it needs `docs/PROTOCOL.md`, a version bump and, when it touches the inbox-socket line,
+  registrations or credentials, the `needs-owner` label. Never "update the snapshot" to make a
+  refactor pass.
 - **Public repo.** Nothing specific to a maintainer's setup: no real IPs, machine names, personal
   usernames, home paths, emails or organization names. Use `alice`/`bob`, `mailbox-host`,
   `100.x.y.z` and `example.ts.net`. The handle `jpslav` is fine as the repo owner. Say "the repo
   owner", never a person's name. Check new text and fixtures before finishing (the grep is under
   "Validation").
-- **Transport seam.** `src/core/*` (outside `transport/`), `src/agents/` and `src/cli.js` must never
-  mention NATS concepts (subjects, `$JS`, JetStream, consumers, KV, `mbx.`). `test/transport.test.js`
+- **Transport seam.** `src/core/*` (outside `transport/`), `src/agents/` and `src/cli.ts` must never
+  mention NATS concepts (subjects, `$JS`, JetStream, consumers, KV, `mbx.`). `test/transport.test.ts`
   enforces it; if it fails, move the code into the transport, not the pattern out of the test.
 - **dist is a committed build.** `adapters/claude-code/dist/mbox.mjs` is what the plugin and the
   tests run. Run `npm run build` after any change under `src/` and commit the result; CI rebuilds
@@ -66,7 +86,9 @@ The `ship-change` skill has the exact commands.
 
 1. Start from an up-to-date `main` and create a branch (`git switch -c <type>/<topic>`).
 2. Commit in logical steps with descriptive plain messages (no Conventional Commits prefixes).
-   Run `npm run build && npm test` first; commit the rebuilt `dist/` when `src/` changed.
+   Run `npm run typecheck && npm run lint && npm run format:check && npm run build && npm test`
+   first (`npm run format` fixes formatting); commit the rebuilt `dist/` when `src/` changed.
+   The git hooks (below) run part of this for you.
 3. Push the branch and open a PR with the template filled in.
 4. Wait for CI with `gh pr checks <n> --watch --fail-fast` and read the result. Do not hand-roll
    polling loops.
@@ -83,7 +105,7 @@ Add the `needs-owner` label to any PR that touches:
 - NATS permissions or ACLs (the permission block in `server/mbox-admin.sh`, or what the client
   needs from the server);
 - authentication or credentials handling (passwords, tokens, client config files, registrations);
-- the inbox-socket delivery protocol (`src/agents/claude-inbox.js`, `docs/PROTOCOL.md`);
+- the inbox-socket delivery protocol (`src/agents/claude-inbox.ts`, `docs/PROTOCOL.md`);
 - the runaway guard (rate limit, `mbox pause` / `mbox resume`);
 - CI workflows (`.github/workflows/`). Renaming or adding CI jobs also requires updating the
   `protect-main` ruleset's required checks, which only the owner can do;
@@ -125,6 +147,11 @@ Dependabot opens weekly PRs for npm and GitHub Actions (minor and patch updates 
 - Runtime code is bundled into the committed `dist/mbox.mjs`, so **an npm bump that changes
   `dist/` needs a patch version bump** and a rebuilt `dist/` (CI rejects it otherwise). A bump
   that does not change `dist/` (devDependencies that are not bundled) needs none.
+- Every dependency is a devDependency (the bundle carries what it needs) and is **pinned to an
+  exact version**, no `^` or `~`. Pick a version published at least two weeks ago
+  (`npm view <pkg> time --json`). The tooling pairs constrain each other: `typescript-eslint`
+  supports only some TypeScript versions, and `eslint`, `lint-staged` and `tsx` have Node
+  engine floors (CI runs Node 20 and 22), so check peer dependencies before bumping one.
 - GitHub Actions stay pinned to a full commit SHA with the version in a trailing comment
   (`uses: owner/action@<sha> # vX.Y.Z`). Keep that form when updating. A workflow change is
   `needs-owner`.
@@ -154,11 +181,28 @@ report reaches a session by another route, tell the owner and handle it as `need
 
 ## Tests
 
-`npm test` runs everything (`node --test --test-concurrency=1`). Integration suites need
+`npm test` runs everything (`node --import tsx --test --test-concurrency=1 test/*.test.ts`);
+`npm run test:unit` runs only the fast suites that need no nats-server (agents, golden, hook,
+launcher, transport, unit). Integration suites need
 `nats-server` (>= 2.11) and the `nats` CLI on `PATH` (or `NATS_SERVER_BIN` / `NATS_BIN`); without
 them they are skipped, so make sure they ran. Each suite starts its own server on a random
 127.0.0.1 port from `server/nats-server.conf.example`, provisioned by `server/mbox-admin.sh`
-(see `test/helpers.js`). Run one file with `node --test test/isolation.test.js`.
+(see `test/helpers.ts`). Run one file with `node --import tsx --test test/isolation.test.ts`.
+
+## Formatting, linting and git hooks
+
+- **Prettier** (`.prettierrc`: width 100, single quotes, trailing commas) formats everything
+  except `dist`, `node_modules` and `CHANGELOG.md`: `npm run format` writes, `npm run format:check`
+  checks. **ESLint** (`eslint.config.mjs`: `@eslint/js` and typescript-eslint recommended
+  type-checked, then `eslint-config-prettier`) is `npm run lint`; `npm run typecheck` is `tsc`.
+  CI runs all three as steps of the existing `test` job.
+- **Git hooks** (`simple-git-hooks`, installed by `npm install` / `npm ci` through the `prepare`
+  script; not in CI): **pre-commit** runs `lint-staged` (`prettier --write` and `eslint --fix` on
+  the staged files); **pre-push** runs `npm run typecheck` and `npm run test:unit`.
+- **Emergency bypass**, for one command only: `git commit --no-verify`, `git push --no-verify`,
+  or `SKIP_SIMPLE_GIT_HOOKS=1 git commit ...`. CI still enforces everything, so a bypassed
+  problem only moves to the pull request. `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1 npm ci` installs
+  without hooks.
 
 ## Live testing
 
@@ -186,13 +230,14 @@ mailbox. Rules:
 - Users read only their own stream, the broadcast stream (by direct get) and presence. They cannot
   create consumers elsewhere, delete or purge messages, or touch streams.
 - Any change to the permission block in `server/mbox-admin.sh` (or to what the client needs from the
-  server) needs a negative test in `test/isolation.test.js` that proves the new boundary against a
+  server) needs a negative test in `test/isolation.test.ts` that proves the new boundary against a
   real server. Widening permissions without one is a bug.
 - Passwords: only on stdin, never in argv or logs; client config is mode 0600.
 
 ## Agent adapters
 
-An adapter is `{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput?, canWait?, delivery?, hooks, instructions(ctx)}`
+An adapter is an `Adapter` (`src/agents/adapter.ts`):
+`{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput?, canWait?, delivery?, hooks, instructions(ctx)}`
 in `src/agents/`, plus files in `adapters/<agent>/`. It needs a stable session id, a way to get
 mail to the model and a session-start hook that tells the agent its address (`hooks['session-start']`,
 dispatched by `mbox hook <agent> <event>`). Getting mail in: preferably a `delivery` capability
@@ -201,17 +246,18 @@ dispatched by `mbox hook <agent> <event>`). Getting mail in: preferably a `deliv
 the session-end hook deregisters; `deliver` posts one JSON line to the socket). Agents without a
 push channel use the generic fallbacks `mbox wait` (a background task) or `mbox watch`; keep both.
 The inbox socket's line format is undocumented (read from the Claude Code bundle): `docs/PROTOCOL.md`
-holds the excerpt and the fields used; keep it, `src/agents/claude-inbox.js` and `FakeInbox` in
-`test/helpers.js` in step. Never assert a permission mode, a relay/hop chain or a reply address
+holds the excerpt and the fields used; keep it, `src/agents/claude-inbox.ts` and `FakeInbox` in
+`test/helpers.ts` in step. Never assert a permission mode, a relay/hop chain or a reply address
 that the mailbox is not.
-To add Codex or another agent, use the `add-adapter` skill: add `src/agents/<agent>.js`, register
-it in `src/agents/index.js`, add `adapters/<agent>/`, add tests like `test/agents.test.js` and
-`test/hook.test.js`. Nothing in `src/core/` should change; if it must, the abstraction is wrong.
+To add Codex or another agent, use the `add-adapter` skill: add `src/agents/<agent>.ts`, register
+it in `src/agents/index.ts`, add `adapters/<agent>/`, add tests like `test/agents.test.ts` and
+`test/hook.test.ts`. Nothing in `src/core/` should change; if it must, the abstraction is wrong.
 README.md ("Adding an agent adapter") has the details.
 
 ## Validation before finishing
 
-`npm run build && npm test`, `claude plugin validate ./adapters/claude-code --strict`,
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build && npm test`,
+`claude plugin validate ./adapters/claude-code --strict`,
 `claude plugin validate . --strict`, `sh -n` on every shell script (`adapters/claude-code/bin/mbox`
 and `server/*.sh`), `node scripts/check-versions.mjs`, and the public-repo grep (maintainer names,
 hosts and home paths) over the tree, excluding `node_modules` and `.git`. The grep is for your

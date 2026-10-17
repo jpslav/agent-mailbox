@@ -11,23 +11,49 @@ which is also the most complete description of how the project is run.
 
 ## Development setup
 
-You need Node.js 18 or newer, plus `nats-server` (2.11 or newer) and the `nats` CLI on `PATH` for
-the integration tests (they are skipped without them, so check that they ran).
+The `mbox` command itself runs on Node.js 18 or newer. To work on it, use Node.js 20 or newer (the
+tooling needs it; CI tests 20 and 22), plus `nats-server` (2.11 or newer) and the `nats` CLI on
+`PATH` for the integration tests (they are skipped without them, so check that they ran).
 
 ```sh
 npm ci
-npm run build   # bundles src/ into adapters/claude-code/dist/mbox.mjs (commit the result)
-npm test
+npm run typecheck     # tsc (strict)
+npm run lint          # ESLint
+npm run format:check  # Prettier (`npm run format` fixes it)
+npm run build         # bundles src/ into adapters/claude-code/dist/mbox.mjs (commit the result)
+npm test              # everything; `npm run test:unit` runs only the fast suites
 ```
 
-`adapters/claude-code/dist/mbox.mjs` is a committed build. Run `npm run build` after changing
-anything under `src/` and commit the result; CI rebuilds it and fails on any difference.
+The source is strict TypeScript under `src/` and `test/`. `adapters/claude-code/dist/mbox.mjs` is
+a committed build: run `npm run build` after changing anything under `src/` and commit the
+result; CI rebuilds it and fails on any difference. Tests run through `tsx`, so nothing else is
+compiled.
+
+### Git hooks
+
+`npm ci` (or `npm install`) installs two git hooks with `simple-git-hooks`:
+
+- **pre-commit** runs `lint-staged`: Prettier and ESLint (`--fix`) on the files you staged.
+- **pre-push** runs `npm run typecheck` and `npm run test:unit`.
+
+They are a safety net; CI runs the formatting, lint and type checks too. In an emergency, skip
+them for one command with `git commit --no-verify` / `git push --no-verify`, or
+`SKIP_SIMPLE_GIT_HOOKS=1 git commit ...`. To install without hooks, run
+`SKIP_INSTALL_SIMPLE_GIT_HOOKS=1 npm ci`.
+
+### Wire formats
+
+`test/golden.test.ts` and `test/golden-presence.test.ts` pin the exact JSON of the envelope, a
+registration file, a presence entry and the inbox-socket line. A pull request that changes one of
+their expectations is changing a wire format; explain it and update `docs/PROTOCOL.md`.
 
 ## Pull requests
 
 1. Branch from an up-to-date `main`; never push to `main` directly (it is protected).
 2. Keep a PR to one logical change, with descriptive commit messages in plain style.
 3. Add or adjust tests. Tests must pass on a slow, loaded machine: no timing-based assertions.
+   Keep `typecheck`, `lint` and `format:check` clean; do not add `any`, and disable a lint rule
+   only on the line that needs it, with the reason.
 4. If your change should reach users, bump the version in `package.json`, `package-lock.json` and
    `adapters/claude-code/.claude-plugin/plugin.json` together. Installed copies update only when
    the version changes. CI checks that the three agree, and that a change to `dist/` comes with a
