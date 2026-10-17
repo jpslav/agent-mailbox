@@ -71,6 +71,13 @@ export interface OpenReceiverInput {
   env?: Env;
   /** stop() leaves the transport open (a process that serves several sessions on one). */
   keepTransport?: boolean;
+  /**
+   * Abandon the start: when it aborts while the receiver is still opening (the cursor lookup and
+   * the presence announcement), no subscription is ever made and the returned receiver is already
+   * stopped. A caller that must be able to leave at any moment (`mbox wait` yielding to a newer
+   * waiter or a watcher) uses it so a slow broker cannot hold it up.
+   */
+  signal?: AbortSignal;
   onMessage: (
     delivery: Delivery,
     message: Message,
@@ -117,6 +124,7 @@ export async function openReceiver({
   hostPid = null,
   env = process.env,
   keepTransport = false,
+  signal,
   onMessage,
   onStatus = () => {},
   onTick = () => {},
@@ -130,7 +138,16 @@ export async function openReceiver({
   let reconnectRequested = false;
   const timers: Array<ReturnType<typeof setInterval>> = [];
 
-  const cur = readCursor(sid, env) || { cursor: await transport.now(), seen: {} };
+  // Resolves with `undefined` as soon as the start is abandoned, whatever `p` is still doing.
+  const abandoned = new Promise<undefined>((resolve) => {
+    if (signal?.aborted) resolve(undefined);
+    else signal?.addEventListener('abort', () => resolve(undefined), { once: true });
+  });
+  const unlessAbandoned = <T>(p: Promise<T>): Promise<T | undefined> =>
+    signal ? Promise.race([p, abandoned]) : p;
+
+  const saved = readCursor(sid, env);
+  const cur = saved || { cursor: await unlessAbandoned(transport.now()), seen: {} };
   const seen = new Map<string, number>(Object.entries(cur.seen || {}));
   let cursor = cur.cursor;
 
@@ -164,7 +181,18 @@ export async function openReceiver({
     );
 
   // ---- announce ----
-  await post('announce', 5000);
+  await unlessAbandoned(post('announce', 5000));
+  if (signal?.aborted) {
+    // Abandoned while opening: nothing was subscribed and no timer started; stop() only lets go.
+    return {
+      state: () => st,
+      commit,
+      stop: async ({ depart = false }: { depart?: boolean } = {}) => {
+        if (depart) await post('depart', 2000);
+        if (!keepTransport) await transport.close?.().catch(() => {});
+      },
+    };
+  }
 
   // ---- housekeeping timers ----
   timers.push(setInterval(() => void post('heartbeat', 5000), opt.heartbeatMs));

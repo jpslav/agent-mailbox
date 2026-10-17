@@ -469,14 +469,13 @@ export class Waiter {
   }
 }
 
-/** The waiter lock file says this pid is the session's current waiter. */
-export async function waitForWaiter(
-  env: Env,
-  session: string,
+/** Resolves once the lock file names `pid` (the process wrote it itself). */
+async function waitForLockFile(
+  file: string,
   pid: number | undefined,
-  timeoutMs = 10000,
+  what: string,
+  timeoutMs: number,
 ): Promise<void> {
-  const file = path.join(env.AGENT_MAILBOX_STATE_DIR ?? '', 'sessions', `${session}.wait.lock`);
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     try {
@@ -486,8 +485,28 @@ export async function waitForWaiter(
     }
     await sleep(50);
   }
-  throw new Error(`waiter ${pid} never held the lock for ${session}`);
+  throw new Error(`${what} ${pid} never held the lock ${file}`);
 }
+
+const sessionFile = (env: Env, name: string): string =>
+  path.join(env.AGENT_MAILBOX_STATE_DIR ?? '', 'sessions', name);
+
+/** The waiter lock file says this pid is the session's current waiter. */
+export const waitForWaiter = (
+  env: Env,
+  session: string,
+  pid: number | undefined,
+  timeoutMs = 10000,
+): Promise<void> =>
+  waitForLockFile(sessionFile(env, `${session}.wait.lock`), pid, 'waiter', timeoutMs);
+
+/** The watch lock file says this pid is the session's watcher: it is up, and a waiter will see it. */
+export const waitForWatcher = (
+  env: Env,
+  session: string,
+  pid: number | undefined,
+  timeoutMs = 20000,
+): Promise<void> => waitForLockFile(sessionFile(env, `${session}.lock`), pid, 'watcher', timeoutMs);
 
 /**
  * A stand-in for Claude Code's per-session inbox socket, mimicking what the Claude Code bundle does

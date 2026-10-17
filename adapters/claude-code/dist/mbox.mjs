@@ -18657,6 +18657,7 @@ async function openReceiver({
   hostPid = null,
   env = process.env,
   keepTransport = false,
+  signal: signal2,
   onMessage,
   onStatus = () => {
   },
@@ -18672,7 +18673,13 @@ async function openReceiver({
   let streamAc = null;
   let reconnectRequested = false;
   const timers = [];
-  const cur = readCursor(sid, env) || { cursor: await transport.now(), seen: {} };
+  const abandoned = new Promise((resolve) => {
+    if (signal2?.aborted) resolve(void 0);
+    else signal2?.addEventListener("abort", () => resolve(void 0), { once: true });
+  });
+  const unlessAbandoned = (p) => signal2 ? Promise.race([p, abandoned]) : p;
+  const saved = readCursor(sid, env);
+  const cur = saved || { cursor: await unlessAbandoned(transport.now()), seen: {} };
   const seen = new Map(Object.entries(cur.seen || {}));
   let cursor = cur.cursor;
   const persist = () => {
@@ -18699,7 +18706,18 @@ async function openReceiver({
     () => {
     }
   );
-  await post("announce", 5e3);
+  await unlessAbandoned(post("announce", 5e3));
+  if (signal2?.aborted) {
+    return {
+      state: () => st,
+      commit,
+      stop: async ({ depart = false } = {}) => {
+        if (depart) await post("depart", 2e3);
+        if (!keepTransport) await transport.close?.().catch(() => {
+        });
+      }
+    };
+  }
   timers.push(setInterval(() => void post("heartbeat", 5e3), opt.heartbeatMs));
   let lastMtime = 0;
   try {
@@ -18820,7 +18838,7 @@ import fs5 from "node:fs";
 import path5 from "node:path";
 
 // src/core/version.ts
-var BUILD_VERSION = true ? "0.5.3" : "0.0.0-dev";
+var BUILD_VERSION = true ? "0.5.4" : "0.0.0-dev";
 function ownVersion(env = process.env) {
   return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
 }
@@ -20436,9 +20454,12 @@ async function runWait({
     lockPollMs: Number(env.AGENT_MAILBOX_WAIT_POLL_MS) || 250,
     drainMs: Number(env.AGENT_MAILBOX_DRAIN_MS) || 300,
     maxChars: Number(env.AGENT_MAILBOX_WAIT_MAX_CHARS) || 8e3,
+    // Test-only fault injection (AGENT_MAILBOX_FAULT): "crash-after-write", or "slow-open:<ms>"
+    // (the receiver's presence announcement takes <ms> longer, to widen the window between taking
+    // the lock and being able to react to the poll; never set in production).
     fault: env.AGENT_MAILBOX_FAULT || ""
-    // test-only: "crash-after-write"
   };
+  const slowOpenMs = Number(/^slow-open:(\d+)$/.exec(opt.fault)?.[1]) || 0;
   const st = await ensureSession({ sid, cfg, transport, cwd, hostPid, env });
   const lock = claimWaitLock(sid, env);
   const yielded = async () => {
@@ -20458,12 +20479,15 @@ async function runWait({
   let doneResolve;
   const done = new Promise((r) => doneResolve = r);
   let rx = null;
+  const opening = new AbortController();
+  let opened = null;
   function finish(result2, { depart = false } = {}) {
     if (finishing) return finishing;
     finishing = (async () => {
       clearTimeout(drainTimer);
       timers.forEach((t) => clearTimeout(t));
-      const receiving = rx?.stop({ depart });
+      opening.abort();
+      const receiving = (rx ?? await opened?.catch(() => null))?.stop({ depart });
       for (const b of batch.splice(0)) b.reject(new Error("not delivered"));
       await receiving;
       lock.release();
@@ -20521,23 +20545,43 @@ async function runWait({
   const onSignal = () => yieldNow({ depart: hostGone() });
   const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
   for (const sig of signals) process.on(sig, onSignal);
-  rx = await openReceiver({
-    cfg,
-    transport,
-    sid,
-    st,
-    agent,
-    hostPid,
-    env,
-    onMessage,
-    onHostGone: () => yieldNow({ depart: true })
-  });
   const poll = setInterval(() => {
     if (!lock.mine() || watcherPid(sid, env)) yieldNow();
     else lock.touch();
   }, opt.lockPollMs);
   poll.unref?.();
   timers.push(setTimeout(() => yieldNow(), Math.min(Math.max(1, maxWaitMs), MAX_WAIT_MS)));
+  const slowTransport = slowOpenMs ? {
+    ...transport,
+    presence: {
+      ...transport.presence,
+      announce: async (...args) => {
+        await new Promise((r) => setTimeout(r, slowOpenMs));
+        return transport.presence.announce(...args);
+      }
+    }
+  } : transport;
+  opened = openReceiver({
+    cfg,
+    transport: slowTransport,
+    sid,
+    st,
+    agent,
+    hostPid,
+    env,
+    signal: opening.signal,
+    onMessage,
+    onHostGone: () => yieldNow({ depart: true })
+  });
+  try {
+    rx = await opened;
+  } catch (e) {
+    clearInterval(poll);
+    for (const sig of signals) process.off(sig, onSignal);
+    timers.forEach((t) => clearTimeout(t));
+    lock.release();
+    throw e;
+  }
   const result = await done;
   clearInterval(poll);
   for (const sig of signals) process.off(sig, onSignal);

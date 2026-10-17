@@ -12,6 +12,15 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-17
+
+### Fixed
+- `mbox wait` now notices a newer waiter or a starting `mbox watch` from the moment it takes its
+  lock, also while it is still opening its receiver (the cursor lookup and presence announcement),
+  and then leaves without ever subscribing. Before, a slow broker or machine could keep that
+  waiter running past the watcher's 10 s patience, so both could receive for the session. Closes
+  the flaky `wait` test of issue #12.
+
 ## [0.5.3] - 2026-10-17
 
 ### Added
