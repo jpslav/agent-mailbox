@@ -40,7 +40,10 @@ describe('hook session-start', () => {
     assert.match(ctx, / show <id>`/);
     assert.match(ctx, /mbox guide` for details/);
     assert.doesNotMatch(ctx, /Monitor|monitor/);
-    assert.ok(ctx.length < 1500, `context should stay short (${ctx.length})`);
+    // The launcher path appears several times and depends on where the repo is checked out (a CI
+    // workspace path is much longer than a home directory), so measure the text without it.
+    const fixed = ctx.split(LAUNCHER).join('mbox').length;
+    assert.ok(fixed < 1500, `context should stay short (${fixed} chars, launcher path excluded)`);
     assert.ok(!fs.existsSync(path.join(env.AGENT_MAILBOX_STATE_DIR, 'registrations', 'hooksess-1234.json')));
   });
 

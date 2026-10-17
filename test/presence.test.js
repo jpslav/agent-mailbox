@@ -1,5 +1,6 @@
 // Presence lives in a KV bucket whose entries expire (bucket TTL). This suite provisions the
-// bucket with a 2 s TTL so expiry can be observed.
+// bucket with a 4 s TTL so expiry can be observed (long enough that 500 ms heartbeats keep entries
+// alive even when the machine stalls for a second or two).
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { Broker, Watcher, findServer, makeEnv, mbox, projectDir, sessionAddr, sleep } from './helpers.js';
@@ -11,7 +12,7 @@ describe('presence', { skip: SERVER.skip }, () => {
   let aliceEnv;
   let bobEnv;
   before(async () => {
-    b = new Broker(SERVER, { presenceTtl: '2s' });
+    b = new Broker(SERVER, { presenceTtl: '4s' });
     await b.init(['alice', 'bob']);
     aliceEnv = makeEnv(b, 'alice');
     bobEnv = makeEnv(b, 'bob');
@@ -28,7 +29,7 @@ describe('presence', { skip: SERVER.skip }, () => {
     const d2 = projectDir('peer-two');
     const a1 = sessionAddr(bobEnv, 'peersess-1', d1);
     const a2 = sessionAddr(bobEnv, 'peersess-2', d2);
-    const env = { ...bobEnv, AGENT_MAILBOX_HEARTBEAT_MS: '500' }; // keeps the entries fresh despite the 2 s TTL
+    const env = { ...bobEnv, AGENT_MAILBOX_HEARTBEAT_MS: '500' }; // keeps the entries fresh despite the 4 s TTL
     const w1 = new Watcher(env, { cwd: d1, session: 'peersess-1' });
     const w2 = new Watcher(env, { cwd: d2, session: 'peersess-2' });
     try {
@@ -41,7 +42,7 @@ describe('presence', { skip: SERVER.skip }, () => {
       assert.notEqual(amb.code, 0);
       assert.match(amb.stderr, /ambiguous/);
       assert.ok(amb.stderr.includes(a1) && amb.stderr.includes(a2), amb.stderr);
-      await sleep(3000); // longer than the TTL: heartbeats keep both alive
+      await sleep(5000); // longer than the TTL: heartbeats keep both alive
       assert.ok(peers().includes(a1));
       await w2.stop(); // SIGTERM -> depart
       const after = peers();
@@ -61,7 +62,7 @@ describe('presence', { skip: SERVER.skip }, () => {
     w.proc.kill('SIGKILL'); // no depart
     await w.exited;
     let gone = false;
-    for (let i = 0; i < 40 && !gone; i++) {
+    for (const t0 = Date.now(); Date.now() - t0 < 30000 && !gone; ) {
       await sleep(250);
       gone = !peers().includes(addr);
     }

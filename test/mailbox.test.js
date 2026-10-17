@@ -280,6 +280,10 @@ describe('mailbox end-to-end', { skip: SERVER.skip }, () => {
     assert.equal(r.code, 0, r.stderr);
     await w.waitFor(/\[mailbox\] end /, 20000);
     assert.equal(w.messages()[0].body, body);
+    // `mbox show` into a pipe: the whole 500 KB must be written before the process exits.
+    const shown = mbox(['show', w.messages()[0].id], { env: { ...bobEnv, AGENT_MAILBOX_SESSION: 'bigsess' }, cwd: dir });
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.ok(shown.stdout.includes(`${body}\n[mailbox] end ${w.messages()[0].id}\n`), `show printed ${shown.stdout.length} chars`);
 
     const huge = mbox(['send', addr, '-'], { env: { ...aliceEnv, AGENT_MAILBOX_SESSION: 'alicesess-7' }, cwd: dir, input: 'z'.repeat(1100000) });
     assert.notEqual(huge.code, 0);

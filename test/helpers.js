@@ -8,6 +8,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { jetstreamManager } from '@nats-io/jetstream';
 import { connect } from '@nats-io/transport-node';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -74,8 +75,8 @@ export class Broker {
   }
 
   /** Run server/mbox-admin.sh against this server. */
-  admin(args, { check = true } = {}) {
-    const r = spawnSync('/bin/sh', [ADMIN, ...args], { encoding: 'utf8', env: this.adminEnv() });
+  admin(args, { check = true, env = {} } = {}) {
+    const r = spawnSync('/bin/sh', [ADMIN, ...args], { encoding: 'utf8', env: { ...this.adminEnv(), ...env } });
     if (check && r.status !== 0) throw new Error(`mbox-admin.sh ${args.join(' ')} failed (${r.status}): ${r.stderr || r.stdout}`);
     return { code: r.status, out: r.stdout + r.stderr };
   }
@@ -98,7 +99,11 @@ export class Broker {
     fs.writeFileSync(this.configFile, conf);
     this.admin(['init']); // server not running yet: writes users.conf + admin creds
     await this.start();
-    this.admin(['init']); // now creates MBX_ALL and the presence bucket
+    // Now creates MBX_ALL and the presence bucket. Without the reload `init` would otherwise do
+    // (nothing changed since the server started): a stream created while the server is still applying
+    // a reload can be lost when the reload finishes, which happens on a busy machine (nats-server
+    // 2.15). Pointing the pid file nowhere makes the script skip the reload.
+    this.admin(['init'], { env: { MBOX_PID_FILE: path.join(this.dir, 'no-such.pid') } });
     for (const u of users) this.addUser(u);
   }
 
@@ -118,7 +123,13 @@ export class Broker {
     for (let i = 0; i < 150; i++) {
       try {
         const nc = await connect({ servers: this.url, ...creds, reconnect: false, timeout: 500 });
-        await nc.close();
+        try {
+          // Accepting connections is not enough: JetStream (recovering its streams after a restart,
+          // slowly on a busy machine) must answer API requests before the suite may start.
+          await (await jetstreamManager(nc, { checkAPI: false, timeout: 2000 })).getAccountInfo();
+        } finally {
+          await nc.close();
+        }
         return;
       } catch {
         /* not up yet */
@@ -190,6 +201,10 @@ export class Watcher {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.exited = new Promise((r) => this.proc.once('exit', (code, signal) => r(code ?? signal)));
+    // Decode as a stream: a multi-byte character can straddle two pipe chunks (the chunk size
+    // depends on the OS and its load), and `out += chunk` on raw Buffers would corrupt it.
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stderr.setEncoding('utf8');
     this.proc.stdout.on('data', (d) => (this.out += d));
     this.err = '';
     this.proc.stderr.on('data', (d) => (this.err += d));
@@ -250,6 +265,8 @@ export class Waiter {
     this.proc = spawn(process.execPath, [MBOX, 'wait', ...args], { env: e, cwd, stdio: [input !== undefined ? 'pipe' : stdin, 'pipe', 'pipe'] });
     if (input !== undefined) this.proc.stdin.end(input);
     this.exited = new Promise((r) => this.proc.once('exit', (code, signal) => r(code ?? signal)));
+    this.proc.stdout.setEncoding('utf8'); // see Watcher: chunk boundaries can split a character
+    this.proc.stderr.setEncoding('utf8');
     this.proc.stdout.on('data', (d) => (this.out += d));
     this.proc.stderr.on('data', (d) => (this.err += d));
   }
@@ -295,11 +312,12 @@ export async function waitForWaiter(env, session, pid, timeoutMs = 10000) {
  * line within firstLineMs is closed; on the client's end it ends its side. It records everything.
  */
 export class FakeInbox {
-  constructor(socketPath, { sessionId = null, token = null, firstLineMs = 30000 } = {}) {
+  constructor(socketPath, { sessionId = null, token = null, firstLineMs = 30000, closeDelayMs = 0 } = {}) {
     this.path = socketPath;
     this.sessionId = sessionId;
     this.token = token;
     this.firstLineMs = firstLineMs;
+    this.closeDelayMs = closeDelayMs; // how long to keep a connection open after reading it (a slow session)
     this.delivered = []; // {content, line, authed, authLine}
     this.dropped = []; // {reason, line}
     this.connections = 0;
@@ -345,7 +363,8 @@ export class FakeInbox {
       c.on('end', () => {
         if (buf.trim()) handle(buf);
         clearTimeout(deadline);
-        c.end();
+        if (this.closeDelayMs) setTimeout(() => c.end(), this.closeDelayMs).unref();
+        else c.end();
       });
       c.on('error', () => {});
     });

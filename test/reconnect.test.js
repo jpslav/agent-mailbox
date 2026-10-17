@@ -30,12 +30,12 @@ describe('server crash and restart', { skip: SERVER.skip }, () => {
       await w.waitFor(/\[mailbox\] connection lost; retrying\n/);
       await sleep(4500); // several failed retries: must stay silent
       await b.start();
-      await w.waitFor(/\[mailbox\] connection restored\n/, 20000);
+      await w.waitFor(/\[mailbox\] connection restored\n/, 60000); // server recovery time depends on the machine
 
       assert.equal(send(aliceEnv, 'alicesess-r', dir, addr, 'after').code, 0);
-      await w.waitFor(/after/);
+      await w.waitFor(/after/, 30000);
       w2 = new Watcher(bobEnv, { cwd: dir, session: 'awaysess' });
-      await w2.waitFor(/queued before the crash/);
+      await w2.waitFor(/queued before the crash/, 30000);
       await sleep(800);
       assert.equal(w.out.split('connection lost').length - 1, 1, w.out);
       assert.equal(w.out.split('connection restored').length - 1, 1, w.out);
