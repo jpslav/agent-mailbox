@@ -27,13 +27,17 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts"
   },
   "devDependencies": {
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/kv": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
-    "commander": "^12.1.0",
-    "esbuild": "^0.28.2"
+    "@types/node": "20.19.43",
+    "commander": "12.1.0",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
   }
 }

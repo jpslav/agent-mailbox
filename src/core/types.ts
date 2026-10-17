@@ -1,0 +1,276 @@
+// The shared contracts of the mailbox core: config, the envelope v1 wire format, deliveries and
+// parsed messages, session state, registrations, presence entries and the transport seam.
+//
+// Nothing here names a broker. The only module that does is src/core/transport/nats.ts (the
+// transport seam rule, enforced by test/transport.test.ts), and the wire formats are pinned
+// byte for byte by test/golden.test.ts.
+
+/** A process environment (what `process.env` is). */
+export type Env = Record<string, string | undefined>;
+
+// ---------------------------------------------------------------- config
+
+/** The client configuration after the file and the environment overrides are merged. */
+export interface Config {
+  servers: string[];
+  user: string;
+  password: string;
+  /** Largest envelope `mbox send` accepts, in bytes; null = only the server's limit applies. */
+  maxBytes: number | null;
+}
+
+// ---------------------------------------------------------------- wire formats
+
+/**
+ * Envelope v1, the JSON payload of every message. `id` is broker-independent: it is what `--re`
+ * references and what dedupes. The field names and their order are the wire format.
+ */
+export interface Envelope {
+  v: 1;
+  id: string;
+  /** The sender's session address (self-asserted; the verified part is the user). */
+  from: string;
+  /** The recipient address, or 'all' for a broadcast. */
+  to: string;
+  agent: string;
+  subject: string | null;
+  body: string;
+  inReplyTo: string | null;
+  /** ISO-8601 timestamp. */
+  sentAt: string;
+}
+
+/**
+ * The opaque position of a receiver in the transport. The core stores it and hands it back; only
+ * the transport knows its shape.
+ */
+export type Cursor = unknown;
+
+/**
+ * One message as the transport hands it over. `payload` is the text as published (usually an
+ * envelope, but anyone can publish anything); `sender` is the user the broker verified.
+ */
+export interface Delivery {
+  id: string;
+  /** Unix seconds. */
+  time: number;
+  /** 'all' or the recipient address. */
+  to: string;
+  sender: string | null;
+  payload: string;
+  cursor: Cursor;
+}
+
+/** A delivery normalised by `parseDelivery`: an envelope, or a raw message when it was not one. */
+export interface Message {
+  id: string;
+  time: number;
+  sender: string | null;
+  from: string;
+  to: string;
+  agent: string | null;
+  subject: string | null;
+  body: string;
+  inReplyTo: string | null;
+  sentAt: string | null;
+  /** True when the payload was not an envelope v1. */
+  raw: boolean;
+}
+
+// ---------------------------------------------------------------- session state
+
+/** `<state>/sessions/<sid>.json`: a session's identity. */
+export interface SessionState {
+  address: string;
+  aliases: string[];
+  cwd: string;
+  createdAt: string;
+}
+
+/** `<state>/sessions/<sid>.cursor.json`: where the session's receiver is, and what it has shown. */
+export interface CursorFile {
+  cursor: Cursor;
+  /** Recently shown message ids -> delivery time (a bounded ring, newest last). */
+  seen: Record<string, number>;
+}
+
+// ---------------------------------------------------------------- registrations
+
+/**
+ * Where an agent session can be reached for push delivery. `kind` names the protocol (an
+ * adapter's `delivery.kind`); the other fields belong to that adapter (Claude Code: `path`,
+ * `token`). It may hold a secret.
+ */
+export interface Endpoint {
+  kind: string;
+  [field: string]: unknown;
+}
+
+/** What a session-start hook registers. */
+export interface RegistrationInput {
+  sid: string;
+  address: string;
+  endpoint: Endpoint;
+  hostPid?: number | null;
+  cwd?: string | null;
+  agent: string;
+}
+
+/** `<state>/registrations/<sid>.json`: a session registered for push delivery (mode 0600). */
+export interface Registration {
+  sid: string;
+  address: string;
+  endpoint: Endpoint;
+  hostPid: number | null;
+  cwd: string | null;
+  agent: string;
+  /** ISO-8601; written by `register`. */
+  registeredAt?: string;
+}
+
+// ---------------------------------------------------------------- push delivery
+
+/** What the delivery daemon tells an adapter about the batch it is delivering. */
+export interface DeliveryMeta {
+  sid: string;
+  /** The session's address. */
+  address: string;
+  /** How many messages the text carries. */
+  count: number;
+  ids: string[];
+  /** The distinct `from` addresses of those messages. */
+  senders: string[];
+}
+
+/**
+ * An adapter's way of pushing mail into a running session (`mbox deliverd` uses it): the
+ * session-start hook saves `endpointFromHook` in the session's registration, the daemon calls
+ * `deliver` with it.
+ */
+export interface DeliveryCapability {
+  /** The endpoint kind this adapter delivers to. */
+  kind: string;
+  /** Environment variables that name one session; the shared daemon must not inherit them. */
+  sessionEnv: readonly string[];
+  /** The endpoint the hook can see (hook payload and environment), or null when there is none. */
+  endpointFromHook(input: unknown, env: Env): Endpoint | null;
+  /** Resolves once the agent has the text; throws if it could not be delivered. */
+  deliver(endpoint: Endpoint, text: string, meta: DeliveryMeta): Promise<void>;
+}
+
+// ---------------------------------------------------------------- presence
+
+/** What a session announces about itself. */
+export interface PresenceRecord {
+  address: string;
+  aliases: string[];
+  session: string;
+  agent: string;
+  user: string;
+  host: string | null;
+  cwd: string | null;
+  pid: number;
+}
+
+/** A live session as `presence.list()` reports it. */
+export interface PresenceEntry {
+  session: string;
+  address: string;
+  aliases: string[];
+  agent: string | null;
+  /** The server-verified writer of the entry. */
+  user: string;
+  host: string;
+  cwd: string | null;
+  /** As announced; not validated. */
+  pid: number | null;
+  /** When the entry was last refreshed (ms since the epoch). */
+  lastSeen: number;
+  live: true;
+}
+
+// ---------------------------------------------------------------- the transport seam
+
+/** What a handler for a delivery may return: `{ackAfter}` defers the acknowledgement. */
+export type DeliveryResult = void | undefined | { ackAfter: Promise<unknown> };
+
+export interface SubscribeOptions {
+  /** Names the durable position, so mail that arrives while nobody is listening is queued. */
+  session: string;
+  /** This session's addresses (and aliases), plus 'all' for broadcasts. */
+  addresses: string[];
+  /** Only used when the durable position has to be rebuilt. */
+  cursor?: Cursor;
+  signal?: AbortSignal;
+  /** Called each time the subscription is (re)established. */
+  onOpen?: () => void | Promise<void>;
+  /** Calls never overlap; resolving acknowledges (or `{ackAfter}` later). At-least-once. */
+  onMessage: (delivery: Delivery) => DeliveryResult | Promise<DeliveryResult>;
+  /** An unacknowledged delivery is offered again after this long (default 60 s). */
+  redeliverAfterMs?: number;
+  /** Safety-net poll for broadcasts (default 30 s). */
+  broadcastPollMs?: number;
+}
+
+export interface PollOptions {
+  lookbackMs: number;
+  /** At most this many per address (default 256; Infinity pages through everything). */
+  max?: number;
+}
+
+export interface PresenceOptions {
+  timeoutMs?: number;
+}
+
+/** The presence registry: who is online. Entries expire on their own when not refreshed. */
+export interface Presence {
+  /** "I'm online". The core sends one every ten minutes as a heartbeat. */
+  announce(rec: PresenceRecord, opts?: PresenceOptions): Promise<void>;
+  heartbeat(rec: PresenceRecord, opts?: PresenceOptions): Promise<void>;
+  /** "I'm gone". */
+  depart(rec: PresenceRecord, opts?: PresenceOptions): Promise<void>;
+  /** Change metadata (aliases) without asserting liveness. */
+  update(rec: PresenceRecord, opts?: PresenceOptions): Promise<void>;
+  /** Live entries whose user is the server-verified writer. */
+  list(): Promise<PresenceEntry[]>;
+}
+
+/** One line of `mbox doctor`. */
+export interface DiagnoseCheck {
+  ok: boolean;
+  name: string;
+  hint?: string;
+}
+
+/**
+ * The broker, as the core sees it. Addresses are `<user>.<host>.<label>` strings, plus the
+ * broadcast pseudo-address 'all'. The contract is written out in src/core/transport/nats.ts,
+ * the one implementation.
+ */
+export interface Transport {
+  /** Store `envelope` durably for one address or 'all'; a retry with the same id is deduped. */
+  publish(to: string, envelope: Envelope, opts?: { timeoutMs?: number }): Promise<{ id: string }>;
+  /** Deliver mail for the addresses plus broadcasts. Never resolves: it rejects when the connection ends, or with an AbortError when `signal` aborts. */
+  subscribe(opts: SubscribeOptions): Promise<never>;
+  /** Stored messages, oldest first, with no side effects. */
+  poll(addresses: string[], opts: PollOptions): Promise<Delivery[]>;
+  /** The "start from here" cursor for a brand-new session. */
+  now(): Promise<Cursor>;
+  presence: Presence;
+  limits: {
+    /** The longest label that still forms a routable address. */
+    maxLabelLen(user: string, host: string): number;
+  };
+  /** A human-readable message for any error thrown by the transport. */
+  explainError(err: unknown): string;
+  /** Connectivity / authentication / permission self-check for `mbox doctor`. */
+  diagnose(opts: { user: string; host: string }): Promise<DiagnoseCheck[]>;
+  /** Release connections; call before exiting. */
+  close(): Promise<void>;
+}
+
+/** Options of `createTransport`. */
+export interface TransportOptions {
+  /** A long-running process serving many sessions: every subscription shares one connection. */
+  multiplex?: boolean;
+}

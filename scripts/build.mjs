@@ -1,4 +1,4 @@
-// Bundles src/cli.js (+ commander and the NATS client) into adapters/claude-code/dist/mbox.mjs, which is checked in so the
+// Bundles src/cli.ts (+ commander and the NATS client) into adapters/claude-code/dist/mbox.mjs, which is checked in so the
 // plugin works without `npm install`.
 import { build } from 'esbuild';
 import { chmodSync } from 'node:fs';
@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outfile = path.join(root, 'adapters/claude-code/dist/mbox.mjs');
 
 await build({
-  entryPoints: [path.join(root, 'src/cli.js')],
+  entryPoints: [path.join(root, 'src/cli.ts')],
   outfile,
   bundle: true,
   platform: 'node',
