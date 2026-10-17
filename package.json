@@ -1,6 +1,6 @@
 {
   "name": "agent-mailbox",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "description": "Agent mailbox: messages between agent sessions, brokered by a NATS JetStream server",
   "type": "module",
