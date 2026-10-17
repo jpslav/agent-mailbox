@@ -136,6 +136,12 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   filtered to `mbx.U.H.L.*` for the address and each alias, explicit ack, `ack_wait` 60 s,
   `inactive_threshold` 30 days. Broadcasts are read with direct gets from the last seen sequence;
   a core subscription on `mbx.all.*` is only a wake-up.
+- Ending a subscription (a receiver stopping, or a delivery daemon handing over to a newer one)
+  stops the pull consumer first, waits for the deliveries already handed out to be acknowledged,
+  then naks everything else without delay, in stream-sequence order, and flushes, so the
+  session's next reader on the same durable consumer gets those messages first and in order. A
+  message the server sends in the instant the pull ends is seen by nobody and is redelivered
+  after `ack_wait`.
 - Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
   deleted when the session ends.
 

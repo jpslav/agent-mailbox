@@ -80,8 +80,22 @@ dependency bumps that change `dist/`, minor for features, major for breaking cha
 
    ```sh
    claude plugin list | grep -A2 'agent-mailbox@agent-mailbox'   # Version: must be X.Y.Z
-   pgrep -fl 'mbox.mjs deliverd'                                 # the running daemon's path shows its version
    ```
+
+   Then confirm the running delivery daemon was taken over. A running daemon keeps the version it
+   started with; the first session started after the update (restart Claude Code, or open a new
+   session) asks it to hand over to the new version. With `mbox` from the new copy:
+
+   ```sh
+   mbox --version                       # X.Y.Z
+   mbox deliverd --status               # "deliverd running (pid ..., version X.Y.Z)"
+   grep -E 'handover requested|taking over|started \(pid' "${XDG_STATE_HOME:-$HOME/.local/state}/agent-mailbox/deliverd.log" | tail -5
+   ```
+
+   The version on the `deliverd running` line must be X.Y.Z. If it is older and `--status` says
+   "the next session start hands delivery over to it", start a session and check again. If the
+   log shows `did not exit within 20 s; terminating it`, the old daemon did not hand over
+   gracefully: note it in the release and check the log around it for lost or repeated mail.
 
    If the plugin is not installed on this machine: `claude plugin marketplace add jpslav/agent-mailbox`
    then `claude plugin install agent-mailbox@agent-mailbox`. If the new version does not show,

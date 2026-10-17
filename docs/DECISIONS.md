@@ -124,3 +124,32 @@ context, decision, why.
 - **Why:** The compiler now checks the seam and the adapter contract, and untrusted data (hook
   payloads, files, presence entries) must be narrowed before use. Golden tests make a wire-format
   change a deliberate, reviewed act instead of a side effect.
+
+## A newer delivery daemon takes over from an older one
+
+- **Date:** 2026-10
+- **Context:** `mbox deliverd` is one long-lived daemon per user and machine. It outlives plugin
+  updates: after an auto-update, new sessions run the new hooks while the old daemon keeps
+  delivering with the old code, possibly forever if some session is always open. A machine ran a
+  daemon from before the 0.5.1 duplicate-delivery fix this way.
+- **Decision:** The bundle knows its version (`scripts/build.mjs` injects it from
+  `package.json`), and the daemon writes its version and bundle path into `deliverd.lock`. The
+  session-start hook compares versions as semantic versions (numerically; a lock without a
+  version, from before 0.5.3, counts as older than any): a newer hook asks the old daemon to hand
+  over (SIGTERM) and starts the new daemon detached, so the hook never waits; the same or an older
+  version does nothing (never a downgrade), whatever path it runs from. The new daemon waits for
+  the old one's lock and kills it (SIGKILL, logged) if it has not exited after 20 s; the old one
+  stops taking messages, finishes the delivery in flight and its acknowledgement, hands back
+  everything else unacknowledged, oldest first and without delay, releases the lock and exits.
+  A start claim (`deliverd.starting`) keeps sessions that start together from starting several
+  daemons, and the lock settles any race left.
+- **Why:** SIGTERM is the signal every earlier version already treats as a graceful stop, so the
+  rule takes over daemons that know nothing about it, including one whose bundle was deleted with
+  an old plugin cache. Durable positions are per session, not per daemon, so the new daemon's
+  receivers pick up exactly what the old one handed back, first; delivered ids are on disk before
+  they are acknowledged, so nothing is shown twice. The 20 s bound covers a delivery in flight (an
+  inbox post gives up after 10 s) plus its acknowledgement. Limits: a pre-0.5.3 daemon stops within
+  a few seconds whatever is in flight and hands mail back with a delay, so taking one over keeps
+  every message but may show one that was in flight that long a second time, or out of order. And a message
+  the server hands the old daemon in the instant it stops listening comes back only after the
+  60 s redelivery interval.
