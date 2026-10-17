@@ -1033,9 +1033,9 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
   });
 
   it('an abort while a subscription holds newer mail for owed messages ends it at once', async () => {
-    // Reader 1 takes x1 and never acknowledges it, and ends without handing it back (settleMs is
-    // short, the acknowledgement never comes): x1 is owed for the 30 s redelivery interval. Reader
-    // 2 holds x2 behind it until x1 is back, which would take 30 s or more; an abort ends that.
+    // Reader 1 takes hx1 and never acknowledges it, and ends without handing it back (settleMs is
+    // short, the acknowledgement never comes): hx1 is owed for the 30 s redelivery interval. Reader
+    // 2 holds hx2 behind it until hx1 is back, which would take 30 s or more; an abort ends that.
     const sid = 'd-hold-abort-1016';
     const address = 'bob.hold.abort';
     const cfg = { servers: [b.url], user: 'bob', password: b.password('bob') };
@@ -1061,8 +1061,8 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     });
     sub1.catch(() => {});
     await until(async () => (await ackPending(sid)) === 0, 'reader 1 subscribed');
-    await publish(address, ['x1']);
-    await until(() => took === 1, 'reader 1 took x1');
+    await publish(address, ['hx1']);
+    await until(() => took === 1, 'reader 1 took hx1');
     ac1.abort();
     await assert.rejects(sub1, { name: 'AbortError' });
 
@@ -1076,9 +1076,9 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       onMessage: (d) => void seen.push(d.id),
     });
     sub2.catch(() => {});
-    await publish(address, ['x2']);
-    await until(async () => (await heldCount(sid)) === 2, 'x1 owed, x2 sent to reader 2');
-    assert.deepEqual(seen, [], 'x2 is held while x1 is owed');
+    await publish(address, ['hx2']);
+    await until(async () => (await heldCount(sid)) === 2, 'hx1 owed, hx2 sent to reader 2');
+    assert.deepEqual(seen, [], 'hx2 is held while hx1 is owed');
     ac2.abort();
     const ended = await Promise.race([
       sub2.then(
@@ -1087,7 +1087,7 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       ),
       sleep(15000).then(() => 'still holding'),
     ]);
-    assert.equal(ended, 'AbortError', 'the abort ends the hold long before x1 is back');
+    assert.equal(ended, 'AbortError', 'the abort ends the hold long before hx1 is back');
     assert.deepEqual(seen, []);
   });
 
