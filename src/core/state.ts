@@ -260,7 +260,7 @@ function removeAbandoned(file: string, ino: number): void {
  * LOCK_FRESH_MS, or it counts as abandoned.
  */
 export function acquireFileLock(file: string, info: Record<string, unknown> = {}): LockResult {
-  const content = { pid: process.pid, startedAt: Date.now(), ...info };
+  const content = { ...info, pid: process.pid, startedAt: Date.now() };
   for (let attempt = 0; attempt < 3; attempt++) {
     // Created complete or not at all: a reader must never see an empty lock and call it abandoned.
     if (createExclusive(file, content))

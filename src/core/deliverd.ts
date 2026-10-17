@@ -669,7 +669,10 @@ export async function runDeliverd({
 /** The version of a newer daemon that is about to take over from this one, else null. */
 function handoverTarget(version: string, env: Env): string | null {
   const next = startClaim(env);
-  return next && next.pid !== process.pid && compareVersions(next.version, version) > 0
+  return next &&
+    next.pid !== process.pid &&
+    pidAlive(next.pid) &&
+    compareVersions(next.version, version) > 0
     ? next.version
     : null;
 }

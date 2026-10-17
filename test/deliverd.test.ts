@@ -728,8 +728,11 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
   it('a newer session-start hook takes delivery over: the old daemon hands over and exits, the new one serves; mail before, during and after arrives exactly once and in order', async () => {
     const env = bobMachine();
     const sid = 'd-take-1001';
-    // A busy session: a delivery stays in flight for 8 s, so the handover finds one in flight.
-    const fake = await inbox(sid, { closeDelayMs: 8000 });
+    // A busy session: the first delivery stays in flight until the old daemon has begun to hand
+    // over (the inbox post itself gives up after 10 s).
+    const fake = await inbox(sid);
+    let release!: () => void;
+    fake.hold = new Promise<void>((r) => (release = r));
     const host = fakeHost();
     const { address } = sessionStart(as(env, OLD), sid, projectDir('take'), {
       socket: fake.path,
@@ -750,8 +753,10 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       hostPid: host.pid,
     });
     assert.ok(ms < 3000, `the hook took ${ms} ms: it must not wait for the handover`);
-    fake.closeDelayMs = 0; // later deliveries are quick
-    await publish(address, ['d1', 'd2']); // during the handover
+    await until(() => /stopping \(SIGTERM/.test(logOf(env)), 'the old daemon is handing over');
+    await publish(address, ['d1', 'd2']); // during the handover, while the old daemon still delivers
+    fake.hold = null; // later deliveries are quick
+    release();
     await until(() => !alive(oldPid), 'old daemon exited', 30000);
     await until(
       () => logLines(env, new RegExp(`started \\(pid \\d+, version ${re(NEW)}\\)`)).length === 1,

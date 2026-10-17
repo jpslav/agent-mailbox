@@ -18011,7 +18011,7 @@ function removeAbandoned(file, ino) {
   }
 }
 function acquireFileLock(file, info = {}) {
-  const content = { pid: process.pid, startedAt: Date.now(), ...info };
+  const content = { ...info, pid: process.pid, startedAt: Date.now() };
   for (let attempt = 0; attempt < 3; attempt++) {
     if (createExclusive(file, content))
       return {
@@ -19541,7 +19541,7 @@ async function runDeliverd({
 }
 function handoverTarget(version, env) {
   const next = startClaim(env);
-  return next && next.pid !== process.pid && compareVersions(next.version, version) > 0 ? next.version : null;
+  return next && next.pid !== process.pid && pidAlive(next.pid) && compareVersions(next.version, version) > 0 ? next.version : null;
 }
 async function acquireDaemonLock({
   version,
@@ -20217,8 +20217,12 @@ function createTransport(cfg, { multiplex = false } = {}) {
           } catch {
           }
         }
-        if (handBack.length) await nc.flush().catch(() => {
-        });
+        if (handBack.length)
+          await Promise.race([
+            nc.flush().catch(() => {
+            }),
+            new Promise((r) => setTimeout(r, 5e3).unref?.())
+          ]);
       }
       if (mux)
         mux.subs.delete(fail2);
@@ -20459,8 +20463,9 @@ async function runWait({
     finishing = (async () => {
       clearTimeout(drainTimer);
       timers.forEach((t) => clearTimeout(t));
+      const receiving = rx?.stop({ depart });
       for (const b of batch.splice(0)) b.reject(new Error("not delivered"));
-      await rx?.stop({ depart });
+      await receiving;
       lock.release();
       doneResolve(result2);
     })();

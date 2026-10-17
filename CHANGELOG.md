@@ -24,8 +24,9 @@ treat them as approximate.
   it, each message once. A daemon that does not exit within 20 s is killed (logged). The same
   version from another install path, or an older version, leaves the running daemon alone, and
   sessions starting together start one daemon. Daemons from before 0.5.3 are taken over too
-  (they stop on SIGTERM); a delivery in flight for several seconds at that moment may be shown
-  twice.
+  (they stop on SIGTERM), but without the in-order handover: nothing is lost, yet a delivery in
+  flight for several seconds at that moment may be shown twice, and mail they held may arrive
+  late or out of order.
 - `mbox deliverd --status` shows the daemon's version and bundle path (and whether this `mbox` is
   newer); `mbox --version` prints the version.
 
@@ -38,7 +39,7 @@ treat them as approximate.
 
 ### Fixed
 - The daemon's lock file is created complete or not at all, and a stale lock is removed only if it
-  is still the stale one, so two daemons starting together can no longer both take the lock.
+  is still the stale one, so two daemons starting together are far less likely to both take it.
 
 ## [0.5.2] - 2026-10-17
 

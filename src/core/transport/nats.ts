@@ -772,7 +772,11 @@ export function createTransport(
             /* connection gone: redelivered after ack_wait */
           }
         }
-        if (handBack.length) await nc.flush().catch(() => {});
+        if (handBack.length)
+          await Promise.race([
+            nc.flush().catch(() => {}),
+            new Promise((r) => setTimeout(r, 5000).unref?.()),
+          ]);
       }
       if (mux)
         mux.subs.delete(fail); // shared connection: this subscription's pieces are ended

@@ -538,6 +538,8 @@ export class FakeInbox {
   readonly firstLineMs: number;
   /** How long to keep a connection open after reading it (a slow session); may be changed. */
   closeDelayMs: number;
+  /** While set, connections that have been read stay open until it resolves (a delivery held in flight). */
+  hold: Promise<void> | null = null;
   readonly delivered: InboxDelivery[] = [];
   readonly dropped: InboxDrop[] = [];
   connections = 0;
@@ -615,7 +617,8 @@ export class FakeInbox {
       c.on('end', () => {
         if (buf.trim()) handle(buf);
         if (deadline) clearTimeout(deadline);
-        if (this.closeDelayMs) setTimeout(() => c.end(), this.closeDelayMs).unref();
+        if (this.hold) void this.hold.then(() => c.end());
+        else if (this.closeDelayMs) setTimeout(() => c.end(), this.closeDelayMs).unref();
         else c.end();
       });
       c.on('error', () => {});

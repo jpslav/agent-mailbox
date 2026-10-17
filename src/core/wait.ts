@@ -114,8 +114,11 @@ export async function runWait({
     finishing = (async () => {
       clearTimeout(drainTimer);
       timers.forEach((t) => clearTimeout(t));
-      for (const b of batch.splice(0)) b.reject(new Error('not delivered')); // to the next waiter
-      await rx?.stop({ depart });
+      // Stop taking messages first (synchronous), then hand the batch back: in order, at once, to
+      // the next waiter.
+      const receiving = rx?.stop({ depart });
+      for (const b of batch.splice(0)) b.reject(new Error('not delivered'));
+      await receiving;
       lock.release();
       doneResolve(result);
     })();
