@@ -1,42 +1,14 @@
 // Claude Code's per-session inbox socket: how the delivery daemon (`mbox deliverd`) posts mail
-// into a session. Documented at https://code.claude.com/docs/en/cross-session-messaging
-// ("The session's inbox socket"), which this relies on:
-//   - its purpose includes the case "when you want a script or hook to post into a session";
-//   - "Claude Code exports it to hooks and Bash commands as the CLAUDE_CODE_MESSAGING_SOCKET
-//     environment variable", "before any hook runs, including SessionStart";
-//   - "A script posting to its own session's socket can send {"type":"auth","token":"<token>"} as
-//     the first line of its connection, where <token> is the value of CLAUDE_CODE_MESSAGING_TOKEN"
-//     ("macOS and Linux, including WSL 2: the line is optional");
-//   - "Claude Code closes a connection that hasn't sent a complete line within 30 seconds, so
-//     capture a slow command's output first and then open the connection to send it";
-//   - "When the receiving session is idle, Claude Code starts a new turn with the message";
-//   - "Claude receives the message with the sender's name and a reply address";
-//   - limits: "rate-limits repeated messages per sender, drops identical repeats arriving within a
-//     short window, and queues at most 50 accepted messages"; inbound controls
-//     (`crossSessionInbound`, permission-mode classes) can hold or refuse a message.
+// into a session. The documented parts, the reverse-engineered line format (with the source
+// excerpts it was read from), what Claude sees, and how to tell that a new Claude Code version
+// changed it are all in docs/PROTOCOL.md; keep this file, that document and `FakeInbox` in
+// test/helpers.js in step.
 //
-// The line format itself is NOT documented. It is taken from the Claude Code bundle (2.1.295,
-// 2.1.296 and 2.1.299 agree). Its debug log prints this example:
-//   { echo '{"type":"auth","token":"'"$CLAUDE_CODE_MESSAGING_TOKEN"'"}';
-//     echo '{"type":"user","message":{"role":"user","content":"hello"}}'; } | socat - UNIX-CONNECT:<path>
-// and its handler for a "user" line reads (minified):
-//   let s=e.message?.content;if(typeof s!=="string"||s.length===0){...Ignoring user message with
-//   missing or non-string content...}  if(!Ie(e))return;   // Ie: drops a line whose session_id
-//   is set and differs from the session's id
-//   ... origin {kind:"peer", from:e.from??"unknown", ...D$e(s)}   // D$e parses the content when it
-//   is exactly <cross-session-message from="..." from-name="...">\n<body>\n</cross-session-message>
-// Claude Code's own senders wrap a message that way; `from-name` is the sender name shown in the UI
-// and to the model, `from` the reply address for its SendMessage tool. Lines are newline-delimited
-// JSON, at most 1,048,576 characters per line. Nothing is written back on the connection.
-//
-// So each delivery is one connection: optional auth line, one "user" line, end. Mail is wrapped as
-// a cross-session message whose from-name is the sender's mailbox address, WITHOUT a `from`
-// attribute (SendMessage cannot reach a mailbox address; the text says to reply with `mbox send`).
-// No `from-mode` is asserted: a session that bypasses permission prompts holds the message for its
-// user's approval, exactly as for any sender that asserts nothing. If a future version stops
-// accepting this shape, the line is still read as plain text ("content" is the only required
-// field); if it rejects the line entirely, nothing reaches the session and the mail stays readable
-// with `mbox inbox` / `mbox show` (see README, Delivery).
+// In short: each delivery is one connection carrying an optional auth line (when the session has
+// a token) and one `{"type":"user","message":{"role":"user","content":...}}` line, newline
+// terminated, at most MAX_LINE_CHARS long. The content is the mail wrapped as a
+// <cross-session-message from-name="<sender>"> element WITHOUT a `from` attribute (SendMessage
+// cannot reach a mailbox address), and no permission mode, chain or hop is ever asserted.
 import net from 'node:net';
 
 export const ENDPOINT_KIND = 'claude-inbox-socket';

@@ -402,7 +402,7 @@ Agent mailbox delivery (the mbox CLI, not Claude Code's own cross-session messag
 `from-name` is the sender's address (`agent-mailbox` when one delivery holds several senders).
 There is no `from` reply address on purpose: Claude Code's `SendMessage` cannot reach mailbox
 addresses. Claude Code does not document this line format; it was read from the Claude Code bundle
-(`src/agents/claude-inbox.js` has the excerpt and the fields used). Claude Code's own inbound
+(`docs/PROTOCOL.md` has the excerpt and the fields used). Claude Code's own inbound
 controls apply: with `crossSessionInbound` set to `hold` or `refuse`, or in a session that bypasses
 permission prompts (which holds mail from senders that assert no permission mode, as the mailbox
 does not), mail is held for the user's approval or dropped. Claude Code also rate-limits each
@@ -509,13 +509,16 @@ Integration tests need `nats-server` (>= 2.11) and the `nats` CLI on `PATH` (or 
 `127.0.0.1` port, provisions it with `server/mbox-admin.sh` (users alice and bob), and runs the
 real CLI as child processes. `test/deliverd.test.js` drives the daemon against `FakeInbox`, a
 stand-in for Claude Code's inbox socket that follows the line protocol described in
-`src/agents/claude-inbox.js`. See `test/helpers.js`.
+`docs/PROTOCOL.md`. See `test/helpers.js`.
 Validate the plugin with `claude plugin validate ./adapters/claude-code --strict` and
 `claude plugin validate . --strict`.
 
 CI (`.github/workflows/ci.yml`) runs the tests on Ubuntu and macOS with Node 20 and 22, using pinned,
-checksum-verified nats-server and natscli release binaries, and fails if `npm run build` changes
-`adapters/claude-code/dist`. See CLAUDE.md for the rules for contributors (and agents).
+checksum-verified nats-server and natscli release binaries, fails if `npm run build` changes
+`adapters/claude-code/dist`, and checks that the three version fields agree and that a pull request
+changing `dist` also changes the version. See CLAUDE.md for the rules for contributors (and agents), CONTRIBUTING.md for the human-oriented
+version, SECURITY.md for reporting vulnerabilities, docs/DECISIONS.md for why the design is the way
+it is and CHANGELOG.md for what changed in each release.
 
 ## License
 
