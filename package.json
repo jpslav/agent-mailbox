@@ -28,16 +28,20 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
+    "lint": "eslint ."
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/kv": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
     "@types/node": "20.19.43",
     "commander": "12.1.0",
     "esbuild": "0.28.2",
+    "eslint": "10.12.0",
     "tsx": "4.23.15",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
   }
 }
