@@ -1,4 +1,4 @@
-// `mbox wait` (the asyncRewake hook waiter) against a real nats-server.
+// `mbox wait` (the generic fallback receiver: a background task, or a hook) against a real nats-server.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { after, before, describe, it } from 'node:test';
@@ -255,13 +255,17 @@ describe('mbox wait', { skip: SERVER.skip }, () => {
     assert.ok(!peers().includes(addr), 'departed');
   });
 
-  it('does not wait in `claude -p` runs, where the hook would run in the foreground', async () => {
+  it('as a hook, does not wait where the host would block on it (`claude -p`, the desktop app); run directly, it always may', async () => {
     const dir = projectDir('headless');
     const addr = sessionAddr(bobEnv, 'w-p', dir);
     mail(addr, 'not now');
-    const w = waiter({ ...bobEnv, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }, 'w-p', dir);
-    assert.equal(await w.result(3000), 0);
-    assert.equal(w.err, '');
+    const hookInput = JSON.stringify({ session_id: 'w-p', cwd: dir, hook_event_name: 'Stop' });
+    for (const entry of ['sdk-cli', 'claude-desktop']) {
+      const w = track(new Waiter({ ...bobEnv, CLAUDE_CODE_ENTRYPOINT: entry }, { cwd: dir, args: ['--hook-stdin', '--max-wait', '30'], input: hookInput }));
+      assert.equal(await w.result(3000), 0, entry);
+      assert.equal(w.err, '', entry);
+    }
+    // A background task (no hook stdin) in the desktop app may wait: nothing is blocked on it.
     const later = waiter({ ...bobEnv, CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }, 'w-p', dir);
     assert.equal(await later.result(), 2, later.err);
     assert.deepEqual(bodies(later), ['not now']);

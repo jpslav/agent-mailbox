@@ -9,7 +9,13 @@ import claudeCode from './claude-code.js';
  *     sessionId(env) -> string|null,  this agent session's stable id
  *     hostPid(env) -> number|null,    the agent process, so `watch`/`wait` can exit when it dies
  *     hookInput(stdinJson) -> {sessionId, cwd}   (optional) what a hook payload says
- *     canWait(env) -> bool,           (optional) may `mbox wait` block here? (default true)
+ *     canWait(env) -> bool,           (optional) may `mbox wait --hook-stdin` block here? (default true)
+ *     delivery: {                     (optional) push mail into a running session (`mbox deliverd`)
+ *       kind,                           endpoint kind this adapter delivers to
+ *       sessionEnv: [name],             env variables naming one session (the daemon drops them)
+ *       endpointFromHook(stdinJson, env) -> endpoint|null    {kind, ...} saved in the registration
+ *       async deliver(endpoint, text, meta) },  resolves once the agent has the text; throws if not.
+ *                                       meta = {sid, address, count, ids, senders}
  *     hooks: { '<event>': async (stdinJson, ctx) -> stdout string },
  *     instructions(ctx) -> string }   text to inject into the agent's context
  */

@@ -286,3 +286,103 @@ export async function waitForWaiter(env, session, pid, timeoutMs = 10000) {
   }
   throw new Error(`waiter ${pid} never held the lock for ${session}`);
 }
+
+/**
+ * A stand-in for Claude Code's per-session inbox socket, mimicking what the Claude Code bundle does
+ * (see src/agents/claude-inbox.js): newline-delimited JSON; an optional first {"type":"auth"} line;
+ * a {"type":"user"} line needs a non-empty string message.content and is dropped when its
+ * session_id names another session; other lines are ignored; a connection that sends no complete
+ * line within firstLineMs is closed; on the client's end it ends its side. It records everything.
+ */
+export class FakeInbox {
+  constructor(socketPath, { sessionId = null, token = null, firstLineMs = 30000 } = {}) {
+    this.path = socketPath;
+    this.sessionId = sessionId;
+    this.token = token;
+    this.firstLineMs = firstLineMs;
+    this.delivered = []; // {content, line, authed, authLine}
+    this.dropped = []; // {reason, line}
+    this.connections = 0;
+    this.server = null;
+  }
+
+  start() {
+    this.server = net.createServer({ allowHalfOpen: true }, (c) => {
+      this.connections++;
+      c.setEncoding('utf8');
+      let buf = '';
+      let first = true;
+      let authed = false;
+      let authLine = null;
+      let deadline = setTimeout(() => c.destroy(), this.firstLineMs);
+      const handle = (raw) => {
+        let j;
+        try { j = JSON.parse(raw); } catch { this.dropped.push({ reason: 'unparseable', line: raw }); return; }
+        if (first && j?.type === 'auth') {
+          authLine = raw;
+          authed = this.token !== null && j.token === this.token;
+          first = false;
+          return;
+        }
+        first = false;
+        if (j?.type !== 'user') { this.dropped.push({ reason: 'type', line: raw }); return; }
+        const content = j.message?.content;
+        if (typeof content !== 'string' || !content) { this.dropped.push({ reason: 'content', line: raw }); return; }
+        if (j.session_id !== undefined && this.sessionId && j.session_id !== this.sessionId) { this.dropped.push({ reason: 'session_id', line: raw }); return; }
+        this.delivered.push({ content, msg: j, line: raw, authed, authLine });
+      };
+      c.on('data', (d) => {
+        buf += d;
+        let i;
+        while ((i = buf.indexOf('\n')) !== -1) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 1);
+          clearTimeout(deadline);
+          deadline = null;
+          if (line.trim()) handle(line);
+        }
+      });
+      c.on('end', () => {
+        if (buf.trim()) handle(buf);
+        clearTimeout(deadline);
+        c.end();
+      });
+      c.on('error', () => {});
+    });
+    return new Promise((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(this.path, () => resolve(this));
+    });
+  }
+
+  async stop() {
+    if (!this.server) return;
+    await new Promise((r) => this.server.close(() => r()));
+    this.server = null;
+    fs.rmSync(this.path, { force: true });
+  }
+
+  contents() {
+    return this.delivered.map((d) => d.content);
+  }
+
+  /** "[mailbox] message" blocks across all deliveries. */
+  messages() {
+    return new Watcher.Parser(this.contents().join('\n')).messages();
+  }
+
+  async waitFor(pred, timeoutMs = 15000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (pred(this)) return;
+      await sleep(50);
+    }
+    throw new Error(`fake inbox: condition not met in ${timeoutMs} ms; delivered:\n${this.contents().join('\n---\n').slice(0, 4000)}\ndropped: ${JSON.stringify(this.dropped).slice(0, 1000)}`);
+  }
+}
+
+/** A short directory for Unix sockets (macOS caps socket paths at about 104 bytes). */
+export function socketDir() {
+  const base = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir();
+  return fs.mkdtempSync(path.join(base, 'mbx-'));
+}

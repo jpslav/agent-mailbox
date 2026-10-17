@@ -3,7 +3,7 @@
 //   <sid>.cursor.json  watcher-owned: {cursor (opaque, from the transport), seen (recently printed
 //                      message ids)}   (kept apart so `mbox name` and the watcher never clobber
 //                      each other's writes)
-//   <sid>.lock         single-watcher pidfile (`mbox watch`)
+//   <sid>.lock         single-receiver pidfile (`mbox watch`, or `mbox deliverd` serving the session)
 //   <sid>.wait.lock    current hook waiter (`mbox wait`); the newest claim wins
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,7 +52,7 @@ export function sessionIdForHostPid(pid, env = process.env) {
   }
 }
 
-function mkdirp(dir) {
+export function mkdirp(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
 
@@ -168,8 +168,15 @@ const LOCK_FRESH_MS = 60000;
 
 /** Returns {ok:true, release, touch} or {ok:false, pid}. */
 export function acquireLock(sid, env = process.env) {
-  const file = lockPath(sid, env);
   mkdirp(sessionsDir(env));
+  return acquireFileLock(lockPath(sid, env));
+}
+
+/**
+ * A pidfile lock at `file` (its directory must exist): {ok:true, release, touch} or {ok:false, pid}.
+ * The holder must touch() it at least every LOCK_FRESH_MS, or it counts as abandoned.
+ */
+export function acquireFileLock(file) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fd = fs.openSync(file, 'wx', 0o600);
@@ -226,6 +233,9 @@ function liveHolder(file) {
     return null;
   }
 }
+
+/** pid of the live holder of a pidfile lock (other than this process), else null. */
+export const lockHolder = (file) => liveHolder(file);
 
 /** pid of a live `watch` for the session (other than this process), else null. */
 export const watcherPid = (sid, env = process.env) => liveHolder(lockPath(sid, env));

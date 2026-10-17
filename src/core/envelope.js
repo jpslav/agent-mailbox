@@ -109,10 +109,11 @@ function cutBody(m, cap, sendCmd) {
  * `items` = [{message, fresh}] in delivery order; only fresh ones are shown. Long bodies are cut
  * with a pointer to `mbox show <id>`; if even that does not fit, a suffix of the items is left
  * out (`count` = how many leading items the text covers) and a trailer says more is coming.
+ * `note` follows the header line's address; `later` says when the left-out messages follow.
  */
-export function formatBatch(items, { address, maxChars = 8000, sendCmd = 'mbox', now = Date.now() } = {}) {
+export function formatBatch(items, { address, maxChars = 8000, sendCmd = 'mbox', now = Date.now(), note = '(mail delivery, not an error)', later = 'after this turn ends' } = {}) {
   const fresh = items.map((it, i) => ({ ...it, i })).filter((it) => it.fresh);
-  const head = (n) => `[mailbox] ${n} new message${n === 1 ? '' : 's'} for ${oneLine(address, 140)} (mail delivery, not an error):\n`;
+  const head = (n) => `[mailbox] ${n} new message${n === 1 ? '' : 's'} for ${oneLine(address, 140)}${note ? ` ${note}` : ''}:\n`;
   const blocks = (list, cap) => list.map((f) => formatBlock({ ...f.message, body: cutBody(f.message, cap, sendCmd) }, { sendCmd, now }));
   const sum = (a) => a.reduce((n, s) => n + s.length, 0);
   if (!fresh.length) return { text: '', count: items.length, shown: 0 };
@@ -135,7 +136,7 @@ export function formatBatch(items, { address, maxChars = 8000, sendCmd = 'mbox',
   const shown = fresh.slice(0, take);
   const rest = fresh.slice(take);
   const tail = rest.length
-    ? `[mailbox] ${rest.length} more message${rest.length === 1 ? '' : 's'} did not fit here; ${rest.length === 1 ? 'it arrives' : 'they arrive'} after this turn ends (or read now: ${sendCmd} inbox --since ${sinceArg(now - Math.min(...rest.map((f) => (f.message.time || 0) * 1000)))}).\n`
+    ? `[mailbox] ${rest.length} more message${rest.length === 1 ? '' : 's'} did not fit here; ${rest.length === 1 ? 'it arrives' : 'they arrive'} ${later} (or read now: ${sendCmd} inbox --since ${sinceArg(now - Math.min(...rest.map((f) => (f.message.time || 0) * 1000)))}).\n`
     : '';
 
   // Water-fill the body budget: short bodies stay whole, long ones share what is left.

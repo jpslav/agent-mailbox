@@ -7,10 +7,12 @@ behavior.
 
 ## Layout
 
-- `src/core/`: agent- and broker-neutral logic (addr, config, state, envelope, registry, and the
-  receiving side: receiver, used by watch and wait).
+- `src/core/`: agent- and broker-neutral logic (addr, config, state, envelope, registry, guide,
+  and the receiving side: receiver, used by deliverd, watch and wait; registrations and pause
+  for the push daemon `deliverd`).
 - `src/core/transport/nats.js`: the transport seam, the only file that knows the broker.
-- `src/agents/`: one plain object per agent (`claude-code.js`), registered in `agents/index.js`.
+- `src/agents/`: one plain object per agent (`claude-code.js`), registered in `agents/index.js`;
+  `claude-inbox.js` is Claude Code's inbox-socket protocol (the `delivery` capability).
 - `src/cli.js`: the `mbox` command. `scripts/build.mjs` bundles it with esbuild.
 - `adapters/<agent>/`: that agent's integration files (`claude-code/`: plugin manifest, hooks,
   skill, `bin/mbox` POSIX-sh launcher, committed `dist/mbox.mjs`).
@@ -63,13 +65,17 @@ them they are skipped, so make sure they ran. Each suite starts its own server o
 
 ## Agent adapters
 
-An adapter is `{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput?, canWait?, hooks, instructions(ctx)}`
+An adapter is `{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput?, canWait?, delivery?, hooks, instructions(ctx)}`
 in `src/agents/`, plus files in `adapters/<agent>/`. It needs a stable session id, a way to get
-mail to the model (Claude Code: an asyncRewake hook running `mbox wait` on SessionStart and Stop,
-which exits 2 with the mail on stderr; agents that stream a process's stdout can run `mbox watch`
-instead) and a session-start hook that tells the agent its address (`hooks['session-start']`,
-dispatched by `mbox hook <agent> <event>`). Claude Code has no plugin monitor any more: the desktop
-app never starts monitors, so hooks are the one delivery mechanism.
+mail to the model and a session-start hook that tells the agent its address (`hooks['session-start']`,
+dispatched by `mbox hook <agent> <event>`). Getting mail in: preferably a `delivery` capability
+(`{kind, sessionEnv, endpointFromHook, deliver}`) used by the push daemon `mbox deliverd`
+(Claude Code: the session-start hook registers the session's inbox socket and starts the daemon,
+the session-end hook deregisters; `deliver` posts one JSON line to the socket). Agents without a
+push channel use the generic fallbacks `mbox wait` (a background task) or `mbox watch`; keep both.
+The inbox socket's line format is undocumented (read from the Claude Code bundle): keep the excerpt
+in `claude-inbox.js` current and `FakeInbox` in `test/helpers.js` in step with it. Never assert a
+permission mode, a relay/hop chain or a reply address that the mailbox is not.
 To add Codex or another agent: add `src/agents/<agent>.js`, register it in `src/agents/index.js`,
 add `adapters/<agent>/`, add tests like `test/agents.test.js` and `test/hook.test.js`. Nothing in
 `src/core/` should change; if it must, the abstraction is wrong. README.md ("Adding an agent

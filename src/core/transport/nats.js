@@ -48,6 +48,10 @@
 //   diagnose({user, host}) -> [{ok, name, hint?}]       connectivity / auth / permission self-check
 //   close()                          release connections (call before exiting)
 //
+// createTransport(cfg, {multiplex}): with multiplex: true (a long-running process serving many
+// sessions), every subscribe() and every request-style call share ONE connection; ending a
+// subscription leaves it open, and close() releases it. Without it, each subscribe() has its own.
+//
 // delivery = {id, time(unix s), to ('all' | address), sender (server-verified user), payload
 //             (string as published), cursor}
 // -------------------------------------------------------------------------------------------------
@@ -161,7 +165,7 @@ export function validateServer(server) {
 const td = new TextDecoder();
 
 // ---------------------------------------------------------------- transport
-export function createTransport(cfg) {
+export function createTransport(cfg, { multiplex = false } = {}) {
   const servers = Array.isArray(cfg.servers) ? cfg.servers : [cfg.servers];
   if (!servers.length) throw new Error('no server configured');
   servers.forEach(validateServer);
@@ -181,21 +185,34 @@ export function createTransport(cfg) {
   // One lazily opened connection for request-style calls (publish, presence, poll, diagnose).
   let shared = null;
   async function conn({ timeoutMs } = {}) {
-    if (shared) {
-      const s = await shared.catch(() => null);
+    while (shared) {
+      const pending = shared;
+      const s = await pending.catch(() => null);
       if (s && !s.nc.isClosed()) return s;
-      shared = null;
+      if (shared === pending) shared = null; // else another caller already started a new one
     }
     shared = (async () => {
-      const nc = await connect(connOpts(timeoutMs ? { timeout: timeoutMs } : {}));
+      const nc = await connect(connOpts({ ...(timeoutMs ? { timeout: timeoutMs } : {}), ...(multiplex ? { pingInterval: 20000, maxPingOut: 2 } : {}) }));
       const js = jetstream(nc, { checkAPI: false, timeout: timeoutMs || 10000 });
       const jsm = await jetstreamManager(nc, { checkAPI: false, timeout: timeoutMs || 10000 });
-      return { nc, js, jsm, kv: null };
+      const s = { nc, js, jsm, kv: null, subs: new Set() };
+      if (multiplex) {
+        // One status watcher per shared connection: a permission error, or the connection ending,
+        // fails every subscription riding on it (each then reconnects on its own schedule).
+        nc.closed().then((err) => { for (const f of s.subs) f(tag(err || new Error('connection closed'))); });
+        (async () => {
+          for await (const st of nc.status()) {
+            if (st.type === 'error' && isPermission(st.error)) for (const f of s.subs) f(tag(st.error));
+          }
+        })().catch(() => {});
+      }
+      return s;
     })();
+    const mine = shared;
     try {
-      return await shared;
+      return await mine;
     } catch (e) {
-      shared = null;
+      if (shared === mine) shared = null;
       throw tag(e);
     }
   }
@@ -304,8 +321,14 @@ export function createTransport(cfg) {
     const cur = { u: cursor?.u ?? null, a: cursor?.a ?? null, t: cursor?.t ?? new Date().toISOString() };
 
     let nc;
+    let mux = null; // the shared connection's record, in multiplex mode
     try {
-      nc = await connect(connOpts({ pingInterval: 20000, maxPingOut: 2 }));
+      if (multiplex) {
+        mux = await conn();
+        nc = mux.nc;
+      } else {
+        nc = await connect(connOpts({ pingInterval: 20000, maxPingOut: 2 }));
+      }
     } catch (e) {
       throw tag(e);
     }
@@ -315,12 +338,19 @@ export function createTransport(cfg) {
     failed.catch(() => {});
     const onAbort = () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }));
     signal?.addEventListener('abort', onAbort, { once: true });
-    nc.closed().then((err) => fail(tag(err || new Error('connection closed'))));
-    (async () => {
-      for await (const st of nc.status()) {
-        if (st.type === 'error' && isPermission(st.error)) fail(tag(st.error));
-      }
-    })().catch(() => {});
+    if (mux) {
+      mux.subs.add(fail);
+      if (nc.isClosed()) fail(new Error('connection closed'));
+    } else {
+      nc.closed().then((err) => fail(tag(err || new Error('connection closed'))));
+      (async () => {
+        for await (const st of nc.status()) {
+          if (st.type === 'error' && isPermission(st.error)) fail(tag(st.error));
+        }
+      })().catch(() => {});
+    }
+    let messages = null;
+    let wakeSub = null;
 
     // Deferred acknowledgements still in flight (see the interface: {ackAfter}).
     const pendingAcks = new Set();
@@ -367,7 +397,7 @@ export function createTransport(cfg) {
         });
       }
       const consumer = await js.consumers.get(ownStream, name);
-      const messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
+      messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
 
       const directLoop = (async () => {
         for await (const m of messages) {
@@ -428,7 +458,7 @@ export function createTransport(cfg) {
             if (again && !stopped) { again = false; void catchUp(); }
           }
         };
-        nc.subscribe(`${PREFIX}.all.*`, { callback: () => void catchUp(3) });
+        wakeSub = nc.subscribe(`${PREFIX}.all.*`, { callback: () => void catchUp(3) });
         await nc.flush();
         await catchUp();
         const iv = setInterval(() => void catchUp(), broadcastPollMs);
@@ -448,7 +478,12 @@ export function createTransport(cfg) {
       if (pendingAcks.size && !nc.isClosed()) {
         await Promise.race([Promise.allSettled([...pendingAcks]), new Promise((r) => setTimeout(r, 3000).unref?.())]);
       }
-      if (!nc.isClosed()) await nc.close().catch(() => {});
+      if (mux) {
+        // Shared connection: end only this subscription's pieces.
+        mux.subs.delete(fail);
+        try { messages?.stop(); } catch { /* already ended */ }
+        try { wakeSub?.unsubscribe(); } catch { /* already ended */ }
+      } else if (!nc.isClosed()) await nc.close().catch(() => {});
     }
   }
 

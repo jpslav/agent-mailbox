@@ -2,7 +2,8 @@
 
 A mailbox for agent sessions. Sessions (yours, on other machines, or a coworker's) send each
 other short text messages; incoming mail shows up in the receiving session on its own, even when
-that session is idle (in the Claude Code terminal and in the Claude desktop app).
+that session is idle (in the Claude Code terminal and in the Claude desktop app): a small local
+delivery daemon posts it into the session's own inbox socket.
 Claude Code is the only supported agent today; the layout is built so others can follow.
 
 There is no custom server. The broker is a single open-source [NATS](https://nats.io) server with
@@ -26,12 +27,13 @@ transport interface. This repo adds the `mbox` CLI, a Claude Code plugin and ser
  ┌────────────────────┐        ┌──────────────────────────────┐         ┌─────────────────────────┐
  │ claude-code        │        │ addr      <user>.<host>.<label>│        │ nats.js (only file that │
  │  session id, host  │ ─────▶ │ config    servers/user/password│ ──────▶│ knows subjects, streams,│
- │  pid, hooks,       │        │ state     session identity,   │  the    │ consumers, KV, acks,    │
+ │  pid, hooks, push  │        │ state     session identity,   │  the    │ consumers, KV, acks,    │
  │  instructions      │        │           cursor, locks       │interface│ permission errors)      │
  │ (codex: future)    │        │ envelope  v1 JSON + format    │         └─────────────────────────┘
  └────────────────────┘        │ registry  presence, resolution│                     │
    src/agents/                 │ receiver  shared receive loop │                     │
-   adapters/<agent>/           │ watch     stream (stdout)     │                     ▼
+   adapters/<agent>/           │ deliverd  push daemon         │                     │
+                               │ watch     stream (stdout)     │                     ▼
                                │ wait      one batch, then exit│          nats-server + JetStream
                                └──────────────────────────────┘
                                  src/core/                                  (tailnet, file storage)
@@ -45,12 +47,16 @@ transport interface. This repo adds the `mbox` CLI, a Claude Code plugin and ser
   starts mentioning subjects, `$JS`, JetStream, consumers or NATS.
 - **Core** (`src/core/`): addresses, config, session state and cursors, the envelope, peer
   resolution, and the receiving side (`receiver.js`: reconnect/backoff, de-duplication, presence,
-  orphan guard), used by `watch` (a stream of blocks on stdout) and `wait` (block until mail, print
-  one batch, exit).
+  orphan guard), used by `deliverd` (the push daemon: one per user and machine, serving every
+  registered session, see Delivery), `watch` (a stream of blocks on stdout) and `wait` (block
+  until mail, print one batch, exit). `registrations.js` holds the sessions registered for push
+  delivery, `pause.js` the emergency stop, `guide.js` the text of `mbox guide`.
 - **Agent adapters** (`src/agents/`): a plain object per agent
-  `{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput(stdinJson)?, canWait(env)?, hooks:{event: async (stdinJson, ctx) -> stdout}, instructions(ctx)}`
+  `{id, displayName, detect(env), sessionId(env), hostPid(env), hookInput(stdinJson)?, canWait(env)?, delivery?, hooks:{event: async (stdinJson, ctx) -> stdout}, instructions(ctx)}`
   plus the agent's integration files under `adapters/<agent>/` (for Claude Code: the plugin
-  manifest, hook config, skill, launcher and the bundled CLI).
+  manifest, hook config, skill, launcher and the bundled CLI). `delivery` is
+  `{kind, sessionEnv, endpointFromHook(stdinJson, env), async deliver(endpoint, text, meta)}`: how
+  to push text into a running session (Claude Code: `src/agents/claude-inbox.js`).
   Resolution: session = `--session`, `AGENT_MAILBOX_SESSION`, then the first adapter whose
   `detect(env)` is true; agent = `--agent`, `AGENT_MAILBOX_AGENT`, the detected adapter, else
   `unknown`. Addresses never contain the agent; it travels in the message envelope and presence
@@ -65,14 +71,22 @@ A new agent needs three things:
    `--session`/`AGENT_MAILBOX_SESSION`. `hostPid(env)` (optional) lets `mbox watch` exit when the
    agent process dies.
 2. **A way to get mail into the agent**, one of:
-   - `mbox wait`, if the agent can run a command in the background and wake the model when it
-     exits (Claude Code: an `asyncRewake` hook, see Delivery). It blocks until mail arrives, writes
-     one batch to stderr and exits 2 (0 when it gives up or is replaced). Implement
-     `hookInput(stdinJson)` if the agent passes the session id to hooks on stdin, and
-     `canWait(env)` to turn it off where the agent would block on it.
-   - `mbox watch`, if the agent forwards a background process's stdout to the model as it
-     arrives (a monitor, a watch-command feature, an MCP/notification channel). It prints one
-     block per message.
+   - **Push** (preferred): the agent gives each session an endpoint that a local process can post
+     text into, and starts a turn with it when the session is idle (Claude Code: its per-session
+     inbox socket). Implement `delivery`: `endpointFromHook(stdinJson, env)` returns the endpoint
+     (`{kind, ...}`) or null, `deliver(endpoint, text, meta)` resolves once the agent has the text
+     and throws otherwise, `sessionEnv` names the env variables that identify one session. The
+     session-start hook registers the session (`ctx.register`) and starts the daemon
+     (`ctx.startDeliverd()`); the session-end hook calls `ctx.deregister`. `mbox deliverd` does the
+     rest: batching, retries, acknowledgement only after `deliver` succeeded, presence.
+   - **Generic fallbacks**, for agents without a push channel: `mbox wait`, if the agent can run a
+     command in the background and tell the model when it exits (a background task): it blocks
+     until mail arrives, writes one batch to stderr and exits 2 (0 when it gives up); start it
+     again after each batch. Implement `hookInput(stdinJson)` if the agent passes the session id
+     to hooks on stdin, and `canWait(env)` to stop `mbox wait --hook-stdin` where a hook that keeps
+     running would block the agent. Or `mbox watch`, if the agent forwards a background process's
+     stdout to the model as it arrives (a monitor, a watch-command feature, a notification
+     channel): it prints one block per message.
 3. **A session-start injection point**: where the agent can be told its address and how to use
    `mbox send` (Claude Code: a SessionStart hook returning `additionalContext`). Implement
    `hooks['session-start']` and `instructions(ctx)`; `mbox hook <agent> <event>` dispatches to it.
@@ -81,8 +95,9 @@ Worked hypothetical (**not implemented**, Codex's real mechanisms may differ): a
 would set `detect` on a Codex-provided env var, `sessionId` from its session variable, register
 `src/agents/codex.js` in `src/agents/index.js`, and ship `adapters/codex/` with whatever launcher
 and instructions file Codex loads (for instance an AGENTS.md snippet generated from
-`instructions(ctx)`), running `mbox watch` or `mbox wait` as its notification source. Nothing in
-`src/core/` changes.
+`instructions(ctx)`), with a `delivery` capability if Codex can take text into a running session,
+else running `mbox watch` or `mbox wait` as its notification source. Nothing in `src/core/`
+changes.
 
 ## Addresses and messages
 
@@ -295,13 +310,14 @@ mbox doctor
 only accepted on stdin and is never printed or logged. (`mbox` is on the Bash tool's `PATH` while
 the plugin is enabled; in a plain terminal use `adapters/claude-code/bin/mbox`, or symlink it.)
 Start a new Claude Code session (terminal or desktop app): the SessionStart hook tells Claude its
-address, and the plugin starts listening for its mail (see Delivery). `mbox peers` in another
-session lists it.
+address and registers the session with the delivery daemon, which it starts if needed (see
+Delivery). `mbox peers` in another session lists it.
 
 Environment overrides: `AGENT_MAILBOX_SERVERS` (comma-separated), `AGENT_MAILBOX_USER`,
 `AGENT_MAILBOX_PASSWORD`, `AGENT_MAILBOX_CONFIG` (config file path), `AGENT_MAILBOX_STATE_DIR`
 (default `${XDG_STATE_HOME:-~/.local/state}/agent-mailbox`), `AGENT_MAILBOX_MAX_BYTES`,
-`AGENT_MAILBOX_SESSION` and `AGENT_MAILBOX_AGENT` (see Architecture).
+`AGENT_MAILBOX_SESSION` and `AGENT_MAILBOX_AGENT` (see Architecture), `AGENT_MAILBOX_MAX_PER_MIN`
+(delivery rate limit per session, default 30).
 
 `mbox doctor` checks: connect and authenticate, JetStream account access, your stream, a test
 message to yourself read back, the broadcast stream, presence write/read, and that another user's
@@ -324,6 +340,10 @@ mbox send <to> "text"             <to> = full address | unique prefix/label of a
 mbox send <to> --subject S --re <id> "text"        echo long | mbox send <to> -
 mbox name reviewer                mbox inbox --since 2h        mbox doctor
 mbox show <id>                    the whole message (when a delivered one was cut short)
+mbox guide [section]              short help: overview, send, reply, peers, names, inbox,
+                                  security, fallback, troubleshooting
+mbox pause [--all|<address>]      emergency stop for push delivery on this machine; mbox resume
+mbox deliverd --status            is the delivery daemon running, which sessions it serves
 ```
 
 Each message reaches the session as one block:
@@ -339,50 +359,85 @@ Each message reaches the session as one block:
 `verified-user` is the sender user stamped by the server. If the envelope's `from` names a
 different user, the line says `verified-user: alice (MISMATCH: "from" claims user carol)`.
 
-**Delivery in Claude Code: a hook that waits.** The plugin runs
-`mbox wait --hook-stdin --max-wait 86340` as an
-[`asyncRewake`](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background) command hook on
-`SessionStart` and on `Stop` (the end of every turn). Claude Code runs such a hook in the
-background, and when it exits with code 2 it wakes Claude, even in an idle session, and shows the
-hook's stderr as a system reminder. `mbox wait` blocks until the session has mail, collects what
-arrives within about 300 ms, writes it to stderr in one go (a header line, then the blocks above,
-at most about 8,000 characters: longer bodies are cut with a pointer to `mbox show <id>`, and
-messages that do not fit at all come with the next wake-up) and exits 2. Claude reads it, its turn
-ends, the `Stop` hook starts the next waiter. This works the same in the terminal and in the
-desktop app.
+**Delivery in Claude Code: the session's inbox socket.** Claude Code gives every session with
+cross-session messaging an
+[inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)
+and exports its path to hooks as `CLAUDE_CODE_MESSAGING_SOCKET` (plus a per-session token,
+`CLAUDE_CODE_MESSAGING_TOKEN`). A line posted there reaches the model between tool calls, and an
+idle session starts a new turn with it, in the terminal and in the desktop app alike. Nothing runs
+per session: no waiter, no running hook, no background task, nothing for the model to re-arm.
 
-- One waiter per session: the newest one (each turn end starts one) replaces the previous one,
-  which exits 0 quietly. A running `mbox watch` for the same session takes precedence: `wait`
-  exits 0 when one is running, and a watch that starts makes the waiter step aside.
-- The waiter announces the session in presence and heartbeats like a watcher. It exits on its own
-  when the Claude Code process (`CLAUDE_PID`) is gone, and removes the presence entry then. The
-  `SessionEnd` hook (`mbox hook claude-code session-end`, also run by `/clear`) stops it and
-  removes the entry too.
-- **Timeout.** Claude Code enforces an asyncRewake hook's `timeout`, so the hook sets
-  `timeout: 86400` (24 hours) and `mbox wait` exits 0 on its own a minute earlier
-  (`--max-wait 86340`). The hooks reference documents no maximum; 24 hours is well inside what a
-  JavaScript timer can hold (about 24.8 days). **A session left idle for more than 24 hours without
-  mail stops listening until its next turn ends**: mail sent meanwhile is not lost (it waits on the
-  server), it just does not wake the session; it arrives as soon as you next use that session (the
-  next waiter delivers it at once).
-- Under `claude -p` (and the GitHub Action), Claude Code would run an asyncRewake hook in the
-  foreground and the run would wait for it, so `mbox wait` exits at once there (the adapter's
-  `canWait`, from `CLAUDE_CODE_ENTRYPOINT`); use `mbox inbox` in such runs.
-- Claude Code (2.1.x) introduces the stderr of an asyncRewake hook with
-  `Stop hook blocking error from command ...`, so the batch starts with
-  `[mailbox] N new messages for <addr> (mail delivery, not an error):`.
+- **SessionStart** (`mbox hook claude-code session-start`, synchronous, well under a second): tells
+  Claude its address, writes a registration `$AGENT_MAILBOX_STATE_DIR/registrations/<session>.json`
+  (mode 0600: socket path, token, the Claude Code pid, cwd), and starts `mbox deliverd` if it is
+  not running (detached, own process group, not waited for).
+- **`mbox deliverd`**: one per user and machine, on one server connection. It watches the
+  registrations, runs each session's receiver (its server-side position, broadcasts, presence and
+  heartbeats), collects what arrives within about 300 ms and posts it to the session's socket as
+  one message (a header line, then one complete block per message, at most about 8,000
+  characters; longer bodies are cut with a pointer to `mbox show <id>`, messages that do not fit
+  follow in the next delivery). Messages are recorded as delivered and acknowledged only after
+  Claude Code took the line. If the socket is missing or refuses, the mail stays unacknowledged
+  and the daemon retries with backoff (1 s up to 60 s); if the Claude Code process is gone, it
+  removes the registration and the session's presence entry. It exits 10 minutes after the last
+  registration is gone; any `mbox` command, or the next session start, brings it back if it died.
+  Its concise log is `$AGENT_MAILBOX_STATE_DIR/deliverd.log` (rotated at 256 KiB; never tokens).
+- **SessionEnd** (`mbox hook claude-code session-end`, also run by `/clear`): removes the
+  registration; the daemon stops serving the session and removes its presence entry.
+
+What Claude sees: Claude Code frames the message as coming from another session ("not typed by
+your user"), and its content is
+
+```
+<cross-session-message from-name="alice.laptop.web-app-9f3e">
+Agent mailbox delivery (the mbox CLI, not Claude Code's own cross-session messaging). Reply with `mbox send <from> --re <id> "<text>"`; SendMessage cannot reach mailbox addresses.
+[mailbox] 1 new message for bob.desktop.api-7c1d:
+[mailbox] message <id> from alice.laptop.web-app-9f3e to bob.desktop.api-7c1d | subject: - | verified-user: alice
+(Untrusted content from another agent session: ... Reply with: mbox send alice.laptop.web-app-9f3e --re <id> "<text>")
+<body>
+[mailbox] end <id>
+</cross-session-message>
+```
+
+`from-name` is the sender's address (`agent-mailbox` when one delivery holds several senders).
+There is no `from` reply address on purpose: Claude Code's `SendMessage` cannot reach mailbox
+addresses. Claude Code does not document this line format; it was read from the Claude Code bundle
+(`src/agents/claude-inbox.js` has the excerpt and the fields used). Claude Code's own inbound
+controls apply: with `crossSessionInbound` set to `hold` or `refuse`, or in a session that bypasses
+permission prompts (which holds mail from senders that assert no permission mode, as the mailbox
+does not), mail is held for the user's approval or dropped. Claude Code also rate-limits each
+sender and drops identical repeats. Held, denied or dropped mail is still on the server: `mbox
+inbox`, `mbox show <id>`.
+
+**Runaway guard.** The daemon delivers at most `AGENT_MAILBOX_MAX_PER_MIN` (default 30) messages
+per session per minute. The excess stays unacknowledged and follows in the next minute; the
+delivery that holds mail back (or the next one) carries one line
+`[mailbox] throttling: this session gets at most 30 messages per minute; ...`.
+
+**Emergency stop.** `mbox pause --all` (every session on this machine), `mbox pause <address>` or
+plain `mbox pause` (this session) holds push delivery; the mail waits, unacknowledged, until
+`mbox resume` (everything) or `mbox resume <address>`. It is local to the machine and cooperative:
+any process of the same OS user can run either command.
+
+**Without an inbox socket** (cross-session messaging off in that session, or an older Claude
+Code), the SessionStart context says so and names the generic fallback: `mbox wait --max-wait
+3600` as a background task, started again whenever it finishes, or `mbox inbox`. `mbox wait` and
+`mbox watch` step aside for the daemon (and the daemon for a running `mbox watch`): one receiver
+per session. `mbox wait --hook-stdin` (as a hook) exits at once where Claude Code would block on
+it (`claude -p`, the GitHub Action, the desktop app: the adapter's `canWait`); run directly, it
+always waits.
 
 **`mbox watch`** is the alternative for agents (or people) who can stream a process's stdout into
 a session: one block per message on stdout, one watcher per session (enforced by a pidfile lock; a
 duplicate prints `[mailbox] already being watched (pid N)` and exits 0).
 
-**Under the hood (both).** Each session has one durable pull consumer on its user's stream, named
+**Under the hood (all three).** Each session has one durable pull consumer on its user's stream, named
 after the session id, filtered to the session's addresses (`mbx.U.H.L.*` for the address and every
 alias), explicit ack, `ack_wait` 60 s, `inactive_threshold` 30 days. The receiver writes the text,
 waits until the pipe has taken it, saves its position, and only then acks: delivery is
 at-least-once. A message redelivered after a crash between writing and acking is suppressed by a
-small persisted ring of recently delivered envelope ids (within a watcher's lifetime; a waiter
-killed in that window means the next waiter delivers the message again). Broadcasts are read with
+small persisted ring of recently delivered envelope ids, kept across restarts (a receiver killed
+between handing the text over and recording it delivers the message again). Broadcasts are read with
 direct gets from the last broadcast sequence the session saw (a core subscription on `mbx.all.*` is
 only a wake-up), so nobody needs consumer rights on the shared stream; your own broadcasts are
 skipped.
@@ -394,19 +449,21 @@ skipped.
   sequence + 1.
 - **Offline mail** waits in the stream (180 days by default) until the session watches again.
 - `mbox name` changes the consumer's filter while the watcher runs.
-- Reconnects use exponential backoff (1 s to 60 s, jittered); a watcher prints at most one
-  `connection lost` and one `connection restored` line. Both exit on their own when the agent
-  process named by the adapter's `hostPid` (Claude Code: `CLAUDE_PID`) is gone, and remove the
-  presence entry then.
+- Reconnects use exponential backoff (1 s to 60 s, jittered); a watcher prints (and the daemon
+  logs) at most one `connection lost` and one `connection restored` line. All three stop serving a
+  session when the agent process named by the adapter's `hostPid` (Claude Code: `CLAUDE_PID`) is
+  gone, and remove the presence entry then.
 
-**Presence.** KV bucket `presence` (history 1, TTL 30 minutes). Each watcher or waiter puts its
-record under `<user>.<host>.<session hash>` on start and every 10 minutes; a watcher deletes it on
-exit, a waiter only when the session ends (see above). A peer is live while its key exists. `mbox peers` and recipient resolution in `mbox send` read the whole
+**Presence.** KV bucket `presence` (history 1, TTL 30 minutes). The daemon (for each session it
+serves), a watcher or a waiter puts the session's record under `<user>.<host>.<session hash>` on
+start and every 10 minutes, and deletes it when the session ends (a watcher also on exit). A peer is live while its key exists. `mbox peers` and recipient resolution in `mbox send` read the whole
 bucket, and ignore records whose address does not belong to the user that wrote them.
 
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/`: `<id>.json` (address, aliases, cwd),
-`<id>.cursor.json` (saved stream positions and recently delivered ids, written by the watcher or
-waiter only), `<id>.lock` (the watcher) and `<id>.wait.lock` (the current waiter).
+`<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
+only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
+(the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock`,
+`deliverd.log`, `deliverd.out` (crash traces) and `paused.json`.
 
 ## Security model and limits
 
@@ -424,14 +481,19 @@ waiter only), `<id>.lock` (the watcher) and `<id>.wait.lock` (the current waiter
   clients, and travel only inside the NATS connection (encrypted by the tailnet, not by NATS TLS).
   Revoke a user with `mbox-admin.sh remove-user`.
 - Hooks run outside the sandbox with your full user permissions; the plugin's hooks only execute
-  this repo's `mbox` (`hook` and `wait`). Mail wakes a session only where Claude Code runs
-  asyncRewake hooks in the background (interactive sessions, the desktop app, the Agent SDK), not
-  in `claude -p`.
-- If the server is unreachable, the waiter keeps retrying silently until it is replaced or times
-  out; mail queued meanwhile arrives once it reconnects.
+  this repo's `mbox` (`hook`), which starts `mbox deliverd` in the background. The daemon reads
+  only registrations in your own state directory and connects only to the sockets they name; the
+  per-session token in a registration is never logged or printed.
+- Mail posted to the inbox socket goes through Claude Code's inbound controls like any other
+  peer message: it cannot approve a permission prompt, and Claude Code tells the model it is not
+  from the user. The mailbox asserts no permission mode and no relay chain for it.
+- If the server is unreachable, the daemon keeps retrying; mail queued meanwhile arrives once it
+  reconnects.
 - Built-in alternative: recent Claude Code versions have their own cross-session messaging for
   your own sessions (`/list-agents`, `SendMessage`). The mailbox exists for what that cannot do:
-  messages between different people's sessions without going through Anthropic's servers.
+  messages between different people's sessions without going through Anthropic's servers. It
+  uses the same per-session inbox to deliver, but not Claude Code's relay chain, so the mailbox's
+  own rate limit and `mbox pause` are its runaway guards.
 
 ## Development
 
@@ -445,7 +507,9 @@ Integration tests need `nats-server` (>= 2.11) and the `nats` CLI on `PATH` (or 
 `NATS_BIN`) and are skipped, not failed, without them. Each suite starts a server from
 `server/nats-server.conf.example` with a temp config dir, temp store dir and a random
 `127.0.0.1` port, provisions it with `server/mbox-admin.sh` (users alice and bob), and runs the
-real CLI as child processes. See `test/helpers.js`.
+real CLI as child processes. `test/deliverd.test.js` drives the daemon against `FakeInbox`, a
+stand-in for Claude Code's inbox socket that follows the line protocol described in
+`src/agents/claude-inbox.js`. See `test/helpers.js`.
 Validate the plugin with `claude plugin validate ./adapters/claude-code --strict` and
 `claude plugin validate . --strict`.
 

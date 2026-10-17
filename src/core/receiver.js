@@ -1,5 +1,5 @@
-// The receiving side of a session, shared by `mbox watch` (a stream of blocks on stdout) and
-// `mbox wait` (one batch, then exit): the saved cursor and the ring of recently delivered ids,
+// The receiving side of a session, shared by `mbox watch` (a stream of blocks on stdout),
+// `mbox wait` (one batch, then exit) and `mbox deliverd` (one receiver per registered session): the saved cursor and the ring of recently delivered ids,
 // presence (announce, heartbeat, depart), alias changes, the orphan guard, and the connection loop
 // with reconnect/backoff. What happens to each message is up to the caller (onMessage).
 import fs from 'node:fs';
@@ -41,8 +41,9 @@ export function receiverOptions(env = process.env) {
  *
  * Returns {state(), commit(items), stop({depart})}. commit([{delivery, message}]) records them as
  * delivered (cursor + recently delivered ids) on disk; call it before acknowledging.
+ * keepTransport: stop() leaves the transport open (a process that serves several sessions on one).
  */
-export async function openReceiver({ cfg, transport, sid, st: initial, agent = 'unknown', hostPid = null, env = process.env, onMessage, onStatus = () => {}, onTick = () => {}, onHostGone = () => {} }) {
+export async function openReceiver({ cfg, transport, sid, st: initial, agent = 'unknown', hostPid = null, env = process.env, keepTransport = false, onMessage, onStatus = () => {}, onTick = () => {}, onHostGone = () => {} }) {
   const opt = receiverOptions(env);
   let st = initial;
   const stop = new AbortController();
@@ -167,7 +168,7 @@ export async function openReceiver({ cfg, transport, sid, st: initial, agent = '
       timers.forEach((t) => clearInterval(t));
       await Promise.race([loop, sleep(4000)]);
       if (depart) await post('depart', 2000);
-      await transport.close?.().catch(() => {});
+      if (!keepTransport) await transport.close?.().catch(() => {});
     })();
     return stopping;
   }
