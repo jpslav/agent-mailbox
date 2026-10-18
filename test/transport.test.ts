@@ -26,8 +26,22 @@ describe('subject mapping', () => {
     assert.equal(parseSubject('mbx.bob.h'), null);
     assert.equal(parseSubject('other.subject'), null);
   });
+  it("maps a service address <user>.<name> into its user's stream, with the sender last", () => {
+    assert.equal(subjectFor('bob.helpdesk', 'alice'), 'mbx.bob._svc.helpdesk.alice');
+    assert.deepEqual(parseSubject('mbx.bob._svc.helpdesk.alice'), {
+      to: 'bob.helpdesk',
+      sender: 'alice',
+    });
+    // `_svc` is no host ([a-z0-9-]+), so no session address maps there, and a malformed one is no mail
+    assert.equal(parseSubject('mbx.bob._svc.Help.alice'), null);
+    assert.equal(parseSubject('mbx.bob._svc.helpdesk'), null);
+    assert.throws(() => subjectFor('all.helpdesk', 'alice'));
+    assert.throws(() => subjectFor(`bob.${'x'.repeat(33)}`, 'alice'));
+    assert.throws(() => subjectFor('bob.help_desk', 'alice'));
+  });
   it('rejects bad addresses, the reserved user "all", and bad senders', () => {
-    assert.throws(() => subjectFor('a.b', 'alice'));
+    assert.throws(() => subjectFor('a', 'alice'));
+    assert.throws(() => subjectFor('a.b.c.d', 'alice'));
     assert.throws(() => subjectFor('all.h.l', 'alice'), /reserved/);
     assert.throws(() => subjectFor('bob.h.l', 'Alice'), /sender/);
     assert.throws(() => subjectFor('bob.h.*', 'alice'));

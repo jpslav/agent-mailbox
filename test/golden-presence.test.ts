@@ -1,4 +1,5 @@
-// Golden test: the exact bytes of a presence KV entry, read back from a real server. Split from
+// Golden test: the exact bytes of a presence KV entry, and of a service claim stored in the same
+// bucket, read back from a real server. Split from
 // test/golden.test.ts because it needs nats-server (skipped without it); the other golden tests
 // run in `npm run test:unit`. See that file for why these tests exist.
 import assert from 'node:assert/strict';
@@ -6,6 +7,7 @@ import { after, before } from 'node:test';
 import { Kvm } from '@nats-io/kv';
 import { jetstream } from '@nats-io/jetstream';
 import { presenceRecord } from '../src/core/registry.js';
+import { claimService } from '../src/core/services.js';
 import { createTransport, presenceKey } from '../src/core/transport/nats.js';
 import { Broker, findServer } from './helpers.js';
 import { describe, it } from './suite.js';
@@ -99,6 +101,58 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
           live: true,
         },
       );
+    } finally {
+      await t.close();
+      await nc.close();
+    }
+  });
+
+  // 0.7.0 (#19). No `address` field, so presence readers (this one and every earlier one) skip it.
+  it('a service claim is {service, holder, session, at} under key <user>._svc.<name>, and no peer', async () => {
+    const t = createTransport({ servers: [b.url], user: 'alice', password: b.password('alice') });
+    const nc = await b.conn('admin');
+    try {
+      const peersBefore = (await t.presence.list()).length;
+      const res = await claimService(
+        t.services,
+        { service: 'alice.helpdesk', holder: 'alice.laptop.web-1a2b', session: 'sess-1' },
+        { isLive: () => true },
+      );
+      assert.deepEqual(res, { status: 'claimed', replaced: null });
+      const kv = await new Kvm(jetstream(nc)).open('presence');
+      const raw = (await kv.get('alice._svc.helpdesk'))?.string();
+      assert.ok(raw);
+      const at = raw.match(/"at":"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)"\}$/);
+      assert.ok(at, raw);
+      assert.equal(
+        raw,
+        `{"service":"alice.helpdesk","holder":"alice.laptop.web-1a2b","session":"sess-1","at":"${at[1]}"}`,
+      );
+      // ...the claim as read back, and the listing: the claim, never a peer
+      const { claim, version } = await t.services.read('alice.helpdesk');
+      assert.ok(version > 0);
+      assert.deepEqual(Object.keys(claim ?? {}), [
+        'service',
+        'holder',
+        'session',
+        'at',
+        'lastSeen',
+      ]);
+      assert.deepEqual(
+        { ...claim, lastSeen: 0 },
+        {
+          service: 'alice.helpdesk',
+          holder: 'alice.laptop.web-1a2b',
+          session: 'sess-1',
+          at: at[1],
+          lastSeen: 0,
+        },
+      );
+      assert.deepEqual(
+        (await t.services.list()).map((c) => c.service),
+        ['alice.helpdesk'],
+      );
+      assert.equal((await t.presence.list()).length, peersBefore, 'the claim was listed as a peer');
     } finally {
       await t.close();
       await nc.close();

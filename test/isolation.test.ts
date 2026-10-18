@@ -33,6 +33,14 @@ const STREAMS = [
 ];
 /** The subject token of an area, as the client computes it. */
 const T = areaToken('repo:github.com/acme/web');
+/** bob's claim on his service address bob.helpdesk (a presence-bucket entry only bob may write). */
+const BOB_CLAIM_SUBJECT = '$KV.presence.bob._svc.helpdesk';
+const BOB_CLAIM = JSON.stringify({
+  service: 'bob.helpdesk',
+  holder: 'bob.build-box.web-1',
+  session: 'bobsess',
+  at: '2026-10-17T12:00:00.000Z',
+});
 
 /** Remove `user`'s permission block from the generated users.conf and reload (twice: a reload wires new imports only on the next one; here nothing is new, but it does no harm). */
 async function stripPermissions(b: Broker, user: string): Promise<void> {
@@ -133,13 +141,33 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       'mbx.bob.build-box.web-1.bob',
       'secret for bob',
     );
+    // bob's service address bob.helpdesk: a claim, mail queued for it and its consumer
+    await jetstream(bob, { checkAPI: false }).publish(BOB_CLAIM_SUBJECT, BOB_CLAIM);
+    await jetstream(bob, { checkAPI: false }).publish(
+      'mbx.bob._svc.helpdesk.bob',
+      'secret for bob.helpdesk',
+    );
     await bob.close();
     await jsm.consumers.add('MBX_BOB', {
       durable_name: 'bobsess',
       ack_policy: 'explicit',
       filter_subjects: ['mbx.bob.build-box.web-1.*'],
     });
+    await jsm.consumers.add('MBX_BOB', {
+      durable_name: 'svc=helpdesk',
+      ack_policy: 'explicit',
+      filter_subjects: ['mbx.bob._svc.helpdesk.*'],
+    });
   });
+
+  /** bob's claim and service consumer are as the fixtures left them. */
+  async function bobServiceIntact(): Promise<void> {
+    const claim = await jsm.streams.getMessage('KV_presence', { last_by_subj: BOB_CLAIM_SUBJECT });
+    assert.equal(claim?.string(), BOB_CLAIM, "bob's claim was changed");
+    const svc = await jsm.consumers.info('MBX_BOB', 'svc=helpdesk');
+    assert.equal(svc.ack_floor.stream_seq, 0, "bob's service consumer was acked by someone else");
+    assert.equal(svc.delivered.stream_seq, 0, "bob's service mail was pulled by someone else");
+  }
   after(async () => {
     await alice?.close();
     await mallory?.close();
@@ -274,6 +302,51 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         headers_only: true,
       });
     });
+    it("claim, release, take over or read bob's service address, or spoof mail into it", async () => {
+      const since = await positions(jsm);
+      const del = headers();
+      del.set('KV-Operation', 'DEL');
+      const cas = headers();
+      cas.set('Nats-Expected-Last-Subject-Sequence', '0');
+      for (const [subject, data, h] of [
+        [BOB_CLAIM_SUBJECT, enc({ ...JSON.parse(BOB_CLAIM), session: 'alice-1' }), undefined],
+        [BOB_CLAIM_SUBJECT, '', del],
+        [BOB_CLAIM_SUBJECT, '{}', cas],
+        ['$KV.presence.bob._svc.other', '{}', cas], // a new claim in bob's name
+        ['mbx.bob._svc.helpdesk.bob', 'spoof', undefined],
+        ['mbx.bob._svc.helpdesk.carol', 'spoof', undefined],
+        ['mbx.bob._svc.helpdesk', 'short', undefined],
+      ] as Array<[string, string, ReturnType<typeof headers> | undefined]>)
+        await assert.rejects(
+          ajs.publish(subject, data, h ? { headers: h } : {}),
+          /Permissions Violation/,
+          subject,
+        );
+      const svc = {
+        stream_name: 'MBX_BOB',
+        config: { durable_name: 'svc=helpdesk', ack_policy: 'explicit' },
+      };
+      for (const [subject, body] of [
+        ['$JS.API.CONSUMER.DURABLE.CREATE.MBX_BOB.svc=helpdesk', svc],
+        ['$JS.API.CONSUMER.CREATE.MBX_BOB.svc=helpdesk', svc],
+        ['$JS.API.CONSUMER.INFO.MBX_BOB.svc=helpdesk', ''],
+        ['$JS.API.CONSUMER.MSG.NEXT.MBX_BOB.svc=helpdesk', { batch: 1 }],
+        ['$JS.API.CONSUMER.DELETE.MBX_BOB.svc=helpdesk', ''],
+        ['$JS.ACK.MBX_BOB.svc=helpdesk.1.1.1.1.1', '+ACK'],
+        ['$JS.API.DIRECT.GET.MBX_BOB', { seq: 1, next_by_subj: 'mbx.bob._svc.helpdesk.*' }],
+        ['$JS.API.DIRECT.GET.MBX_BOB.mbx.bob._svc.helpdesk.bob', ''],
+        ['$JS.API.STREAM.MSG.GET.MBX_BOB', { last_by_subj: 'mbx.bob._svc.helpdesk.bob' }],
+        ['$JS.API.STREAM.PURGE.MBX_BOB', { filter: 'mbx.bob._svc.helpdesk.*' }],
+        ['$JS.API.STREAM.MSG.DELETE.MBX_BOB', { seq: 1 }],
+        ['$JS.API.STREAM.PURGE.KV_presence', { filter: BOB_CLAIM_SUBJECT }],
+      ] as Array<[string, unknown]>)
+        await denied(subject, body);
+      await subDenied('mbx.bob._svc.>');
+      await subDenied('mbx.*._svc.helpdesk.*');
+      await subDenied('$KV.presence.bob._svc.*');
+      assert.deepEqual((await foreignWrites(jsm, since, 'alice')).foreign, []);
+      await bobServiceIntact();
+    });
     it("write bob's presence entries", async () => {
       const h = headers();
       h.set('KV-Operation', 'DEL');
@@ -340,6 +413,9 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         '$JS.API.STREAM.DELETE.MBX_BOB',
         '$JS.API.STREAM.PURGE.MBX_ALL',
         '$JS.API.CONSUMER.DELETE.MBX_BOB.bobsess',
+        'mbx.bob._svc.helpdesk.carol',
+        BOB_CLAIM_SUBJECT,
+        '$JS.API.CONSUMER.DELETE.MBX_BOB.svc=helpdesk',
       ];
       const listening = targets
         .filter((t) => !t.startsWith('mbxwake.')) // see below: no interest from the admin there
@@ -409,6 +485,7 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       );
       assert.deepEqual(await streamNames(), namesBefore);
       assert.ok((await jsm.consumers.info('MBX_BOB', 'bobsess')).name === 'bobsess');
+      await bobServiceIntact();
       // Without interest in the stream account, a consumer aimed at a wake-up export delivers
       // nothing (an import's interest does not count). Were that to change, a user could send
       // everyone extra wake-ups under any name: clients ignore a wake-up's content and only poll.
@@ -459,6 +536,15 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         },
       });
       await nc.request(`$JS.API.CONSUMER.DURABLE.CREATE.${S}.inj`, consumer, { timeout: 15000 });
+      const svcConsumer = enc({
+        stream_name: S,
+        config: {
+          durable_name: 'svc=desk',
+          ack_policy: 'explicit',
+          filter_subjects: [`mbx.${user}._svc.desk.*`],
+        },
+      });
+      const claim = enc({ service: `${user}.desk`, holder: `${user}.h.x`, session: 's1', at: '' });
       const requests: Array<[string, string]> = [
         [`$JS.API.DIRECT.GET.${S}`, enc({ seq: pa.seq })],
         [`$JS.API.DIRECT.GET.${S}`, enc({ seq: 1, batch: 5 })],
@@ -483,6 +569,16 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         ['$JS.API.DIRECT.GET.ASKS', enc({ seq: pk.seq })],
         ['$JS.API.DIRECT.GET.ASKS', enc({ seq: 1, batch: 5, next_by_subj: `ask.${T}.*` })],
         [`ask.${T}.${user}`, forged],
+        // service addresses: mail to bob's and to the own one, the own claim, reading claims and
+        // the own service consumer
+        [`mbx.bob._svc.helpdesk.${user}`, forged],
+        [`mbx.${user}._svc.desk.${user}`, forged],
+        [`$KV.presence.${user}._svc.desk`, claim],
+        [`$JS.API.DIRECT.GET.KV_presence.${BOB_CLAIM_SUBJECT}`, ''],
+        ['$JS.API.DIRECT.GET.KV_presence', enc({ multi_last: ['$KV.presence.*._svc.*'] })],
+        [`$JS.API.CONSUMER.DURABLE.CREATE.${S}.svc=desk`, svcConsumer],
+        [`$JS.API.CONSUMER.INFO.${S}.svc=desk`, ''],
+        [`$JS.API.CONSUMER.MSG.NEXT.${S}.svc=desk`, enc({ batch: 5, no_wait: true })],
       ];
       const replies = [
         'mbx.bob.h.l.carol',
@@ -501,6 +597,12 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         `ask.${T}.bob`,
         `mbxwake.ask.${T}.carol`,
         '$JS.API.DIRECT.GET.ASKS',
+        'mbx.bob._svc.helpdesk.carol',
+        `mbx.${user}._svc.desk.carol`, // a forged sender to the attacker's own service
+        BOB_CLAIM_SUBJECT,
+        '$KV.presence.carol._svc.helpdesk',
+        '$JS.API.CONSUMER.DURABLE.CREATE.MBX_BOB.svc=helpdesk',
+        '$JS.ACK.MBX_BOB.svc=helpdesk.1.1.1.1.1',
       ];
       // a real delivery, acknowledged below with hostile replies (the ack's own response). Not
       // multiplexed: a pulled message keeps its own subject, which the shared inbox cannot route.
@@ -535,6 +637,7 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         }
         const bobsess = await jsm.consumers.info('MBX_BOB', 'bobsess');
         assert.equal(bobsess.ack_floor.stream_seq, 0, "bob's consumer was acked by someone else");
+        await bobServiceIntact();
       });
     }
 
@@ -589,6 +692,21 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         ['$JS.API.STREAM.UPDATE.ASKS', { name: 'ASKS', subjects: ['ask.>'] }],
         [`$JS.API.DIRECT.GET.ASKS.ask.${T}.bob`, ''],
         [`ask.${T}.bob`, '{}'],
+        ['$JS.API.DIRECT.GET.MBX_BOB.mbx.bob._svc.helpdesk.bob', ''],
+        ['$JS.API.CONSUMER.INFO.MBX_BOB.svc=helpdesk', ''],
+        ['$JS.API.CONSUMER.MSG.NEXT.MBX_BOB.svc=helpdesk', { batch: 5, no_wait: true }],
+        [
+          '$JS.API.CONSUMER.DURABLE.CREATE.MBX_BOB.svc=helpdesk',
+          {
+            stream_name: 'MBX_BOB',
+            config: { durable_name: 'svc=helpdesk', ack_policy: 'explicit' },
+          },
+        ],
+        ['$JS.API.CONSUMER.DELETE.MBX_BOB.svc=helpdesk', ''],
+        ['$JS.ACK.MBX_BOB.svc=helpdesk.1.1.1.1.1', '+ACK'],
+        ['$JS.API.STREAM.PURGE.MBX_BOB', { filter: 'mbx.bob._svc.helpdesk.*' }],
+        ['$JS.API.STREAM.PURGE.KV_presence', { filter: BOB_CLAIM_SUBJECT }],
+        [BOB_CLAIM_SUBJECT, '{}'],
       ];
       const answers = await Promise.all(
         probes.map(([subject, body]) =>
@@ -607,6 +725,7 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       assert.deepEqual(after.delivered, bobsess.delivered);
       assert.deepEqual(after.ack_floor, bobsess.ack_floor);
       assert.equal((await jsm.streams.info('MBX_BOB')).config.name, 'MBX_BOB');
+      await bobServiceIntact();
     });
 
     it('mallory cannot publish under another name through any import', async () => {
@@ -630,8 +749,15 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         `ask.${T}`,
         `ask.${T}.mallory.x`,
         `mbxwake.ask.${T}.bob`,
+        'mbx.bob._svc.helpdesk.carol',
+        'mbx.bob._svc.helpdesk.bob',
+        'mbx.bob._svc.helpdesk',
+        BOB_CLAIM_SUBJECT,
+        '$KV.presence.bob._svc.other',
+        '$KV.presence.carol._svc.helpdesk',
       ])
         await assert.rejects(mjs.publish(subject, 'spoof'), subject);
+      await bobServiceIntact();
       assert.deepEqual((await foreignWrites(jsm, since, 'mallory')).foreign, []);
     });
 
@@ -747,6 +873,42 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       for await (const m of it2) got.push(`${m.subject} ${m.string()}`);
       assert.ok(got.includes(`ask.${T}.alice how do I run the tests?`), got.join('\n'));
       await bob.close();
+    });
+    it("claim her own service address once (compare-and-set), read anyone's claims, and read its mail, stamped with the sender, through its own consumer", async () => {
+      const cas = headers();
+      cas.set('Nats-Expected-Last-Subject-Sequence', '0');
+      const claim = enc({
+        service: 'alice.ledger',
+        holder: 'alice.laptop.x',
+        session: 's',
+        at: '',
+      });
+      await ajs.publish('$KV.presence.alice._svc.ledger', claim, { headers: cas });
+      await assert.rejects(
+        ajs.publish('$KV.presence.alice._svc.ledger', claim, { headers: cas }),
+        /wrong last sequence/,
+      );
+      const ajsm = await jetstreamManager(alice, { checkAPI: false });
+      const bobs = await ajsm.direct.getMessage('KV_presence', { last_by_subj: BOB_CLAIM_SUBJECT });
+      assert.equal(bobs?.string(), BOB_CLAIM);
+      const bob = await b.conn('bob');
+      const pa = await jetstream(bob, { checkAPI: false }).publish(
+        'mbx.alice._svc.ledger.bob',
+        'a request for alice.ledger',
+      );
+      await bob.close();
+      assert.equal(pa.stream, 'MBX_ALICE');
+      await ajsm.consumers.add('MBX_ALICE', {
+        durable_name: 'svc=ledger',
+        ack_policy: 'explicit',
+        deliver_policy: 'all',
+        filter_subjects: ['mbx.alice._svc.ledger.*'],
+      });
+      const m = await (await ajs.consumers.get('MBX_ALICE', 'svc=ledger')).next({ expires: 3000 });
+      assert.ok(m);
+      assert.equal(m.subject, 'mbx.alice._svc.ledger.bob');
+      assert.equal(m.string(), 'a request for alice.ledger');
+      assert.equal(await m.ackAck(), true);
     });
     it('read broadcasts by direct get, write her own presence entry and read the whole bucket', async () => {
       const ajsm = await jetstreamManager(alice, { checkAPI: false });
