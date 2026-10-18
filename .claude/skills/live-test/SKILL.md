@@ -1,6 +1,6 @@
 ---
 name: live-test
-description: Run the live end-to-end test of agent-mailbox with two real Claude Code sessions counting 1 to 40 over a throwaway server. Use after any change to delivery, hooks, the inbox-socket code or the delivery daemon, and whenever a new Claude Code version might have changed the inbox-socket protocol (docs/PROTOCOL.md).
+description: Run the live end-to-end test of agent-mailbox with two real Claude Code sessions counting over a throwaway server (to 40 in full, to 6 in short). Use after any change to delivery, hooks, the inbox-socket code, the delivery daemon, presence or anything else real sessions must show, and whenever a new Claude Code version might have changed the inbox-socket protocol (docs/PROTOCOL.md).
 ---
 
 # Live test: two real sessions, a throwaway server
@@ -8,6 +8,17 @@ description: Run the live end-to-end test of agent-mailbox with two real Claude 
 Unit and integration tests use a fake inbox socket; only this test proves that real Claude Code
 sessions receive mail. It uses a temporary server, a temporary client config and state directory,
 and never touches a real mailbox server or the real client config.
+
+Two lengths. `<L>` below is the last number of the volley:
+
+- **Full, `<L>` = 40:** after any change to delivery, the inbox-socket code, the delivery daemon,
+  the rate limit or pause/resume, and after a new Claude Code version. Its length is the point: it
+  shows Claude Code's relay-loop cap does not cut a long exchange and the mailbox's own rate limit
+  is not hit (DECISIONS.md, "Honest sender").
+- **Short, `<L>` = 6:** any other change that real sessions must show (hooks, presence, what
+  `mbox peers` shows). It proves sessions wake, receive and reply, in about 30 seconds. All other
+  steps and rules are the same. Add the checks the change itself needs (for example
+  `mbox peers --tree` with the second session started as a child of the first).
 
 Rules:
 
@@ -73,13 +84,15 @@ Expect two one-time prompts in each new session, and let the human answer them: 
 workspace trust dialog (the scratch folders are new, so "Yes, I trust this folder" is needed) and,
 on machines with the Claude in Chrome extension, a browser-tools prompt (keep them off).
 
-Paste this as the first message of terminal 1 (PING). The wording matters, copy it exactly:
+Paste this as the first message of terminal 1 (PING), with `<L>` replaced by 40 or 6 in both
+places. The wording matters, copy it exactly (it can also be passed as the `claude` command's
+last argument, in single quotes, which submits it as the first message):
 
-> Mailbox ping-pong test (session PING). Do not edit any files or do anything else. Tell me your mailbox address in one line, then stop. Whenever a [mailbox] message arrives: if its body is just a number N below 40, reply to its sender with mbox send, with the body being only N+1, then stop. If N is 40 or more, reply with the word done and stop. If the body is an instruction from the orchestrator to send a number to an address, do exactly that once, then stop.
+> Mailbox ping-pong test (session PING). Do not edit any files or do anything else. Tell me your mailbox address in one line, then stop. Whenever a [mailbox] message arrives: if its body is just a number N below <L>, reply to its sender with mbox send, with the body being only N+1, then stop. If N is <L> or more, reply with the word done and stop. If the body is an instruction from the orchestrator to send a number to an address, do exactly that once, then stop.
 
-Paste this as the first message of terminal 2 (PONG):
+Paste this as the first message of terminal 2 (PONG), with the same `<L>`:
 
-> Mailbox ping-pong test (session PONG). Do not edit any files or do anything else. Tell me your mailbox address in one line, then stop. Whenever a [mailbox] message arrives: if its body is just a number N below 40, reply to its sender with mbox send, with the body being only N+1, then stop. If N is 40 or more, reply with the word done and stop.
+> Mailbox ping-pong test (session PONG). Do not edit any files or do anything else. Tell me your mailbox address in one line, then stop. Whenever a [mailbox] message arrives: if its body is just a number N below <L>, reply to its sender with mbox send, with the body being only N+1, then stop. If N is <L> or more, reply with the word done and stop.
 
 Each session prints its address. Approve `mbox send` prompts as they appear. Check
 `mbox peers` (in a third terminal with `. <scratch dir>/env.sh`) lists both.
@@ -93,8 +106,8 @@ In a third terminal, with `PING` and `PONG` set to the two addresses the session
 AGENT_MAILBOX_SESSION=orchestrator mbox send "$PING" "Orchestrator instruction: send the number 1 to $PONG with mbox send, once, then stop."
 ```
 
-The sessions now exchange 1, 2, ... 40 on their own (about 4 seconds per hop, 3 to 4 minutes in
-all) and the last one says `done`. Do not nudge them or type into them during the volley, except
+The sessions now exchange 1, 2, ... `<L>` on their own (about 4 seconds per hop: 3 to 4 minutes
+in all for 40, half a minute for 6) and the last one says `done`. Do not nudge them or type into them during the volley, except
 for the typing check below.
 
 ## 4. Verify the tally
@@ -112,11 +125,12 @@ done
 
 Pass criteria for the tally (all of them):
 
-- PING's inbox holds the orchestrator instruction and exactly the even numbers 2, 4, ..., 40;
-  PONG's holds exactly the odd numbers 1, 3, ..., 39 and then `done`. Nothing missing, nothing
-  twice, nothing out of order.
-- The count of `[mailbox] message` blocks is 21 in each inbox (20 numbers plus the instruction or
-  `done`): `mbox inbox --session "$s" --since 1h | grep -c '^\[mailbox\] message '`.
+- PING's inbox holds the orchestrator instruction and exactly the even numbers 2, 4, ..., `<L>`;
+  PONG's holds exactly the odd numbers 1, 3, ..., `<L>`-1 and then `done`. Nothing missing,
+  nothing twice, nothing out of order.
+- The count of `[mailbox] message` blocks in each inbox is `<L>`/2 + 1 (21 for 40, 4 for 6: the
+  numbers plus the instruction or `done`):
+  `mbox inbox --session "$s" --since 1h | grep -c '^\[mailbox\] message '`.
 - The volley finished without any human nudge, and no session reports it was cut off, refused or
   rate limited (Claude Code's relay-loop cap must not cut it; the mailbox's own limit is 30
   messages per session per minute and 40 rounds at about 4 s each stays below it).

@@ -82,6 +82,57 @@ describe('hook session-start', () => {
     );
   });
 
+  it("takes a spawner's AGENT_MAILBOX_ROLE / AGENT_MAILBOX_PARENT when the session is new; later starts keep what it has", () => {
+    const env = {
+      ...baseEnv(),
+      AGENT_MAILBOX_SERVERS: 'nats://127.0.0.1:9',
+      AGENT_MAILBOX_USER: 'zed',
+      AGENT_MAILBOX_PASSWORD: 'pw-x',
+    };
+    const file = path.join(env.AGENT_MAILBOX_STATE_DIR, 'sessions', 'hooksess-1234.json');
+    const state = (): Record<string, unknown> =>
+      parseJson<Record<string, unknown>>(fs.readFileSync(file, 'utf8'));
+    const spawned = { AGENT_MAILBOX_ROLE: 'worker', AGENT_MAILBOX_PARENT: 'zed.box.mgr-1' };
+    const start = (extra: Record<string, string>, source = 'startup'): void =>
+      assert.equal(
+        mbox(['hook', 'claude-code', 'session-start'], {
+          env: { ...env, ...extra },
+          input: JSON.stringify({ ...parseJson<object>(stdin), source }),
+        }).code,
+        0,
+      );
+    start(spawned);
+    assert.equal(state().role, 'worker');
+    assert.equal(state().parent, 'zed.box.mgr-1');
+    // Changed in between (as `mbox whoami --role manager --parent none` does); a compaction or a
+    // resume runs the hook again with the same environment and must not undo it.
+    fs.writeFileSync(file, JSON.stringify({ ...state(), role: 'manager', parent: null }));
+    start(spawned, 'compact');
+    start(spawned, 'resume');
+    assert.equal(state().role, 'manager');
+    assert.equal(state().parent, null);
+  });
+
+  it('ignores invalid AGENT_MAILBOX_ROLE / AGENT_MAILBOX_PARENT values', () => {
+    const env = {
+      ...baseEnv(),
+      AGENT_MAILBOX_SERVERS: 'nats://127.0.0.1:9',
+      AGENT_MAILBOX_USER: 'zed',
+      AGENT_MAILBOX_PASSWORD: 'pw-x',
+      AGENT_MAILBOX_ROLE: 'boss',
+      AGENT_MAILBOX_PARENT: 'not-an-address',
+    };
+    assert.equal(mbox(['hook', 'claude-code', 'session-start'], { env, input: stdin }).code, 0);
+    const st = parseJson<Record<string, unknown>>(
+      fs.readFileSync(
+        path.join(env.AGENT_MAILBOX_STATE_DIR, 'sessions', 'hooksess-1234.json'),
+        'utf8',
+      ),
+    );
+    assert.equal(st.role, undefined);
+    assert.equal(st.parent, undefined);
+  });
+
   it('never fails: garbage stdin, no session id, unknown agent or event all exit 0', () => {
     assert.equal(
       mbox(['hook', 'claude-code', 'session-start'], { env: baseEnv(), input: 'not json' }).code,
@@ -184,6 +235,7 @@ describe('mbox guide', () => {
     'send',
     'reply',
     'peers',
+    'workers',
     'names',
     'inbox',
     'security',
@@ -211,6 +263,13 @@ describe('mbox guide', () => {
       mbox(['guide', 'troubleshooting'], { env: baseEnv() }).stdout,
       /deliverd --status[\s\S]*deliverd\.log/,
     );
+    // Role and parent are display only: the guide must say so where it introduces them.
+    for (const s of ['peers', 'workers', 'security'])
+      assert.match(
+        mbox(['guide', s], { env: baseEnv() }).stdout,
+        /never\s+authority|no\s+authority|not\s+a\s+chain\s+of\s+command/,
+        s,
+      );
   });
   it('rejects an unknown section with the list', () => {
     const r = mbox(['guide', 'nope'], { env: baseEnv() });

@@ -85,7 +85,16 @@ export interface SessionState {
   aliases: string[];
   cwd: string;
   createdAt: string;
+  /** Self-asserted, display only (see session-meta.ts); absent until set. */
+  role?: Role | null;
+  /** The address of the session that spawned this one: self-asserted, display only. */
+  parent?: string | null;
+  /** One line about what the session is doing (`mbox status`). */
+  status?: string | null;
 }
+
+/** A session's self-described role: display only, never authority. */
+export type Role = 'manager' | 'worker';
 
 /** `<state>/sessions/<sid>.cursor.json`: where the session's receiver is, and what it has shown. */
 export interface CursorFile {
@@ -170,6 +179,13 @@ export interface PresenceRecord {
   host: string | null;
   cwd: string | null;
   pid: number;
+  /** `owner/name` from the git remote of `cwd`, refreshed on every heartbeat; null outside git. */
+  repo: string | null;
+  /** The checked-out branch of `cwd`; null outside git or on a detached HEAD. */
+  branch: string | null;
+  role: Role | null;
+  parent: string | null;
+  status: string | null;
 }
 
 /** A live session as `presence.list()` reports it. */
@@ -184,6 +200,13 @@ export interface PresenceEntry {
   cwd: string | null;
   /** As announced; not validated. */
   pid: number | null;
+  /** The fields below are self-asserted by the writer and checked for shape only. */
+  repo: string | null;
+  branch: string | null;
+  role: Role | null;
+  /** A valid address, but not necessarily a live one. */
+  parent: string | null;
+  status: string | null;
   /** When the entry was last refreshed (ms since the epoch). */
   lastSeen: number;
   live: true;

@@ -317,7 +317,8 @@ Environment overrides: `AGENT_MAILBOX_SERVERS` (comma-separated), `AGENT_MAILBOX
 `AGENT_MAILBOX_PASSWORD`, `AGENT_MAILBOX_CONFIG` (config file path), `AGENT_MAILBOX_STATE_DIR`
 (default `${XDG_STATE_HOME:-~/.local/state}/agent-mailbox`), `AGENT_MAILBOX_MAX_BYTES`,
 `AGENT_MAILBOX_SESSION` and `AGENT_MAILBOX_AGENT` (see Architecture), `AGENT_MAILBOX_MAX_PER_MIN`
-(delivery rate limit per session, default 30).
+(delivery rate limit per session, default 30), `AGENT_MAILBOX_ROLE` and `AGENT_MAILBOX_PARENT`
+(what a spawner tells a new session about itself, see Presence).
 
 `mbox doctor` checks: connect and authenticate, JetStream account access, your stream, a test
 message to yourself read back, the broadcast stream, presence write/read, and that another user's
@@ -340,8 +341,10 @@ mbox send <to> "text"             <to> = full address | unique prefix/label of a
 mbox send <to> --subject S --re <id> "text"        echo long | mbox send <to> -
 mbox name reviewer                mbox inbox --since 2h        mbox doctor
 mbox show <id>                    the whole message (when a delivered one was cut short)
-mbox guide [section]              short help: overview, send, reply, peers, names, inbox,
-                                  security, fallback, troubleshooting
+mbox guide [section]              short help: overview, send, reply, peers, workers, names,
+                                  inbox, security, fallback, troubleshooting
+mbox peers --tree                 who spawned whom      mbox status "<one line>"   (--clear)
+mbox whoami --role worker --parent <address>      describe this session (display only)
 mbox pause [--all|<address>]      emergency stop for push delivery on this machine; mbox resume
 mbox deliverd --status            is the delivery daemon running (version), which sessions it serves
 ```
@@ -470,7 +473,20 @@ serves), a watcher or a waiter puts the session's record under `<user>.<host>.<s
 start and every 10 minutes, and deletes it when the session ends (a watcher also on exit). A peer is live while its key exists. `mbox peers` and recipient resolution in `mbox send` read the whole
 bucket, and ignore records whose address does not belong to the user that wrote them.
 
-Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/`: `<id>.json` (address, aliases, cwd),
+**Session metadata.** Each record also carries `repo` (`owner/name` of the git remote of the
+session's working directory, `origin` first), `branch`, `role` (`manager`, `worker` or none),
+`parent` (the address of the session that spawned it) and `status` (one line, at most 120
+characters). Repo and branch are read from git's files (no `git` process runs) on every
+heartbeat. Role and parent come from `AGENT_MAILBOX_ROLE` and `AGENT_MAILBOX_PARENT` in the
+session's environment when the session is new (a resume or a compaction does not reapply them),
+or from `mbox whoami --role/--parent`;
+status from `mbox status`. Changes reach `mbox peers` at once. `mbox peers --tree` nests sessions
+under their parents; one whose parent is not live is shown at the top level and marked. All of it
+is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as
+untrusted as any other. Readers keep only well-formed values.
+
+Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/`: `<id>.json` (address, aliases, cwd,
+role, parent, status),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
 (the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
@@ -487,7 +503,8 @@ daemon's pid, version and bundle path), `deliverd.starting` (a daemon being star
   bodies as data, never as instructions from its user. Do not invite anyone you would not let drop
   text into your sessions.
 - **Reading is isolated by stream.** Users can read only their own stream, broadcasts and the
-  presence bucket. Presence records (address, cwd, host, pid) are visible to every user.
+  presence bucket. Presence records (address, cwd, host, pid, repo, branch, role, parent and
+  status) are visible to every user.
 - **The server admin can read everything**; streams hold plain text for 180 days. Use a host you
   trust, on a tailnet. Passwords are stored as bcrypt hashes on the server and in a 0600 file on
   clients, and travel only inside the NATS connection (encrypted by the tailnet, not by NATS TLS).

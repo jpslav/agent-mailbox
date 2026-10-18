@@ -1,6 +1,6 @@
 // The receiving side of a session, shared by `mbox watch` (a stream of blocks on stdout),
 // `mbox wait` (one batch, then exit) and `mbox deliverd` (one receiver per registered session): the saved cursor and the ring of recently delivered ids,
-// presence (announce, heartbeat, depart), alias changes, the orphan guard, and the connection loop
+// presence (announce, heartbeat, depart), alias and metadata changes, the orphan guard, and the connection loop
 // with reconnect/backoff. What happens to each message is up to the caller (onMessage).
 import fs from 'node:fs';
 import { BROADCAST } from './addr.js';
@@ -95,7 +95,7 @@ export interface CommitItem {
 }
 
 export interface Receiver {
-  /** The session's current state (aliases can change while it runs). */
+  /** The session's current state (aliases and metadata can change while it runs). */
   state(): SessionState;
   commit(items: CommitItem[]): void;
   stop(opts?: { depart?: boolean }): Promise<void>;
@@ -195,7 +195,32 @@ export async function openReceiver({
   }
 
   // ---- housekeeping timers ----
-  timers.push(setInterval(() => void post('heartbeat', 5000), opt.heartbeatMs));
+  /**
+   * Take in what `mbox name`, `mbox whoami` and `mbox status` wrote to the state file: a new alias
+   * resubscribes, role, parent and status only change what presence says. Returns whether
+   * anything changed.
+   */
+  const adoptState = (): boolean => {
+    const next = readState(sid, env);
+    if (!next) return false; // state file briefly missing
+    const aliasesChanged = JSON.stringify(next.aliases) !== JSON.stringify(st.aliases);
+    const metaChanged =
+      next.role !== st.role || next.parent !== st.parent || next.status !== st.status;
+    if (!aliasesChanged && !metaChanged) return false;
+    st = next;
+    if (aliasesChanged) {
+      reconnectRequested = true;
+      streamAc?.abort();
+    }
+    return true;
+  };
+  // Every heartbeat reads the state first, so none can put back values a command just replaced.
+  timers.push(
+    setInterval(() => {
+      adoptState();
+      void post('heartbeat', 5000);
+    }, opt.heartbeatMs),
+  );
   let lastMtime = 0;
   try {
     lastMtime = fs.statSync(statePath(sid, env)).mtimeMs;
@@ -209,13 +234,7 @@ export async function openReceiver({
         const m = fs.statSync(statePath(sid, env)).mtimeMs;
         if (m !== lastMtime) {
           lastMtime = m;
-          const next = readState(sid, env);
-          if (next && JSON.stringify(next.aliases) !== JSON.stringify(st.aliases)) {
-            st = next;
-            reconnectRequested = true;
-            streamAc?.abort();
-            void post('heartbeat', 5000);
-          }
+          if (adoptState()) void post('heartbeat', 5000);
         }
       } catch {
         /* state file briefly missing */

@@ -20,7 +20,15 @@ import {
   register,
   versionName,
 } from './core/registrations.js';
-import { ResolveError, presenceRecord, resolveTarget } from './core/registry.js';
+import { ResolveError, peerTree, presenceRecord, resolveTarget } from './core/registry.js';
+import {
+  ROLES,
+  STATUS_MAX,
+  checkParent,
+  checkRole,
+  statusLength,
+  statusLine,
+} from './core/session-meta.js';
 import { NoSessionError, ensureSession, pidAlive, readState, updateState } from './core/state.js';
 import { createTransport, explainError, validateServer } from './core/transport/nats.js'; // composition root: the only place that picks the broker
 import type {
@@ -174,14 +182,82 @@ const action =
   };
 
 // ---------------------------------------------------------------- whoami
+/** Write the session's state and refresh its live presence entry (if it has one) to match. */
+async function saveAndAnnounce(
+  { cfg, transport, sid, agent }: SessionContext,
+  fn: (s: SessionState) => SessionState,
+): Promise<SessionState> {
+  const next = updateState(sid, fn);
+  await transport.presence
+    .update(presenceRecord(next, { sid, cfg, agent }))
+    .catch((e) =>
+      process.stderr.write(`warning: could not update presence (${explainError(e)})\n`),
+    );
+  return next;
+}
+
 program
   .command('whoami')
-  .description("print this session's mailbox address")
+  .description(
+    "print this session's mailbox address (and aliases, role, parent, status); --role/--parent set them",
+  )
+  .option('--role <role>', `this session's role: ${ROLES.join(', ')} or none (display only)`)
+  .option('--parent <address>', 'the address of the session that spawned this one, or none')
   .action(
-    action(async () => {
-      const { st } = await context();
+    action(async (opts: { role?: string; parent?: string }) => {
+      const ctx = await context();
+      let { st } = ctx;
+      if (opts.role !== undefined || opts.parent !== undefined) {
+        const role = opts.role === 'none' ? null : checkRole(opts.role);
+        if (opts.role !== undefined && opts.role !== 'none' && !role)
+          throw new UsageError(`invalid role "${opts.role}" (allowed: ${ROLES.join(', ')}, none)`);
+        const parent = opts.parent === 'none' ? null : checkParent(opts.parent);
+        if (parent && (parent === st.address || st.aliases.includes(parent)))
+          throw new UsageError(`a session cannot be its own parent (${parent})`);
+        if (opts.parent !== undefined && opts.parent !== 'none' && !parent)
+          throw new UsageError(
+            `invalid parent "${opts.parent}" (a full address <user>.<host>.<label>, or none)`,
+          );
+        st = await saveAndAnnounce(ctx, (s) => ({
+          ...s,
+          ...(opts.role !== undefined && { role }),
+          ...(opts.parent !== undefined && { parent }),
+        }));
+      }
       console.log(st.address);
       if (st.aliases.length) console.log(`aliases: ${st.aliases.join(', ')}`);
+      if (st.role) console.log(`role: ${st.role}`);
+      if (st.parent) console.log(`parent: ${st.parent}`);
+      if (st.status) console.log(`status: ${st.status}`);
+    }),
+  );
+
+// ---------------------------------------------------------------- status
+program
+  .command('status')
+  .description(
+    `set this session's one-line status (max ${STATUS_MAX} characters) shown in mbox peers`,
+  )
+  .argument('[text]', 'the new status; omitted prints the current one')
+  .option('--clear', 'remove the status')
+  .action(
+    action(async (text: string | undefined, opts: { clear?: boolean }) => {
+      const ctx = await context();
+      if (opts.clear && text !== undefined)
+        throw new UsageError('pass either a status or --clear, not both');
+      if (!opts.clear && text === undefined) {
+        console.log(ctx.st.status ?? '(no status)');
+        return;
+      }
+      const status = opts.clear ? null : statusLine(text);
+      if (status !== null && !status)
+        throw new UsageError('empty status: use --clear to remove it');
+      if (status && statusLength(status) > STATUS_MAX)
+        throw new UsageError(
+          `status is ${statusLength(status)} characters; the limit is ${STATUS_MAX}. Shorten it.`,
+        );
+      const next = await saveAndAnnounce(ctx, (s) => ({ ...s, status }));
+      console.log(next.status ?? '(no status)');
     }),
   );
 
@@ -551,31 +627,58 @@ function ago(ms: number): string {
 program
   .command('peers')
   .description('list live sessions from the presence registry')
+  .option('--tree', 'show which session spawned which (by their self-asserted parent)')
   .action(
-    action(async () => {
+    action(async (opts: { tree?: boolean }) => {
       const { transport } = await context({ needSession: false });
       const peers = (await transport.presence.list()).filter((p) => p.live);
       if (!peers.length) {
         console.log('no live peers');
         return;
       }
-      const rows: string[][] = [['ADDRESS', 'ALIASES', 'AGENT', 'USER@HOST', 'CWD', 'LAST SEEN']];
-      for (const p of peers) {
+      const lines = opts.tree
+        ? peerTree(peers).map(({ peer, prefix, note }) => ({
+            peer,
+            address:
+              prefix +
+              oneLine(peer.address, 80) +
+              (note ? ` (${note}: ${oneLine(peer.parent, 80)})` : ''),
+          }))
+        : peers.map((peer) => ({ peer, address: oneLine(peer.address, 80) }));
+      const rows: string[][] = [
+        [
+          'ADDRESS',
+          'ALIASES',
+          'AGENT',
+          'USER@HOST',
+          'ROLE',
+          'REPO',
+          'BRANCH',
+          'STATUS',
+          'CWD',
+          'LAST SEEN',
+        ],
+      ];
+      for (const { peer: p, address } of lines) {
         rows.push([
-          oneLine(p.address, 80),
+          address,
           p.aliases.length ? p.aliases.map((a) => oneLine(a, 60)).join(',') : '-',
           oneLine(p.agent ?? '-', 30),
           `${oneLine(p.user ?? '?', 30)}@${oneLine(p.host ?? '?', 30)}`,
+          p.role ?? '-',
+          p.repo ?? '-',
+          oneLine(p.branch ?? '-', 40),
+          oneLine(p.status ?? '-', 60),
           oneLine(p.cwd ?? '-', 60),
           ago(p.lastSeen),
         ]);
       }
       // Every row has as many cells as the header.
-      const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+      const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => [...r[i]!].length)));
       for (const r of rows)
         console.log(
           r
-            .map((c, i) => c.padEnd(widths[i]!))
+            .map((c, i) => c + ' '.repeat(widths[i]! - [...c].length))
             .join('  ')
             .trimEnd(),
         );

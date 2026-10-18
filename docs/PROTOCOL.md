@@ -108,7 +108,7 @@ Suspect a Claude Code release when any of these appear after an upgrade:
 ### How to re-verify
 
 Run the `live-test` skill (`.claude/skills/live-test/SKILL.md`): two real sessions on a throwaway
-server count 1 to 40 over the mailbox. Pass criteria are in that skill. `test/deliverd.test.ts`
+server count 1 to 40 over the mailbox (the full length: a protocol check always runs in full). Pass criteria are in that skill. `test/deliverd.test.ts`
 only proves the daemon against `FakeInbox`; it cannot detect a change in Claude Code. After a
 confirmed change, update `claude-inbox.ts`, `FakeInbox`, this file, and DECISIONS.md if the
 delivery design changes. Protocol changes are `needs-owner` changes.
@@ -150,6 +150,45 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   so the sort matters even after a clean hand-back.
 - Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
   deleted when the session ends.
+
+### Presence entry
+
+The value under `U.H.<session hash>` is JSON, written by user `U` only (publish permission
+`$KV.presence.U.>`), so every field is self-asserted except the user itself (the key's first
+token):
+
+```json
+{
+  "address": "alice.laptop.web-1a2b",
+  "aliases": ["alice.laptop.front"],
+  "session": "sess-1",
+  "agent": "claude-code",
+  "user": "alice",
+  "host": "laptop",
+  "cwd": "/work/web",
+  "pid": 4242,
+  "repo": "acme/web",
+  "branch": "feat/login",
+  "role": "worker",
+  "parent": "alice.laptop.mgr-9c8d",
+  "status": "running the tests",
+  "at": "2026-10-17T12:00:00.000Z"
+}
+```
+
+| field    | meaning                                                                                                                                                                    |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repo`   | `owner/name` from the git remote (`origin`, else the first) in `cwd`'s own git config; `null` outside git or without a remote (`include` and `insteadOf` are not followed) |
+| `branch` | the checked-out branch of `cwd`; `null` outside git or on a detached HEAD                                                                                                  |
+| `role`   | `manager`, `worker` or `null`                                                                                                                                              |
+| `parent` | the address of the session that spawned this one, or `null`; need not be live                                                                                              |
+| `status` | one line, at most 120 characters, or `null`                                                                                                                                |
+
+The last five were added in 0.5.6, after `pid`; readers before that ignore them, and readers
+since then treat a missing one as `null`. Readers keep a field only when it has that shape
+(`src/core/session-meta.ts`), and only addresses and aliases that belong to `U`. All five are
+display only: nothing in the mailbox grants a `parent` or a `manager` anything. The exact bytes
+are pinned by `test/golden-presence.test.ts`.
 
 ### Delivery order
 

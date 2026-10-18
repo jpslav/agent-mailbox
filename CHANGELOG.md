@@ -12,6 +12,21 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-17
+
+### Added
+- `mbox peers` shows each session's repository (`owner/name` of its git remote), branch, role and
+  status. Repo and branch follow the session's working directory and refresh every 10 minutes.
+- `mbox peers --tree` shows which session spawned which; a session whose parent is not live is
+  shown at the top level and marked.
+- `mbox status "<text>"` sets a one-line status (at most 120 characters) that peers see at once;
+  `mbox status --clear` removes it.
+- `mbox whoami --role manager|worker|none --parent <address>|none` describes a session, and a
+  spawner can pass `AGENT_MAILBOX_ROLE` / `AGENT_MAILBOX_PARENT` instead. `mbox whoami` prints
+  role, parent and status when set.
+- `mbox guide workers`: how to spawn a session that reports back. Role and parent are display
+  only and grant no authority; the guide and the skill say so.
+
 ## [0.5.5] - 2026-10-17
 
 ### Fixed

@@ -197,3 +197,43 @@ context, decision, why.
 - **Limit:** a message that does not come back within the hold (a server redelivering late) is
   shown after newer mail. A previous reader that acknowledges a message after the next one started
   only makes the hold run to its end.
+
+## Session metadata in presence: read from git's files, display only
+
+- **Date:** 2026-10
+- **Context:** People and manager sessions need to see who each session is and what it is doing
+  across machines: its repository and branch, whether it is a manager or a worker, which session
+  spawned it, and a status line (#15).
+- **Decision:** Presence entries carry `repo`, `branch`, `role`, `parent` and `status`. Repo and
+  branch are read from git's own files (`.git`, `HEAD`, `commondir`, `config`) on every
+  heartbeat, never by running `git`. Role and parent come from `AGENT_MAILBOX_ROLE` /
+  `AGENT_MAILBOX_PARENT` (taken when the session's state is created, so a resume or a compaction
+  never undoes a later change) or `mbox whoami --role/--parent`; status
+  from `mbox status`. They live in the session's state file; a receiver re-reads it before every
+  heartbeat, so no heartbeat puts back values a command just replaced. All five are
+  self-asserted and display only; readers keep only well-formed values.
+- **Why:** The delivery daemon refreshes every session it serves every 10 minutes; spawning `git`
+  there would cost a process per session per heartbeat and would run whatever the repository
+  configures (an fsmonitor hook, for example) inside the daemon. A parent claim proves nothing
+  (any session can name any address), so it must never become a reason to trust mail: the guide
+  and the skill say so explicitly. Unknown or malformed values become `null` rather than errors,
+  so an odd entry cannot break `mbox peers` for everyone.
+- **Limits:** only the repository's own `config` is read (no `include`, `includeIf` or `insteadOf`),
+  so such setups may show no repo or the un-rewritten one. The reads are synchronous, so a working
+  directory on a stalled network mount would hold up the daemon's heartbeats for a while; local
+  checkouts are the normal case.
+
+## Live test: full length only where length matters
+
+- **Date:** 2026-10
+- **Context:** The live test's 40-round volley was built to show that Claude Code's relay-loop cap
+  does not cut a long exchange and that the mailbox's rate limit is the real guard ("Honest
+  sender"). It takes 3 to 4 minutes of two watched sessions, and was being run for every change
+  that touched hooks or presence too.
+- **Decision:** The `live-test` skill has two lengths: full (to 40) after any change to delivery,
+  the inbox socket, the delivery daemon, the rate limit or pause/resume, and after a new Claude
+  Code version; short (to 6) for any other change real sessions must show, plus whatever checks
+  that change needs.
+- **Why:** A short volley proves what those changes can break (sessions wake, receive and reply);
+  only the full one tests the relay-loop cap and the rate limit, which only the first group of
+  changes can affect.

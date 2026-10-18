@@ -92,6 +92,7 @@ import type {
 import { Kvm } from '@nats-io/kv';
 import type { KV } from '@nats-io/kv';
 import { SEG_RE } from '../addr.js';
+import { checkBranch, checkParent, checkRepo, checkRole, checkStatus } from '../session-meta.js';
 import type {
   Cursor,
   Delivery,
@@ -276,6 +277,11 @@ interface UntrustedPresence {
   agent?: unknown;
   cwd?: unknown;
   pid?: unknown;
+  repo?: unknown;
+  branch?: unknown;
+  role?: unknown;
+  parent?: unknown;
+  status?: unknown;
 }
 
 /** The position of a receiver: last sequence read from the own stream and from the broadcast stream. */
@@ -963,6 +969,12 @@ export function createTransport(
           host: addr[1],
           cwd: typeof j.cwd === 'string' ? j.cwd : null,
           pid: (j.pid ?? null) as number | null, // as announced; not validated
+          // Self-asserted metadata, kept only when it has the right shape (display only).
+          repo: checkRepo(j.repo),
+          branch: checkBranch(j.branch),
+          role: checkRole(j.role),
+          parent: checkParent(j.parent),
+          status: checkStatus(j.status),
           lastSeen: m.time.getTime(),
           live: true,
         });
