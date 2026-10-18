@@ -162,7 +162,8 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   subject that a stream with a _literal_ subject captures (it counts as interest), so any user
   could write into such a stream through a push consumer on their own mailbox stream, whatever
   their publish permissions. Streams with wildcard subjects never receive those deliveries;
-  `test/isolation.test.ts` ("forge into another stream") proves it for every stream. A batch direct get the server refuses is never answered (it looks like a
+  `test/isolation.test.ts` ("forge into another stream") checks push-consumer deliveries into
+  every stream. A batch direct get the server refuses is never answered (it looks like a
   timeout), so a client reading another user's feed first sends one single direct get (`seq` 1),
   which the server refuses at once with a permission error.
 - Sharing: `mbox-admin.sh set-sharing U team|private` (stored in `users.d/U.sharing`; no file means

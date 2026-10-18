@@ -249,9 +249,9 @@ context, decision, why.
   that only that user may publish. The subject is a wildcard on purpose: a first version used the
   literal `evt.<user>`, and the isolation tests showed any user could then write into another's
   feed through a push consumer on their own mailbox stream (the server delivers to a literal
-  stream subject as if it were a subscriber; wildcard stream subjects get nothing). Every stream
-  here must keep a wildcard subject. Events carry the presence metadata, never message contents. The
-  admin sets each user's sharing to `team` (the default) or `private` with
+  stream subject as if it were a subscriber; wildcard stream subjects get none of those
+  deliveries). Every stream here must keep a wildcard subject. Events carry the presence
+  metadata, never message contents. The admin sets each user's sharing to `team` (the default) or `private` with
   `mbox-admin.sh set-sharing`; every user's permission block grants a direct get on each `team`
   feed, so the script regenerates every block (keeping each password hash) on any change to a user
   or a sharing setting. A KV key (`sharing`/`team`, written only by the admin, readable by all)
