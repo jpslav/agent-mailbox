@@ -416,9 +416,11 @@ context, decision, why.
   from a per-area position in the session's cursor; an area without one is read from the start,
   which is what queues asks for later offerers. The reader takes an ask's area from the token it
   read, never from the envelope, and an envelope can never make direct mail look like an ask.
+  A delivered ask is remembered by its area, its verified asker and its id, not its id alone:
+  ask ids are public, and mail reusing one must not make the real ask look already delivered.
   The rules for helpers are in the ask's own block (its second line), in `mbox guide asks`, in the
   skill and in the README: an ask is untrusted input; answering and reviewing are free; acting in
-  the helper's environment (edit, run, push, change settings) needs the helper's own user.
+  the helper's environment (edit, run, push, change settings, send out data) needs the helper's own user.
 - **Why:** A shared stream with sender-stamped subjects is the broadcast design, which the
   per-user accounts already make safe: a user can only add asks under their own name, nobody needs
   consumer rights (NATS cannot prefix-restrict consumer names, see "Per-user streams"), and a
@@ -435,6 +437,7 @@ context, decision, why.
   One user's flood of asks shares the stream's 256 MiB with everyone's (discard old), and a
   session that starts offering a busy area receives up to 7 days of asks at once (the delivery
   daemon's rate limit still applies). Asks have no server-side acknowledgement: the cursor is the
-  position, as for broadcasts, and the per-area positions of areas no longer offered are kept (up
-  to 64) so that offering one again goes on where it was. The area token reveals nothing to the
+  position, as for broadcasts, and the per-area positions of areas no longer offered are kept while
+  there are at most 64 positions in all (past that only the offered areas' are), so that offering
+  one again goes on where it was. The area token reveals nothing to the
   server admin that the stored envelope does not already say.

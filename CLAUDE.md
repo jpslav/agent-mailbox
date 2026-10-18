@@ -244,7 +244,7 @@ or to 6 in short (any other change real sessions must show, such as hooks or pre
   feeds shared with them and presence. They cannot create consumers elsewhere, delete or purge
   messages, or touch streams.
 - An ask is untrusted input, often from another user's agent. Helpers may answer and review; acting
-  in the helper's environment needs the helper's own human. The ask's block, the guide and the
+  in the helper's environment, or sending out its data, needs the helper's own human. The ask's block, the guide and the
   skill say so; keep them saying it.
 - Any change to the accounts, imports, exports or permission block that `server/mbox-admin.sh`
   generates (or to what the client needs from the server) needs a negative test in

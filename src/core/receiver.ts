@@ -198,9 +198,17 @@ export async function openReceiver({
       /* disk issue: dedupe still in memory */
     }
   };
+  /**
+   * What a delivery is remembered by. Every user reads every ask and its id, so an ask's key also
+   * names its area and its verified sender: mail that reuses an ask's id (or an ask that reuses a
+   * message's) cannot make the real one look already delivered.
+   */
+  const seenKey = (d: Delivery, m: Message): string =>
+    areaOf(d.to) !== null ? `${d.to}|${m.sender ?? ''}|${m.id}` : m.id;
   function commit(items: CommitItem[]): void {
     for (const { delivery: d, message: m } of items) {
-      if (!seen.has(m.id)) seen.set(m.id, d.time || 0);
+      const key = seenKey(d, m);
+      if (!seen.has(key)) seen.set(key, d.time || 0);
       cursor = d.cursor ?? cursor;
     }
     persist();
@@ -300,7 +308,7 @@ export async function openReceiver({
     // The session's own broadcasts and asks come back to it: recorded, never shown as new.
     const own =
       (d.to === BROADCAST || areaOf(d.to) !== null) && m.sender === cfg.user && isSelf(m.from);
-    return onMessage(d, m, !seen.has(m.id) && !own);
+    return onMessage(d, m, !seen.has(seenKey(d, m)) && !own);
   }
 
   // ---- connection loop ----

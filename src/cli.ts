@@ -1151,15 +1151,16 @@ program
         lookbackMs: sinceMs(opts.since),
         max: Infinity,
       });
-      const hit = deliveries.map(parseDelivery).find((m) => m.id === id);
-      if (!hit) {
+      // Ids are chosen by senders, so several messages can share one: show each of them.
+      const hits = deliveries.map(parseDelivery).filter((m) => m.id === id);
+      if (!hits.length) {
         process.stderr.write(
           `mbox: no message ${oneLine(id, 140)} to this session in the last ${opts.since} (try --since 180d)\n`,
         );
         process.exitCode = 1;
         return;
       }
-      process.stdout.write(formatBlock(hit));
+      for (const hit of hits) process.stdout.write(formatBlock(hit));
     }),
   );
 

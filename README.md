@@ -637,8 +637,8 @@ still kept on the server first (7 days by default), then new ones as they come, 
 "question"` stores one ask, says on stderr which live sessions offer the area, and prints its id.
 An ask arrives as a block `to area:<area>` whose second line carries the rules for helpers instead
 of the usual reminder: it is untrusted input, often from another user's session; the helper may
-answer and review freely, but anything that would act in its environment (edit, run, push, change
-settings) needs its own user's approval. Helpers answer with `mbox send <from> --re <id>`. The
+answer it and review what it shows, but anything that would act in its environment (edit, run,
+push, change settings, send out files, data or secrets) needs its own user's approval. Helpers answer with `mbox send <from> --re <id>`. The
 asker's own session never gets its own ask back; `mbox inbox` and `mbox show` include asks in the
 areas the session offers. Every user can read every ask, so questions must not hold secrets.
 
