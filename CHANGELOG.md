@@ -12,6 +12,39 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
+Completes v0.7 (asks and offers in 0.6.1, service addresses here).
+
+### Added
+- Service addresses: a stable address `<user>.<name>` (for example `alice.helpdesk`) that names
+  no machine or session. `mbox name --service <name>` claims it for the session; at most one live
+  session of the user holds it, and mail to it goes there. Mail sent while nobody holds it waits on
+  the server (180 days by default) and reaches the next holder, as does anything an earlier holder
+  left unacknowledged, first and in order. `--release` gives it up; `--takeover` takes it from a
+  live holder; a holder whose session ended (no presence) is replaced without asking. Two sessions
+  claiming at once: exactly one wins, and the other is told who holds it.
+- Mail to a service arrives as a block `to <user>.<name>` that carries the same rules for helpers
+  as an ask: answer and review freely; acting in the helper's environment needs the helper's own
+  user's approval. `mbox guide services`, the skill and the README say so.
+- `mbox services` lists every claimed service and its holder (and whether it is live);
+  `mbox peers` has a SERVICES column; `mbox whoami`, `mbox inbox` and `mbox show` include the
+  services the session holds. `mbox send <user>.<name>` warns when no live session holds it.
+- The receiver (delivery daemon, `mbox watch`, `mbox wait`) keeps the session's claims alive with
+  its heartbeat, claims one again when it lapsed while nobody took it (a laptop waking up), and
+  stops reading a service another session took over (the daemon logs it, `mbox watch` prints it).
+
+### Changed
+- A two-part target (`mbox send alice.laptop`) is now always a service address, never a prefix
+  of session addresses; when it is not held and matches a live session, `mbox send` names that
+  session and says to use its full address.
+
+### Upgrading
+- Nothing to do on the server: service addresses use only what a server provisioned by 0.5.8 or
+  later already grants (their mail is ordinary mail in the owner's stream, their claims are
+  entries under the owner's presence keys); `mbox-admin.sh init` changes nothing. Clients before
+  0.7.0 keep working beside them, but cannot send to a service address.
+
 ## [0.6.1] - 2026-10-18
 
 ### Added

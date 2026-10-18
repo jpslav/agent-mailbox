@@ -106,6 +106,11 @@ export async function runWatch({
       );
       void shutdown();
     },
+    onServiceLost(service: string) {
+      write(
+        `[mailbox] another session holds ${service} now; this session no longer receives its mail.\n`,
+      );
+    },
   });
   if (stopping)
     await rx.stop({ depart: true }); // a signal arrived while starting up

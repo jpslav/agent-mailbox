@@ -566,6 +566,9 @@ export async function runDeliverd({
             log(`${current.address}: this session's address is now ${address}; stopped serving it`);
             void stop({ depart: false });
           },
+          onServiceLost(service) {
+            log(`${current.address}: another session holds ${service} now; stopped reading it`);
+          },
         });
       } catch (e) {
         log(`${current.address}: could not start (${errCode(e)}); will retry`);

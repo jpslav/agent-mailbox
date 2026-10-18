@@ -690,3 +690,101 @@ describe(
     });
   },
 );
+
+// A server provisioned by v0.6.1 (asks, before service addresses). Service addresses need nothing
+// new from the server: their mail is direct mail in form (mbx.<user>._svc.<name>.<sender>, which
+// the existing imports already cover) and their claims are entries under the user's own presence
+// keys. So the new client claims, queues and delivers before any init, the init of this version
+// changes nothing, and the v0.6.1 client keeps working beside claims: it skips them in peers, it
+// cannot address a service (an error, nothing stored), and it gets a service holder's replies.
+const ADMIN_061 = fromRelease('v0.6.1', 'server/mbox-admin.sh');
+const CLIENT_061 = fromRelease('v0.6.1', BUNDLE);
+describe(
+  'upgrade from v0.6.1 to service addresses',
+  { skip: SERVER.skip ?? ADMIN_061.skip ?? CLIENT_061.skip },
+  () => {
+    let b: Broker | null = null;
+    const watchers: Watcher[] = [];
+    after(async () => {
+      await Promise.all(watchers.map((w) => w.stop().catch(() => {})));
+      await b?.stop();
+    });
+
+    it('service addresses work on it as provisioned; init changes nothing; the v0.6.1 client works beside them', async () => {
+      b = new Broker(SERVER, { adminScript: ADMIN_061.path });
+      const broker = b;
+      await broker.init(['alice', 'bob']);
+      const aliceEnv = makeEnv(broker, 'alice');
+      const bobEnv = makeEnv(broker, 'bob');
+      const dir = projectDir('svc-upgrade');
+      const run = (bundle: string | undefined, env: MachineEnv, s: string, args: string[]) =>
+        mbox(args, {
+          env: { ...env, AGENT_MAILBOX_SESSION: s },
+          cwd: dir,
+          ...(bundle ? { bundle } : {}),
+        });
+      const old = CLIENT_061.path;
+      const addr = (bundle: string | undefined, env: MachineEnv, s: string) =>
+        (run(bundle, env, s, ['whoami']).stdout.split('\n')[0] ?? '').trim();
+
+      // The new client on the server as v0.6.1 provisioned it.
+      const queued = run(undefined, bobEnv, 'b-new', ['send', 'alice.helpdesk', 'queued early']);
+      assert.equal(queued.code, 0, queued.stderr);
+      const w = new Watcher(aliceEnv, { cwd: dir, session: 'a-new' });
+      watchers.push(w);
+      await w.waitFor(/online as/);
+      const claimed = run(undefined, aliceEnv, 'a-new', ['name', '--service', 'helpdesk']);
+      assert.equal(claimed.code, 0, claimed.stderr);
+      await w.waitFor(/queued early/, 30000);
+      assert.equal(w.messages().at(-1)?.to, 'alice.helpdesk');
+      assert.equal(w.messages().at(-1)?.verified, 'bob');
+      const holder = addr(undefined, aliceEnv, 'a-new');
+
+      // The v0.6.1 client beside the claim: doctor, peers (the claim is no peer), mail both ways.
+      const oldDoctor = run(old, bobEnv, 'b-old', ['doctor']);
+      assert.equal(oldDoctor.code, 0, oldDoctor.stdout + oldDoctor.stderr);
+      const peers = run(old, bobEnv, 'b-old', ['peers']);
+      assert.equal(peers.code, 0, peers.stderr);
+      assert.equal(peers.stdout.split(holder).length - 1, 1, peers.stdout);
+      assert.doesNotMatch(peers.stdout, /_svc|helpdesk/);
+      const admin = await broker.conn('admin');
+      try {
+        const jsm = await jetstreamManager(admin);
+        const before = (await jsm.streams.info('MBX_ALICE')).state.last_seq;
+        const refused = run(old, bobEnv, 'b-old', [
+          'send',
+          'alice.helpdesk',
+          'from the old client',
+        ]);
+        assert.notEqual(refused.code, 0, refused.stdout);
+        assert.match(refused.stderr, /no live peer matches "alice\.helpdesk"/);
+        assert.equal((await jsm.streams.info('MBX_ALICE')).state.last_seq, before);
+      } finally {
+        await admin.close();
+      }
+      const ow = new Watcher(bobEnv, { cwd: dir, session: 'b-old', bundle: old });
+      watchers.push(ow);
+      await ow.waitFor(/online as/);
+      const bobOld = addr(old, bobEnv, 'b-old');
+      assert.equal(run(old, bobEnv, 'b-old', ['send', holder, 'old to the holder']).code, 0);
+      await w.waitFor(/old to the holder/, 30000);
+      const m = w.messages().at(-1);
+      assert.equal(
+        run(undefined, aliceEnv, 'a-new', ['send', bobOld, '--re', m?.id ?? '', 'the reply']).code,
+        0,
+      );
+      await ow.waitFor(/the reply/, 30000);
+
+      // init of this version: nothing to change, no reload.
+      broker.adminScript = ADMIN;
+      const out = broker.admin(['init']).out;
+      assert.match(out, /users\.conf unchanged: no server reload needed/);
+      assert.doesNotMatch(out, /created|reloaded|republishes/);
+      assert.equal(
+        run(undefined, bobEnv, 'b-new', ['send', 'alice.helpdesk', 'after init']).code,
+        0,
+      );
+      await w.waitFor(/after init/, 30000);
+    });
+  },
+);

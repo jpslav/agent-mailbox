@@ -2,6 +2,7 @@
 // (transport.presence); this file only builds the record and resolves "who did the user mean".
 import { isAddr, parseAddr } from './addr.js';
 import { checkOffers } from './areas.js';
+import { isService } from './services.js';
 import { gitInfo, type GitInfo } from './session-meta.js';
 import type { Config, PresenceEntry, PresenceRecord, SessionState } from './types.js';
 
@@ -51,12 +52,15 @@ export interface ResolvedTarget {
 
 /**
  * Resolve a user-supplied target against `peers` (transport.presence.list()).
- * Returns {to, live, peer}; `to` is 'all' for broadcast.
+ * Returns {to, live, peer}; `to` is 'all' for broadcast. A service address (`<user>.<name>`) is
+ * always itself, never a prefix of session addresses; whether a live session holds it is in the
+ * claims, not in `peers`, so `live` is false and the caller asks the claims.
  */
 export function resolveTarget(input: unknown, peers: PresenceEntry[]): ResolvedTarget {
   const raw = String(input).trim();
   if (!raw) throw new ResolveError('missing recipient');
   if (raw === 'all') return { to: 'all', live: true, peer: null };
+  if (isService(raw)) return { to: raw, live: false, peer: null };
   const live = peers.filter((p) => p.live);
   const nameOwners = new Map<string, PresenceEntry>(); // name -> peer
   for (const p of live)

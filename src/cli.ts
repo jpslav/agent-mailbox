@@ -33,6 +33,17 @@ import {
 } from './core/registrations.js';
 import { ResolveError, peerTree, presenceRecord, resolveTarget } from './core/registry.js';
 import {
+  MAX_SERVICES,
+  SERVICE_NAME_MAX,
+  checkServiceName,
+  claimBarrier,
+  claimService,
+  holderLive,
+  parseService,
+  releaseClaim,
+  serviceAddress,
+} from './core/services.js';
+import {
   ROLES,
   STATUS_MAX,
   checkParent,
@@ -56,6 +67,7 @@ import type {
   EventKind,
   FeedEntry,
   PresenceEntry,
+  ServiceClaim,
   SessionState,
   Transport,
   TransportOptions,
@@ -275,7 +287,7 @@ async function recordEvent(
 program
   .command('whoami')
   .description(
-    "print this session's mailbox address (and aliases, role, parent, status, offers); --role/--parent set them",
+    "print this session's mailbox address (and aliases, role, parent, status, offers, services); --role/--parent set them",
   )
   .option('--role <role>', `this session's role: ${ROLES.join(', ')} or none (display only)`)
   .option('--parent <address>', 'the address of the session that spawned this one, or none')
@@ -312,6 +324,7 @@ program
       if (st.parent) console.log(`parent: ${st.parent}`);
       if (st.status) console.log(`status: ${st.status}`);
       if (st.offers?.length) console.log(`offers: ${st.offers.join(', ')}`);
+      if (st.services?.length) console.log(`services: ${st.services.join(', ')}`);
     }),
   );
 
@@ -680,12 +693,34 @@ async function readStdin(timeoutMs: number): Promise<string> {
   });
 }
 
+/**
+ * Does a live session hold `service`? A claim whose holder has no presence entry does not count.
+ * null when it cannot be told (no registry, or the claim unreadable): the message is queued anyway.
+ */
+async function serviceLive(
+  transport: Transport,
+  service: string,
+  peers: PresenceEntry[],
+  registryErr: unknown,
+): Promise<boolean | null> {
+  if (registryErr) return null;
+  try {
+    const { claim } = await transport.services.read(service);
+    return !!claim && holderLive(claim, peers);
+  } catch {
+    return null;
+  }
+}
+
 program
   .command('send')
   .description(
-    'send a message to a session address, a unique prefix/label of a live peer, or "all"',
+    'send a message to a session address, a service address (<user>.<name>), a unique prefix/label of a live peer, or "all"',
   )
-  .argument('<to>', 'full address, unique prefix/label of a live peer, or "all"')
+  .argument(
+    '<to>',
+    'full address, service address <user>.<name>, unique prefix/label of a live peer, or "all"',
+  )
   .argument('[text]', 'message text; "-" or omitted reads stdin')
   .option('--subject <s>', 'subject line')
   .option('--re <id>', 'id of the message this replies to')
@@ -707,7 +742,12 @@ program
           registryErr = e;
         }
         let target: { to: string; live: boolean };
-        if (to === BROADCAST || (isAddr(to) && registryErr)) target = { to, live: true };
+        const service = parseService(to);
+        // Whether a live session holds the service: null when that cannot be told.
+        const serviceHeld = service ? await serviceLive(transport, to, peers, registryErr) : null;
+        const serviceKnown = serviceHeld !== null;
+        if (service) target = { to, live: serviceHeld === true };
+        else if (to === BROADCAST || (isAddr(to) && registryErr)) target = { to, live: true };
         else if (registryErr)
           throw new UsageError(
             `cannot resolve "${to}" without the peer registry (${explainError(registryErr)}); use a full address`,
@@ -729,7 +769,17 @@ program
           );
         }
         const res = await transport.publish(target.to, envelope);
-        if (!target.live) {
+        if (service && !serviceKnown) {
+          process.stderr.write(
+            `warning: could not check whether a live session holds ${to}; the message is stored on the server either way.\n`,
+          );
+        } else if (service && !target.live) {
+          // Before 0.7.0 a two-part target was a prefix of session addresses: say so when it is one.
+          const prefixOf = peers.filter((p) => p.live && p.address.startsWith(`${to}.`));
+          process.stderr.write(
+            `warning: no live session holds ${to}; the message is queued on the server (kept for the server's retention period, 180 days by default) until a session claims it with mbox name --service ${service.name}.${prefixOf.length ? ` (${to} is a service address; to reach live session ${prefixOf.map((p) => p.address).join(', ')}, use the full address.)` : ''}\n`,
+          );
+        } else if (!target.live) {
           process.stderr.write(
             `warning: ${target.to} is not a live peer; the message is queued on the server (kept for the server's retention period, 180 days by default) until that session reads it.\n`,
           );
@@ -760,6 +810,12 @@ program
         console.log('no live peers');
         return;
       }
+      // Who holds which service: the claims name the holding session.
+      const claims = await transport.services.list().catch((): ServiceClaim[] => []);
+      const servicesOf = (p: PresenceEntry): string[] =>
+        claims
+          .filter((c) => c.session === p.session && parseService(c.service)?.user === p.user)
+          .map((c) => c.service);
       const lines = opts.tree
         ? peerTree(peers).map(({ peer, prefix, note }) => ({
             peer,
@@ -780,6 +836,7 @@ program
           'BRANCH',
           'STATUS',
           'OFFERS',
+          'SERVICES',
           'CWD',
           'LAST SEEN',
         ],
@@ -795,6 +852,7 @@ program
           oneLine(p.branch ?? '-', 40),
           oneLine(p.status ?? '-', 60),
           p.offers.length ? oneLine(p.offers.join(','), 80) : '-',
+          servicesOf(p).length ? oneLine(servicesOf(p).join(','), 80) : '-',
           oneLine(p.cwd ?? '-', 60),
           ago(p.lastSeen),
         ]);
@@ -816,12 +874,39 @@ function printTable(rows: string[][]): void {
 }
 
 // ---------------------------------------------------------------- name
+interface NameOptions {
+  service?: string;
+  release?: boolean;
+  takeover?: boolean;
+}
+
 program
   .command('name')
-  .description('add an alias address (<user>.<host>.<label>) for this session')
-  .argument('<label>', 'new label, [a-z0-9-]+')
+  .description(
+    'add an alias address (<user>.<host>.<label>) for this session, or claim a service address (<user>.<name>) with --service',
+  )
+  .argument('[label]', 'new alias label, [a-z0-9-]+')
+  .option(
+    '--service <name>',
+    'claim the service address <user>.<name>: its mail, queued while nobody held it, comes to this session',
+  )
+  .option(
+    '--release',
+    'with --service: release it (its mail queues again until a session claims it)',
+  )
+  .option('--takeover', 'with --service: take it over even from a live session that holds it')
   .action(
-    action(async (label: string) => {
+    action(async (label: string | undefined, opts: NameOptions) => {
+      if (opts.service !== undefined) {
+        if (label !== undefined)
+          throw new UsageError('give either a label or --service <name>, not both');
+        await nameService(opts.service, opts);
+        return;
+      }
+      if (opts.release || opts.takeover)
+        throw new UsageError('--release and --takeover go with --service <name>');
+      if (label === undefined)
+        throw new UsageError('missing label (or --service <name> to claim a service address)');
       const { cfg, transport, sid, st, agent } = await context();
       if (!/^[a-z0-9-]+$/.test(label))
         throw new UsageError(`invalid label "${label}" (allowed: a-z 0-9 -)`);
@@ -864,6 +949,111 @@ program
           process.stderr.write(`warning: could not announce alias (${explainError(e)})\n`),
         );
       console.log(alias);
+    }),
+  );
+
+/** `mbox name --service <name> [--release | --takeover]`. */
+async function nameService(name: string, opts: NameOptions): Promise<void> {
+  if (opts.release && opts.takeover)
+    throw new UsageError('--release and --takeover cannot be used together');
+  if (!checkServiceName(name))
+    throw new UsageError(
+      `invalid service name "${oneLine(name, 60)}" (allowed: a-z 0-9 -, at most ${SERVICE_NAME_MAX} characters)`,
+    );
+  const { transport, sid, st } = await context();
+  const me = parseAddr(st.address)!; // a session's address is a valid one: ensureSession built it
+  const service = serviceAddress(me.user, name);
+  const holder = { service, holder: st.address, session: sid };
+  const held = (st.services ?? []).includes(service);
+
+  if (opts.release) {
+    // The state first: the receiver stops reading the service, and the subscription would not read
+    // it without the claim anyway.
+    if (held)
+      updateState(sid, (s) => ({
+        ...s,
+        services: (s.services ?? []).filter((x) => x !== service),
+      }));
+    if (await releaseClaim(transport.services, holder)) console.log(service);
+    else if (held)
+      process.stderr.write(`mbox: this session no longer held ${service}; removed it here\n`);
+    else {
+      process.stderr.write(`mbox: this session does not hold ${service}\n`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (!held && (st.services ?? []).length >= MAX_SERVICES)
+    throw new UsageError(
+      `this session already holds ${MAX_SERVICES} service addresses, the most it may; release one first`,
+    );
+  // Liveness of a current holder: its presence entry. Without the registry, every holder counts as
+  // live, so nothing is taken from a live session by mistake.
+  let peers: PresenceEntry[] | null = null;
+  try {
+    peers = await transport.presence.list();
+  } catch (e) {
+    process.stderr.write(`warning: could not read the peer registry (${explainError(e)})\n`);
+  }
+  const barrier = process.env.AGENT_MAILBOX_TEST_CLAIM_BARRIER; // test-only fault injection
+  const res = await claimService(transport.services, holder, {
+    takeover: opts.takeover,
+    isLive: (c) => (peers ? holderLive(c, peers) : true),
+    ...(barrier && { beforeWrite: claimBarrier(barrier, sid) }),
+  });
+  if (res.status === 'taken') {
+    process.stderr.write(
+      `mbox: ${service} is held by live session ${res.by.holder}; mail to it goes there. Pass --takeover to take it over.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!held)
+    updateState(sid, (s) => ({
+      ...s,
+      services: [...new Set([...(s.services ?? []), service])].sort(),
+    }));
+  if (res.status === 'claimed' && res.replaced) {
+    const was = res.replaced;
+    const live = peers ? holderLive(was, peers) : true;
+    process.stderr.write(
+      `took ${service} over from ${live ? 'live' : 'no longer live'} session ${was.holder}${live ? ', which stops receiving its mail' : ''}\n`,
+    );
+  }
+  // An older delivery daemon does not read services: let one of this version take over.
+  if (listRegistrations().some((r) => r.sid === sid)) startDeliverd();
+  if (peers && !peers.some((p) => p.live && p.session === sid))
+    process.stderr.write(
+      `warning: this session has no live receiver (no presence entry), so ${service}'s mail waits until one runs (the delivery daemon, mbox wait or mbox watch), and another session may claim ${service} meanwhile\n`,
+    );
+  console.log(service);
+}
+
+// ---------------------------------------------------------------- services
+program
+  .command('services')
+  .description('list the claimed service addresses and the sessions holding them')
+  .action(
+    action(async () => {
+      const { transport } = await context({ needSession: false });
+      const [claims, peers] = await Promise.all([
+        transport.services.list(),
+        transport.presence.list(),
+      ]);
+      if (!claims.length) {
+        console.log('no claimed services');
+        return;
+      }
+      const rows: string[][] = [['SERVICE', 'HOLDER', 'LIVE', 'REFRESHED']];
+      for (const c of claims)
+        rows.push([
+          oneLine(c.service, 80),
+          oneLine(c.holder, 80),
+          holderLive(c, peers) ? 'yes' : 'no',
+          ago(c.lastSeen),
+        ]);
+      printTable(rows);
     }),
   );
 
@@ -995,7 +1185,7 @@ const sinceMs = (since: string): number =>
 program
   .command('inbox')
   .description(
-    'print recent messages (your addresses, broadcasts and asks in the areas you offer) without moving the watcher cursor',
+    'print recent messages (your addresses, the services you hold, broadcasts and asks in the areas you offer) without moving the watcher cursor',
   )
   .option('--since <dur>', 'how far back (e.g. 30m, 2h, 1d)', '2h')
   .action(
@@ -1005,9 +1195,12 @@ program
       const { cfg, transport, st } = await context();
       const names = [st.address, ...st.aliases];
       const areas = (st.offers ?? []).map(areaAddress);
-      const deliveries = await transport.poll([...names, BROADCAST, ...areas], {
-        lookbackMs: sinceMs(opts.since),
-      });
+      const deliveries = await transport.poll(
+        [...names, ...(st.services ?? []), BROADCAST, ...areas],
+        {
+          lookbackMs: sinceMs(opts.since),
+        },
+      );
       let n = 0;
       for (const d of deliveries) {
         const m = parseDelivery(d);
@@ -1137,7 +1330,7 @@ program
 program
   .command('show')
   .description(
-    'print one message (to this session, a broadcast or an ask in an area you offer) in full, by its id',
+    'print one message (to this session, a service it holds, a broadcast or an ask in an area you offer) in full, by its id',
   )
   .argument('<id>', 'message id, as in "[mailbox] message <id>"')
   .option('--since <dur>', 'how far back to look (e.g. 2h, 7d)', '30d')
@@ -1147,10 +1340,10 @@ program
         throw new UsageError(`--since must look like 30m, 2h or 7d (got "${opts.since}")`);
       const { transport, st } = await context();
       const areas = (st.offers ?? []).map(areaAddress);
-      const deliveries = await transport.poll([st.address, ...st.aliases, BROADCAST, ...areas], {
-        lookbackMs: sinceMs(opts.since),
-        max: Infinity,
-      });
+      const deliveries = await transport.poll(
+        [st.address, ...st.aliases, ...(st.services ?? []), BROADCAST, ...areas],
+        { lookbackMs: sinceMs(opts.since), max: Infinity },
+      );
       // Ids are chosen by senders, so several messages can share one: show each of them.
       const hits = deliveries.map(parseDelivery).filter((m) => m.id === id);
       if (!hits.length) {

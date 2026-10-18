@@ -1412,9 +1412,16 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       fa.messages().map((m) => [m.from, m.verified, m.body]),
       [[bs.address, 'bob', 'hi alice']],
     );
-    assert.match(log('p-alice'), new RegExp(`delivered 1 message to ${re(a.address)}`));
+    // The daemon logs a delivery once the inbox has closed the connection, after the inbox has it.
+    await until(
+      () => new RegExp(`delivered 1 message to ${re(a.address)}`).test(log('p-alice')),
+      "alice's daemon logs the delivery",
+    );
     assert.ok(!log('p-alice').includes(bs.address), "alice's daemon never touches bob's session");
-    assert.match(log('p-bob'), new RegExp(`delivered 1 message to ${re(bs.address)}`));
+    await until(
+      () => new RegExp(`delivered 1 message to ${re(bs.address)}`).test(log('p-bob')),
+      "bob's daemon logs the delivery",
+    );
     assert.ok(!log('p-bob').includes(a.address), "bob's daemon never touches alice's session");
     assert.match(log('p-bob'), /mailbox user bob, profile p-bob/);
 
@@ -1639,6 +1646,89 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       /A request for help in area repo:github\.com\/acme\/api/,
     );
     assert.match(fake.contents().join('\n'), /needs your own user's approval first/);
+  });
+
+  it('mail to a service the session holds is pushed into it with the rules for helpers; after its session ends, another session takes the service without --takeover', async () => {
+    const env = bobMachine();
+    const sid = 'd-svc-0001';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const dir = projectDir('svc');
+    const { address } = sessionStart(env, sid, dir, { socket: fake.path, hostPid: host.pid });
+    await until(() => peers().includes(address), 'announced');
+    const claimed = mbox(['name', '--service', 'support'], {
+      env: { ...env, AGENT_MAILBOX_SESSION: sid },
+      cwd: dir,
+    });
+    assert.equal(claimed.code, 0, claimed.stderr);
+    assert.doesNotMatch(claimed.stderr, /no live receiver/); // the daemon's receiver is live
+    const id = mail('bob.support', 'can you look at the failing deploy?');
+    await fake.waitFor((f) => f.messages().some((m) => m.id === id), 30000);
+    const m = fake.messages().find((x) => x.id === id);
+    assert.equal(m?.to, 'bob.support');
+    assert.equal(m?.verified, 'alice');
+    assert.match(
+      fake.contents().join('\n'),
+      /A request to service bob\.support, which this session holds/,
+    );
+    assert.match(fake.contents().join('\n'), /needs your own user's approval first/);
+
+    // The session ends: its claim stays, but without presence its holder is not live.
+    sessionEnd(env, sid);
+    await until(() => !peers().includes(address), 'departed');
+    const later = mail('bob.support', 'anyone there?');
+    const other = mbox(['name', '--service', 'support'], {
+      env: { ...env, AGENT_MAILBOX_SESSION: 'd-svc-0002' },
+      cwd: dir,
+    });
+    assert.equal(other.code, 0, other.stderr);
+    assert.match(
+      other.stderr,
+      new RegExp(
+        `took bob\\.support over from no longer live session ${address.replace(/\./g, '\\.')}`,
+      ),
+    );
+    const inboxOut = mbox(['inbox', '--since', '10m'], {
+      env: { ...env, AGENT_MAILBOX_SESSION: 'd-svc-0002' },
+      cwd: dir,
+    });
+    assert.match(inboxOut.stdout, new RegExp(`message ${later} from .* to bob\\.support`));
+  });
+
+  it('a takeover from a holder with a delivery in flight: once that holder acknowledges it, the new holder gets newer mail at once, not after the hold deadline', async () => {
+    // A long ack_wait: the hold for owed messages would end only after 180 s, far past this test.
+    const slow = { AGENT_MAILBOX_REDELIVER_MS: '120000' };
+    const env = bobMachine(slow);
+    const sid = 'd-svc-busy';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const dir = projectDir('svc-busy');
+    const { address } = sessionStart(env, sid, dir, { socket: fake.path, hostPid: host.pid });
+    await until(() => peers().includes(address), 'announced');
+    const run = (s: string, args: string[]) =>
+      mbox(args, { env: { ...env, AGENT_MAILBOX_SESSION: s }, cwd: dir });
+    assert.equal(run(sid, ['name', '--service', 'busy']).code, 0);
+    // The inbox holds the first delivery open: the daemon has it in flight, unacknowledged.
+    let release!: () => void;
+    fake.hold = new Promise<void>((r) => (release = r));
+    const first = mail('bob.busy', 'in flight at the takeover');
+    await fake.waitFor((f) => f.messages().some((m) => m.id === first), 30000);
+    const taken = run('d-svc-next', ['name', '--service', 'busy', '--takeover']);
+    assert.equal(taken.code, 0, taken.stderr);
+    const w = new Watcher({ ...env, ...slow }, { cwd: dir, session: 'd-svc-next' });
+    cleanup.push(() => w.stop().then(() => {}));
+    await w.waitFor(/online as/);
+    // Both pull now, and the new holder started while the first message was still owed.
+    await until(
+      async () => (await jsm.consumers.info('MBX_BOB', 'svc=busy')).num_waiting >= 2,
+      'both holders pull the service',
+    );
+    release(); // the old holder acknowledges what it had in flight
+    fake.hold = null;
+    const second = mail('bob.busy', 'after the takeover');
+    await w.waitFor(new RegExp(second), 60000);
+    assert.ok(!w.out.includes('in flight at the takeover'));
+    assert.equal(w.messages().at(-1)?.to, 'bob.busy');
   });
 
   it('a server without asks: a session that offers an area still gets its mail, and the daemon keeps serving every session', async () => {

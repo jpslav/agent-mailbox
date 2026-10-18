@@ -107,6 +107,12 @@ changes.
   `all` is reserved: it is the broadcast pseudo-address.
 - `mbox name <label>` gives a session an extra alias address; the running watcher picks it up
   within about 5 seconds.
+- A **service address** `<user>.<name>` (for example `alice.helpdesk`; `name` is `[a-z0-9-]+`, at
+  most 32 characters) names no machine and no session: at most one live session of that user
+  holds it (`mbox name --service <name>`), and mail to it goes to that session. Mail sent while
+  nobody holds it waits on the server (180 days by default) for the next holder. It has two parts
+  where a session address has three, so a two-part target is always a service address, never a
+  prefix of session addresses.
 - A **help area** names what help is about, for example `repo:github.com/acme/web` or `lang:rust`
   (lower case; letters, digits and `. _ : / @ + -`; at most 100 characters). `mbox offer <area>`
   makes asks in it reach the session (at most 20 areas per session; shown in presence and in the
@@ -129,6 +135,8 @@ NATS mapping (a transport detail):
 | broadcast from user `S`              | `mbx.all.S`                             | stream `MBX_ALL` (`mbx.all.*`) |
 | presence of a session                | KV `presence`, key `U.H.<session hash>` | stream `KV_presence`           |
 | an ask in area `A` from user `S`     | `ask.<token of A>.S`                    | stream `ASKS` (`ask.*.*`)      |
+| mail to service `U.N` from user `S`  | `mbx.U._svc.N.S`                        | stream `MBX_U` (`mbx.U.>`)     |
+| the claim on service `U.N`           | KV `presence`, key `U._svc.N`           | stream `KV_presence`           |
 
 The trailing sender token is **enforced by the server** (user `S` may only publish subjects ending
 in `.S`), so every delivery carries a verified sender user. Publishers set `Nats-Msg-Id` to the
@@ -293,6 +301,15 @@ other user account, which imports it; so `add-user`, `remove-user` and `set-shar
 `users.conf` and reload the server (twice, as for every change). The script then writes the list
 of `team` users to the `sharing` bucket, which clients read for `mbox events --all` and
 `--sharing`; the exports, not that list, decide who reads what.
+
+### Service addresses (0.7.0) need no server change
+
+Service addresses use only what a server provisioned by 0.5.8 or later already grants: their mail
+is direct mail in form (`mbx.U._svc.N.S`, covered by the import that lets `S` send to `U`, and
+stored in `U`'s own stream) and their claims are entries under `U`'s own presence keys. There is
+nothing to run on the server; `mbox-admin.sh init` of 0.7.0 changes nothing on one set up by
+0.6.1. Clients before 0.7.0 keep working beside them: they skip claims in `mbox peers`, but they
+cannot send to a service address (they report no matching peer and send nothing).
 
 ### Upgrading a server set up before 0.6.1
 
@@ -463,14 +480,16 @@ to the old address stays on the server for the old user.
 
 ```
 mbox whoami                       mbox peers
-mbox send <to> "text"             <to> = full address | unique prefix/label of a live peer | all
+mbox send <to> "text"             <to> = full address | service address | unique prefix/label of a live peer | all
 mbox send <to> --subject S --re <id> "text"        echo long | mbox send <to> -
 mbox name reviewer                mbox inbox --since 2h        mbox doctor
 mbox show <id>                    the whole message (when a delivered one was cut short)
 mbox ask <area> "question"        ask every session offering <area> (e.g. repo:github.com/acme/web)
 mbox offer <area>                 asks in <area> reach this session (alone: list); mbox unoffer <area>
-mbox guide [section]              short help: overview, send, reply, peers, asks, events, workers,
-                                  names, inbox, security, fallback, troubleshooting
+mbox name --service helpdesk      hold the service address <user>.helpdesk (--release, --takeover)
+mbox services                     every claimed service address and the session holding it
+mbox guide [section]              short help: overview, send, reply, peers, asks, services, events,
+                                  workers, names, inbox, security, fallback, troubleshooting
 mbox peers --tree                 who spawned whom      mbox status "<one line>"   (--clear)
 mbox whoami --role worker --parent <address>      describe this session (display only)
 mbox events [--user <u>|--all] [--since 1d]       what happened to sessions (events feed)
@@ -642,9 +661,26 @@ push, change settings, send out files, data or secrets) needs its own user's app
 asker's own session never gets its own ask back; `mbox inbox` and `mbox show` include asks in the
 areas the session offers. Every user can read every ask, so questions must not hold secrets.
 
+**Service addresses.** `mbox name --service helpdesk` claims `<user>.helpdesk` for the session:
+a compare-and-set write of the claim, so of two sessions claiming at once exactly one wins and the
+other is told who holds it. A claim held by a live session (one with a presence entry) is refused
+unless `--takeover`; one whose holder is not live (its session ended or crashed and its presence
+is gone) is replaced without asking. The session's receiver (the daemon, `watch` or `wait`) then
+reads the service's mail through one durable position per service, shared by whoever holds it:
+the next holder gets everything an earlier one left unacknowledged, first and in order. The
+receiver refreshes the claim with each heartbeat, claims it again if it lapsed while nobody took
+it (a laptop waking up), and checks before each service message that the claim still names its
+session; when it does not (a takeover), it hands the message back for the new holder, stops
+reading the service and drops it from the session's state. A claim is released only by
+`--release`; a session that ends keeps its claims until they lapse with its presence, but without
+presence it is not live, so anyone may take them, and a resumed session gets them back unless
+someone did. Mail to a service arrives as a block `to <user>.<name>` with the rules for helpers,
+as for asks. `mbox send` warns when no live session holds the service; `mbox services` and the
+SERVICES column of `mbox peers` show who holds what.
+
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/` (for a named profile,
 `$AGENT_MAILBOX_STATE_DIR/profiles/<name>/sessions/`): `<id>.json` (address, aliases, cwd,
-role, parent, status, offers),
+role, parent, status, offers, services),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
 (the current waiter) and `<id>.ended` (its `ended` event was written; removed by `started`). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
@@ -668,6 +704,11 @@ daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon bein
   area receives other users' asks: the block, the guide and the skill tell the model it may answer
   and review, and that acting in its environment needs its own user's approval. One user's flood
   of asks shares the stream's size cap (256 MiB by default, oldest dropped first) with everyone's.
+- **Service addresses belong to their user.** Only `alice`'s sessions can claim `alice.<name>`
+  or read its mail (it is in her stream and her presence keys); anyone can send to it, stamped
+  with their verified user, and anyone can see who holds it (`mbox services`). Which of alice's
+  sessions holds it is hers to decide: any of them may take it over. Mail to a service carries the
+  same rules for helpers as an ask.
 - **Reading is isolated by stream.** Users can read only their own stream, broadcasts, asks, the
   presence bucket and the events feeds the admin shares with the team (their own always).
   Presence records (address, cwd, host, pid, repo, branch, role, parent and status) are visible

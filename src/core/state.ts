@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, parseAddr, shortHost } from './addr.js';
 import { checkOffers } from './areas.js';
+import { checkServices } from './services.js';
 import { profileName, xdgDir } from './config.js';
 import { checkParent, checkRole, checkStatus } from './session-meta.js';
 import type { Config, CursorFile, Env, Role, SessionState, Transport } from './types.js';
@@ -150,7 +151,7 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     : [];
   // `address` is checked, and the metadata peers will see; the other fields were written by
   // ensureSession and are not re-validated.
-  const { previousAddress, offers, ...rest } = s;
+  const { previousAddress, offers, services, ...rest } = s;
   return {
     ...rest,
     aliases,
@@ -158,6 +159,10 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     parent: checkParent(s.parent),
     status: checkStatus(s.status),
     ...(offers !== undefined && { offers: checkOffers(offers) }),
+    // Only the address's own user's services: a claim is made with that user's credentials.
+    ...(services !== undefined && {
+      services: checkServices(services, parseAddr(s.address)?.user ?? ''),
+    }),
     ...(typeof previousAddress === 'string' && { previousAddress }),
   } as unknown as SessionState;
 }
@@ -255,7 +260,9 @@ export async function ensureSession({
       transport.limits.maxLabelLen(cfg.user, host),
     );
     const address = `${cfg.user}.${host}.${label}`;
+    // Services go like aliases: they belong to the old user (their claims lapse on their own).
     const { parent, ...rest } = st;
+    delete rest.services;
     const next: SessionState = {
       ...rest,
       address,
@@ -321,16 +328,37 @@ export async function ensureSession({
   return st;
 }
 
+/** Block the thread for `ms` (a short wait in a synchronous retry loop). */
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+/**
+ * Read, change and write a session's state, holding `<sid>.json.lock` meanwhile: commands and the
+ * session's receivers (which drop a service another session took over) write it from different
+ * processes, and without the lock one could write back what it read before the other's write.
+ * Waits up to about 2 s for the lock, then writes anyway (a stuck lock must not block commands).
+ */
 export function updateState(
   sid: string,
   fn: (st: SessionState) => SessionState | void,
   env: Env = process.env,
 ): SessionState {
-  const st = readState(sid, env);
-  if (!st) throw new Error(`no state for session ${sid}`);
-  const next = fn({ ...st, aliases: [...st.aliases] }) || st;
-  atomicWriteJson(statePath(sid, env), next);
-  return next;
+  const lockFile = `${statePath(sid, env)}.lock`;
+  let lock = acquireFileLock(lockFile);
+  for (let i = 0; !lock.ok && i < 200; i++) {
+    sleepSync(10);
+    lock = acquireFileLock(lockFile);
+  }
+  try {
+    const st = readState(sid, env);
+    if (!st) throw new Error(`no state for session ${sid}`);
+    const next = fn({ ...st, aliases: [...st.aliases] }) || st;
+    atomicWriteJson(statePath(sid, env), next);
+    return next;
+  } finally {
+    if (lock.ok) lock.release();
+  }
 }
 
 export function allNames(st: SessionState): string[] {
