@@ -18001,6 +18001,24 @@ var statePath = (sid, env = process.env) => path4.join(sessionsDir(env), `${sid}
 var cursorPath = (sid, env = process.env) => path4.join(sessionsDir(env), `${sid}.cursor.json`);
 var lockPath = (sid, env = process.env) => path4.join(sessionsDir(env), `${sid}.lock`);
 var waitLockPath = (sid, env = process.env) => path4.join(sessionsDir(env), `${sid}.wait.lock`);
+var endedPath = (sid, env = process.env) => path4.join(sessionsDir(env), `${sid}.ended`);
+function claimEnded(sid, env = process.env) {
+  validSid(sid);
+  try {
+    mkdirp(sessionsDir(env));
+    fs3.writeFileSync(endedPath(sid, env), (/* @__PURE__ */ new Date()).toISOString() + "\n", {
+      flag: "wx",
+      mode: 384
+    });
+    return true;
+  } catch (e) {
+    return e.code !== "EEXIST";
+  }
+}
+function clearEnded(sid, env = process.env) {
+  validSid(sid);
+  fs3.rmSync(endedPath(sid, env), { force: true });
+}
 function validSid(sid) {
   if (!SID_RE.test(sid))
     throw new Error(`invalid session id "${sid}" (allowed: letters, digits, . _ -)`);
@@ -18755,6 +18773,22 @@ async function emitEvent(transport, event, st, opts) {
   } catch (e) {
     return e ?? new Error("event not written");
   }
+}
+function emitStarted(transport, st, { sid, env = process.env, ...opts }) {
+  try {
+    clearEnded(sid, env);
+  } catch {
+  }
+  return emitEvent(transport, "started", st, opts);
+}
+async function emitEnded(transport, st, { sid, env = process.env, ...opts }) {
+  let first;
+  try {
+    first = claimEnded(sid, env);
+  } catch (e) {
+    return e ?? new Error("ended not claimed");
+  }
+  return first ? emitEvent(transport, "ended", st, opts) : null;
 }
 var ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 function checkEvent(payload, user, time) {
@@ -19511,6 +19545,13 @@ async function runDeliverd({
   const lock = acquired;
   settleStartClaim(version, env);
   log(`started (pid ${process.pid}, version ${version})`);
+  function orphanEnded(sid, address) {
+    const st = readState(sid, env);
+    if (!st) return;
+    void emitEnded(transport, st, { cfg, sid, env }).then((err) => {
+      if (err) log(`${address}: could not write the ended event (${transport.explainError(err)})`);
+    });
+  }
   const profile = profileName(env);
   log(`mailbox user ${cfg.user}${profile ? `, profile ${profile}` : ""}`);
   mkdirp(registrationsDir(env));
@@ -19740,6 +19781,7 @@ async function runDeliverd({
       if (current.hostPid && pidAlive(current.hostPid)) return;
       log(`${addr()}: session process ${current.hostPid ?? "?"} is gone; deregistered`);
       deregister(sid, env, { only: current });
+      orphanEnded(sid, addr());
       void stop({ depart: true });
     }
     function update(next) {
@@ -19864,8 +19906,10 @@ async function runDeliverd({
         continue;
       }
       if (reg.hostPid && !pidAlive(reg.hostPid)) {
-        if (deregister(reg.sid, env, { only: reg }))
+        if (deregister(reg.sid, env, { only: reg })) {
           log(`${reg.address}: session process ${reg.hostPid} is gone; deregistered`);
+          orphanEnded(reg.sid, reg.address);
+        }
         present.delete(reg.sid);
         continue;
       }
@@ -21283,7 +21327,7 @@ async function endSession({
 }) {
   validateSessionId(sid);
   const st = readState(sid, env);
-  const ended = st ? emitEvent(transport, "ended", st, { cfg, timeoutMs: 1e3 }) : null;
+  const ended = st ? emitEnded(transport, st, { cfg, sid, env, timeoutMs: 1e3 }) : null;
   const pid = stopWaiter(sid, env);
   if (pid) await awaitExit(pid, 300);
   if (st && !watcherPid(sid, env) && !waiterPid(sid, env))
@@ -22264,7 +22308,9 @@ program2.command("hook").description(
       endSession: (sid) => endSession({ sid, ...configured(), agent: adapter2.id }),
       event: async (sid, event2) => {
         const st = readState(sid);
-        if (st && cfg && transport) await emitEvent(transport, event2, st, { cfg });
+        if (!st || !cfg || !transport) return;
+        if (event2 === "started") await emitStarted(transport, st, { cfg, sid });
+        else await emitEvent(transport, event2, st, { cfg });
       },
       register: (reg) => register(reg),
       deregister: (sid) => deregister(sid),

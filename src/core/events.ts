@@ -15,8 +15,10 @@ import {
   gitInfo,
   type GitInfo,
 } from './session-meta.js';
+import { claimEnded, clearEnded } from './state.js';
 import type {
   Config,
+  Env,
   EventKind,
   FeedEntry,
   SessionEvent,
@@ -84,6 +86,48 @@ export async function emitEvent(
   } catch (e) {
     return e ?? new Error('event not written');
   }
+}
+
+/** What `emitStarted` and `emitEnded` need besides the transport and the state. */
+export interface LifecycleOptions {
+  cfg: Pick<Config, 'user'>;
+  sid: string;
+  env?: Env;
+  git?: GitInfo;
+  timeoutMs?: number;
+}
+
+/** `started`: the session is live (again), so its next end writes `ended` again. */
+export function emitStarted(
+  transport: Pick<Transport, 'events'>,
+  st: SessionState,
+  { sid, env = process.env, ...opts }: LifecycleOptions,
+): Promise<unknown> {
+  try {
+    clearEnded(sid, env);
+  } catch {
+    /* the next end may then be skipped; never fail a session start over it */
+  }
+  return emitEvent(transport, 'started', st, opts);
+}
+
+/**
+ * `ended`, at most once per start, by whoever notices first: the session-end hook, or the
+ * delivery daemon finding the session's process gone (no hook ran: a crash, a closed terminal).
+ * Resolves to null when it was written or already had been, else to the error.
+ */
+export async function emitEnded(
+  transport: Pick<Transport, 'events'>,
+  st: SessionState,
+  { sid, env = process.env, ...opts }: LifecycleOptions,
+): Promise<unknown> {
+  let first: boolean;
+  try {
+    first = claimEnded(sid, env);
+  } catch (e) {
+    return e ?? new Error('ended not claimed');
+  }
+  return first ? emitEvent(transport, 'ended', st, opts) : null;
 }
 
 /** An event as stored: written by the feed's owner, so nothing in it is trusted. */

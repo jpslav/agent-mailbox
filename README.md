@@ -555,25 +555,26 @@ under their parents; one whose parent is not live is shown at the top level and 
 is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as
 untrusted as any other. Readers keep only well-formed values.
 
-**Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended`
-(the session hooks; a compaction is not a start), `status-changed` (`mbox status`),
-`role-changed` and `parent-changed` (`mbox whoami --role/--parent`) and `done` (`mbox done
-"<summary>"`, which also sets the status). Each event carries the session's address, user, host,
-repo, branch, role, parent, status and time, never message contents; feeds keep 30 days. Writing
-one never fails or holds up a command (at most 1.5 s when the server is unreachable). `mbox
-events` reads your own feed, `--user <name>` a colleague's and `--all` yours plus every feed shared
-with the team (`--since 1d` by default, `--limit 100` newest, `--json` for one object per line). It
-is read on demand: an overseer session pulls when asked and is never woken per event. Whether
-colleagues can read your feed is up to the admin (`mbox-admin.sh set-sharing <you> team|private`,
-`team` by default); `mbox events --sharing` and `mbox doctor` show your setting. Everything but
-the user is self-asserted and display only, as in presence.
+**Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended` (the
+session hooks; a compaction is not a start; when a session's process dies without its session-end
+hook, the delivery daemon writes `ended`, once per start whoever comes first), `status-changed`
+(`mbox status`), `role-changed` and `parent-changed` (`mbox whoami --role/--parent`) and `done`
+(`mbox done "<summary>"`, which also sets the status). Each event carries the session's address,
+user, host, repo, branch, role, parent, status and time, never message contents; feeds keep 30
+days. Writing one never fails or holds up a command (at most 1.5 s when the server is unreachable).
+`mbox events` reads your own feed, `--user <name>` a colleague's and `--all` yours plus every feed
+shared with the team (`--since 1d` by default, `--limit 100` newest, `--json` for one object per
+line). It is read on demand: an overseer session pulls when asked and is never woken per event.
+Whether colleagues can read your feed is up to the admin (`mbox-admin.sh set-sharing <you>
+team|private`, `team` by default); `mbox events --sharing` and `mbox doctor` show your setting.
+Everything but the user is self-asserted and display only, as in presence.
 
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/` (for a named profile,
 `$AGENT_MAILBOX_STATE_DIR/profiles/<name>/sessions/`): `<id>.json` (address, aliases, cwd,
 role, parent, status),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
-(the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
+(the current waiter) and `<id>.ended` (its `ended` event was written; removed by `started`). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
 daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon being started),
 `deliverd.log`, `deliverd.out` (crash traces) and `paused.json`.
 

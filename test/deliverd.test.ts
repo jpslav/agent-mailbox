@@ -438,6 +438,63 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.match(later.stdout, /after death/);
   });
 
+  /** The lifecycle events bob's feed holds for `address`, oldest first. */
+  const lifecycle = (env: MachineEnv, address: string): string[] => {
+    const r = mbox(['events', '--json', '--since', '1h', '--limit', '1000'], { env });
+    assert.equal(r.code, 0, r.stderr);
+    return r.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => parseJson<{ event: string; address: string }>(l))
+      .filter((e) => e.address === address && (e.event === 'started' || e.event === 'ended'))
+      .map((e) => e.event);
+  };
+
+  it('a session whose process dies without its session-end hook gets one ended event', async () => {
+    const env = bobMachine();
+    const sid = 'd-orphan-ended-1';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const { address } = sessionStart(env, sid, projectDir('orphan'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
+    await until(() => peers().includes(address), 'announced');
+    host.kill('SIGKILL');
+    await until(() => lifecycle(env, address).includes('ended'), 'ended written by the daemon');
+    assert.deepEqual(lifecycle(env, address), ['started', 'ended']);
+    // A session-end hook that still runs afterwards writes no second one.
+    sessionEnd(env, sid);
+    assert.deepEqual(lifecycle(env, address), ['started', 'ended']);
+    // Resumed: it started again, so its next end is written again.
+    const host2 = fakeHost();
+    sessionStart(env, sid, projectDir('orphan'), { socket: fake.path, hostPid: host2.pid });
+    sessionEnd(env, sid);
+    assert.deepEqual(lifecycle(env, address), ['started', 'ended', 'started', 'ended']);
+  });
+
+  it('a session that ends normally gets one ended event, even when its process then dies', async () => {
+    const env = bobMachine();
+    const sid = 'd-normal-ended-1';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const { address } = sessionStart(env, sid, projectDir('normal'), {
+      socket: fake.path,
+      hostPid: host.pid,
+    });
+    await until(() => peers().includes(address), 'announced');
+    sessionEnd(env, sid);
+    await until(
+      () => new RegExp(`${re(address)}: deregistered`).test(logOf(env)),
+      'the daemon stopped serving it',
+    );
+    host.kill('SIGKILL');
+    // The daemon has nothing left to notice; a fresh scan of the (gone) registration is a no-op.
+    const id = mail(address, 'after the end');
+    await until(() => mbox(['--session', sid, 'show', id], { env }).code === 0, 'mail stored');
+    assert.deepEqual(lifecycle(env, address), ['started', 'ended']);
+  });
+
   it('no double delivery across a daemon restart (recorded, then killed before acknowledging)', async () => {
     const env = bobMachine();
     const sid = 'd-restart-4444';

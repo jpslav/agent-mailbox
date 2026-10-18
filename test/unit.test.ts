@@ -26,6 +26,8 @@ import { ConfigError, configPath, loadConfig, profileName } from '../src/core/co
 import { checkEvent, emitEvent, sessionEvent } from '../src/core/events.js';
 import { replaces } from '../src/core/registrations.js';
 import {
+  claimEnded,
+  clearEnded,
   cursorFits,
   ensureSession,
   envMeta,
@@ -597,6 +599,16 @@ describe('events feed', () => {
     assert.equal(checkEvent('null', 'alice', t), null);
     assert.equal(checkEvent('[1]', 'alice', t), null);
     assert.equal(checkEvent('{', 'alice', t), null);
+  });
+  it('ended is claimed once per start, in any process', () => {
+    const env = { AGENT_MAILBOX_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'amb-ended-')) };
+    assert.equal(claimEnded('s-1', env), true);
+    assert.equal(claimEnded('s-1', env), false);
+    assert.equal(claimEnded('s-2', env), true, 'per session');
+    clearEnded('s-1', env);
+    clearEnded('s-1', env); // nothing to clear: fine
+    assert.equal(claimEnded('s-1', env), true, 'a new start ends again');
+    assert.throws(() => claimEnded('../x', env));
   });
   it('emitEvent never throws and never waits past its bound', async () => {
     const fake = (publish: Events['publish']): Pick<Transport, 'events'> => ({

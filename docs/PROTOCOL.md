@@ -234,14 +234,14 @@ only:
 }
 ```
 
-| `event`          | written by                                                         |
-| ---------------- | ------------------------------------------------------------------ |
-| `started`        | the session-start hook (Claude Code: not for `source: compact`)    |
-| `ended`          | the session-end hook                                               |
-| `status-changed` | `mbox status` (set or `--clear`), when the status changes          |
-| `role-changed`   | `mbox whoami --role`, when the role changes                        |
-| `parent-changed` | `mbox whoami --parent`, when the parent changes                    |
-| `done`           | `mbox done "<summary>"`, which also sets the status to the summary |
+| `event`          | written by                                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| `started`        | the session-start hook (Claude Code: not for `source: compact`)                                            |
+| `ended`          | the session-end hook, or the delivery daemon when the session's process is gone without it; once per start |
+| `status-changed` | `mbox status` (set or `--clear`), when the status changes                                                  |
+| `role-changed`   | `mbox whoami --role`, when the role changes                                                                |
+| `parent-changed` | `mbox whoami --parent`, when the parent changes                                                            |
+| `done`           | `mbox done "<summary>"`, which also sets the status to the summary                                         |
 
 The other fields are the session's presence metadata at that moment (see "Presence entry"); an
 event never carries message contents. Writing one is best effort, bounded at 1.5 s (1 s at

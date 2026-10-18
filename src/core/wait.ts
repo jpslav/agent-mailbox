@@ -16,7 +16,7 @@
 // cursor file, then acknowledged. A waiter killed after writing but before acknowledging leaves
 // them to be delivered again by the next waiter.
 import { formatBatch } from './envelope.js';
-import { emitEvent } from './events.js';
+import { emitEnded } from './events.js';
 import { presenceRecord } from './registry.js';
 import { openReceiver } from './receiver.js';
 import type { Receiver } from './receiver.js';
@@ -294,7 +294,7 @@ export async function endSession({
 }): Promise<void> {
   validateSessionId(sid);
   const st = readState(sid, env);
-  const ended = st ? emitEvent(transport, 'ended', st, { cfg, timeoutMs: 1000 }) : null;
+  const ended = st ? emitEnded(transport, st, { cfg, sid, env, timeoutMs: 1000 }) : null;
   const pid = stopWaiter(sid, env); // it steps aside within its lock poll, without departing
   if (pid) await awaitExit(pid, 300);
   if (st && !watcherPid(sid, env) && !waiterPid(sid, env))

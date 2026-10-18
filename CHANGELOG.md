@@ -17,7 +17,9 @@ treat them as approximate.
 ### Added
 - Events feeds: each user's sessions write `started`, `ended`, `status-changed`, `role-changed`,
   `parent-changed` and `done` events (address, repo, branch, role, parent, status and time; never
-  message contents), kept 30 days. Writing one never fails a command or hook.
+  message contents), kept 30 days. Writing one never fails a command or hook. A session whose
+  process dies without its session-end hook (a crash, a closed terminal) gets its `ended` from
+  the delivery daemon; every start gets at most one `ended`.
 - `mbox events [--user <name>|--all] [--since 1d] [--limit 100] [--json]` reads your feed, a
   colleague's, or every feed shared with the team, on demand; `mbox events --sharing` shows how
   yours is shared.

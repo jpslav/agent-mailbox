@@ -15,7 +15,7 @@ import {
   writeConfig,
 } from './core/config.js';
 import { buildEnvelope, formatBlock, oneLine, parseDelivery } from './core/envelope.js';
-import { emitEvent } from './core/events.js';
+import { emitEvent, emitStarted } from './core/events.js';
 import { fileLog, runDeliverd } from './core/deliverd.js';
 import { GUIDE_SECTIONS, guideText } from './core/guide.js';
 import { pause, readPause, resume } from './core/pause.js';
@@ -1202,7 +1202,9 @@ program
         endSession: (sid) => endSession({ sid, ...configured(), agent: adapter.id }),
         event: async (sid, event) => {
           const st = readState(sid);
-          if (st && cfg && transport) await emitEvent(transport, event, st, { cfg });
+          if (!st || !cfg || !transport) return;
+          if (event === 'started') await emitStarted(transport, st, { cfg, sid });
+          else await emitEvent(transport, event, st, { cfg });
         },
         register: (reg) => register(reg),
         deregister: (sid) => deregister(sid),
