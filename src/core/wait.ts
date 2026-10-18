@@ -276,8 +276,10 @@ export async function runWait({
 
 /**
  * The agent session ended: write `ended` to the user's events feed, stop its waiter and remove its
- * presence entry (unless a `watch` owns the session, which departs by itself). Quick: an agent may
- * give this well under 2 s, so the event is written while the rest runs, with the same 1 s bound.
+ * presence entry (unless a `watch` owns the session, which departs by itself). Its service claims
+ * stay: without presence the session is not live, so any session may claim them, and a resumed
+ * session keeps them unless one did. Quick: an agent may give this well under 2 s, so the event
+ * is written while the rest runs, with the same 1 s bound.
  */
 export async function endSession({
   cfg,

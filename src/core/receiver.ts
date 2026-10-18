@@ -1,12 +1,15 @@
 // The receiving side of a session, shared by `mbox watch` (a stream of blocks on stdout),
 // `mbox wait` (one batch, then exit) and `mbox deliverd` (one receiver per registered session): the saved cursor and the ring of recently delivered ids,
-// presence (announce, heartbeat, depart), alias and metadata changes, the orphan guard, and the connection loop
+// presence (announce, heartbeat, depart), the claims on the session's service addresses (kept
+// alive with presence), alias and metadata changes, the orphan guard, and the connection loop
 // with reconnect/backoff. What happens to each message is up to the caller (onMessage).
 import fs from 'node:fs';
 import { BROADCAST } from './addr.js';
 import { areaAddress, areaOf } from './areas.js';
 import { parseDelivery } from './envelope.js';
 import { HEARTBEAT_MS, presenceRecord } from './registry.js';
+import { isService, keepClaim } from './services.js';
+import type { ClaimInput } from './services.js';
 import {
   ForeignAddressError,
   addressUser,
@@ -15,6 +18,7 @@ import {
   readCursor,
   readState,
   statePath,
+  updateState,
   writeCursor,
 } from './state.js';
 import type {
@@ -102,6 +106,12 @@ export interface OpenReceiverInput {
    * nothing more. `address` is the new one, under another user.
    */
   onReaddressed?: (address: string) => void;
+  /**
+   * Another session holds one of this session's service addresses now (it took it over, or the
+   * claim lapsed and was claimed elsewhere): the receiver has stopped reading it and removed it
+   * from the session's state.
+   */
+  onServiceLost?: (service: string) => void;
 }
 
 /** Messages to record as delivered. */
@@ -130,6 +140,7 @@ export interface Receiver {
  *   onTick()                                          every pollMs (lock upkeep)
  *   onHostGone()                                      the agent process named by hostPid exited
  *   onReaddressed(address)                            the session has another address now (stopped)
+ *   onServiceLost(service)                            another session holds that service now
  *
  * Returns {state(), commit(items), stop({depart})}. commit([{delivery, message}]) records them as
  * delivered (cursor + recently delivered ids) on disk; call it before acknowledging.
@@ -150,6 +161,7 @@ export async function openReceiver({
   onTick = () => {},
   onHostGone = () => {},
   onReaddressed = () => {},
+  onServiceLost = () => {},
 }: OpenReceiverInput): Promise<Receiver> {
   for (const a of [initial.address, ...initial.aliases])
     if (addressUser(a) !== cfg.user) throw new ForeignAddressError(a, cfg.user);
@@ -201,10 +213,11 @@ export async function openReceiver({
   /**
    * What a delivery is remembered by. Every user reads every ask and its id, so an ask's key also
    * names its area and its verified sender: mail that reuses an ask's id (or an ask that reuses a
-   * message's) cannot make the real one look already delivered.
+   * message's) cannot make the real one look already delivered. Mail to a service address is kept
+   * apart the same way.
    */
   const seenKey = (d: Delivery, m: Message): string =>
-    areaOf(d.to) !== null ? `${d.to}|${m.sender ?? ''}|${m.id}` : m.id;
+    areaOf(d.to) !== null || isService(d.to) ? `${d.to}|${m.sender ?? ''}|${m.id}` : m.id;
   function commit(items: CommitItem[]): void {
     for (const { delivery: d, message: m } of items) {
       const key = seenKey(d, m);
@@ -214,9 +227,16 @@ export async function openReceiver({
     persist();
   }
 
-  // Plus one pseudo-address per help area the session offers: asks in it arrive like mail.
+  // Plus one pseudo-address per help area the session offers (asks in it arrive like mail) and
+  // the service addresses it holds.
   const addresses = () => [
-    ...new Set([st.address, ...st.aliases, BROADCAST, ...(st.offers ?? []).map(areaAddress)]),
+    ...new Set([
+      st.address,
+      ...st.aliases,
+      BROADCAST,
+      ...(st.offers ?? []).map(areaAddress),
+      ...(st.services ?? []),
+    ]),
   ];
   const isSelf = (from: string): boolean => st.address === from || st.aliases.includes(from);
 
@@ -225,6 +245,41 @@ export async function openReceiver({
       () => {},
     );
 
+  // ---- service claims ----
+  const claimOf = (service: string): ClaimInput => ({ service, holder: st.address, session: sid });
+  // Set once adoptState exists (below).
+  let reread: () => void = () => {};
+  /** Another session holds `service` now: stop reading it (the state change resubscribes). */
+  const dropService = (service: string): void => {
+    if (!(st.services ?? []).includes(service)) return;
+    try {
+      updateState(
+        sid,
+        (s) => ({ ...s, services: (s.services ?? []).filter((x) => x !== service) }),
+        env,
+      );
+    } catch {
+      /* state file gone: the session is ending */
+    }
+    reread();
+    onServiceLost(service);
+  };
+  /**
+   * Refresh every claim the session holds (with presence: a claim lapses when its holder stops
+   * refreshing it), claiming again one that lapsed while nobody took it. A claim is never released
+   * on depart: a holder without presence is not live, so anyone may claim its services, and a
+   * session that comes back (a resume, a restarted receiver) keeps them unless someone did.
+   */
+  const keepClaims = async (): Promise<void> => {
+    for (const service of st.services ?? []) {
+      try {
+        if ((await keepClaim(transport.services, claimOf(service))) === 'lost')
+          dropService(service);
+      } catch {
+        /* tried again at the next heartbeat; the subscription checks the claim per message */
+      }
+    }
+  };
   // ---- announce ----
   await unlessAbandoned(post('announce', 5000));
   if (signal?.aborted) {
@@ -254,7 +309,8 @@ export async function openReceiver({
     }
     const aliasesChanged =
       JSON.stringify(next.aliases) !== JSON.stringify(st.aliases) ||
-      JSON.stringify(next.offers ?? []) !== JSON.stringify(st.offers ?? []);
+      JSON.stringify(next.offers ?? []) !== JSON.stringify(st.offers ?? []) ||
+      JSON.stringify(next.services ?? []) !== JSON.stringify(st.services ?? []);
     const metaChanged =
       next.role !== st.role || next.parent !== st.parent || next.status !== st.status;
     if (!aliasesChanged && !metaChanged) return false;
@@ -265,11 +321,13 @@ export async function openReceiver({
     }
     return true;
   };
+  reread = () => void adoptState();
   // Every heartbeat reads the state first, so none can put back values a command just replaced.
   timers.push(
     setInterval(() => {
       adoptState();
       void post('heartbeat', 5000);
+      void keepClaims();
     }, opt.heartbeatMs),
   );
   let lastMtime = 0;
@@ -323,6 +381,9 @@ export async function openReceiver({
       let restoredTimer: ReturnType<typeof setTimeout> | undefined;
       let stableTimer: ReturnType<typeof setTimeout> | undefined;
       try {
+        // Before every (re)subscription: the subscription reads a service only while its claim
+        // names this session, and the claim may have lapsed while the connection was down.
+        if (st.services?.length) await keepClaims();
         await transport.subscribe({
           session: sid,
           addresses: addresses(),
@@ -344,6 +405,8 @@ export async function openReceiver({
             }, opt.stableAfterMs);
           },
           onMessage: handle,
+          // Called from inside the subscription: act on it once that call has returned.
+          onServiceLost: (service) => void Promise.resolve().then(() => dropService(service)),
         });
       } catch (e) {
         if (stopping) break;

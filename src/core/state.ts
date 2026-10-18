@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, parseAddr, shortHost } from './addr.js';
 import { checkOffers } from './areas.js';
+import { checkServices } from './services.js';
 import { profileName, xdgDir } from './config.js';
 import { checkParent, checkRole, checkStatus } from './session-meta.js';
 import type { Config, CursorFile, Env, Role, SessionState, Transport } from './types.js';
@@ -150,7 +151,7 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     : [];
   // `address` is checked, and the metadata peers will see; the other fields were written by
   // ensureSession and are not re-validated.
-  const { previousAddress, offers, ...rest } = s;
+  const { previousAddress, offers, services, ...rest } = s;
   return {
     ...rest,
     aliases,
@@ -158,6 +159,10 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     parent: checkParent(s.parent),
     status: checkStatus(s.status),
     ...(offers !== undefined && { offers: checkOffers(offers) }),
+    // Only the address's own user's services: a claim is made with that user's credentials.
+    ...(services !== undefined && {
+      services: checkServices(services, parseAddr(s.address)?.user ?? ''),
+    }),
     ...(typeof previousAddress === 'string' && { previousAddress }),
   } as unknown as SessionState;
 }
@@ -255,7 +260,9 @@ export async function ensureSession({
       transport.limits.maxLabelLen(cfg.user, host),
     );
     const address = `${cfg.user}.${host}.${label}`;
+    // Services go like aliases: they belong to the old user (their claims lapse on their own).
     const { parent, ...rest } = st;
+    delete rest.services;
     const next: SessionState = {
       ...rest,
       address,

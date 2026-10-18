@@ -4,8 +4,9 @@
 //
 // ---- Transport interface (what core may rely on) ----------------------------------------------
 //
-// Addresses are the core's `<user>.<host>.<label>` strings, plus the broadcast pseudo-address 'all'
-// and a help area's pseudo-address `area:<area>` (src/core/areas.ts): mail to an area is an ask.
+// Addresses are the core's `<user>.<host>.<label>` strings and service addresses `<user>.<name>`
+// (src/core/services.ts), plus the broadcast pseudo-address 'all' and a help area's pseudo-address
+// `area:<area>` (src/core/areas.ts): mail to an area is an ask.
 //
 //   publish(to, envelope, {timeoutMs}) -> {id}
 //       Deliver `envelope` (a JSON-able object with a unique `.id`) to one address, 'all' or an area. The
@@ -37,7 +38,13 @@
 //       areas among `addresses` work the same way, in order within each area; an area the cursor
 //       has no position for is read from its oldest stored ask (a session that starts offering an
 //       area gets what was asked there within the retention). A server without asks (provisioned
-//       before them) only means no asks: mail and broadcasts are unaffected. onOpen() is
+//       before them) only means no asks: mail and broadcasts are unaffected. Service addresses
+//       among `addresses` (the session's own user's) are read from the service's own durable
+//       position, shared by whoever holds the service, with the same ordering and hand-back as
+//       the session's mail; before each message the subscription checks that the service's claim
+//       still names `session`, and when it does not (another session took it over, or it was
+//       released) it hands the message back at once, stops reading that service and calls
+//       onServiceLost(service). onOpen() is
 //       called each time the subscription is (re)established. The promise never resolves: it
 //       rejects when the connection ends, or with an AbortError when `signal` aborts. Errors with `.authProblem === true` mean
 //       credentials/permissions. Calling subscribe again with different addresses re-targets the
@@ -63,6 +70,11 @@
 //       when the server does not let this user read it (private, or no such user)
 //   events.shared() -> user[] | null  the users whose feed the admin shares with the team
 //
+//   services.read(service) -> {claim, version}     the claim on a service address (version 0: none)
+//   services.write(claim, version) -> boolean       compare-and-set: false when it changed since read
+//   services.remove(service, version) -> boolean    release, compare-and-set
+//   services.list() -> claim[]       every user's current claims
+//
 //   asksReadable() -> boolean        can this user read asks (false: a server set up before them)
 //   limits.maxLabelLen(user, host)   longest label that still forms a routable address
 //   explainError(err) -> string      human-readable message for any error thrown above
@@ -74,8 +86,8 @@
 // subscription leaves it open, and close() releases it. Without it, each subscribe() has its own.
 // `faults` are test-only knobs (TransportFaults in types.ts).
 //
-// delivery = {id, time(unix s), to ('all' | address | 'area:<area>'), sender (server-verified
-//             user), payload (string as published), cursor}
+// delivery = {id, time(unix s), to ('all' | address | service | 'area:<area>'), sender
+//             (server-verified user), payload (string as published), cursor}
 // -------------------------------------------------------------------------------------------------
 //
 // NATS mapping
@@ -86,6 +98,17 @@
 //   sharing       KV bucket `sharing`, key `team` = JSON list of the users whose feed is shared
 //   ask           ask.<area token>.<fromUser>                  stream ASKS         (ask.*.*)
 //                 (area token: 32 hex of sha256(area); readers map it back from the areas they offer)
+//   service mail  mbx.<toUser>._svc.<name>.<fromUser>          stream MBX_<TOUSER> (mbx.<user>.>)
+//   service claim KV bucket `presence`, key <user>._svc.<name>
+// Service mail to <user>.<name> is direct mail in form: the `_svc` token cannot be a host (hosts
+// are [a-z0-9-]+), the sender is the last token, and the server's existing rules apply unchanged
+// (anyone may publish mbx.*.*.*.<own name>, only <user> reads MBX_<USER>). One durable pull
+// consumer per service, `svc=<name>` on the owner's stream (a name no session id maps to: see
+// consumerName), filtered to the service's subject, is the service's position: whoever holds the
+// service reads through it, so a new holder gets what earlier holders left. Claims are entries in
+// the presence bucket that only <user> may write; compare-and-set on the entry's last sequence
+// keeps two claims from both winning, and the bucket's TTL ends a claim whose holder stops
+// refreshing it.
 // Only <user> may publish evt.<user>.*, so a feed's owner is verified by the stream it is in. The
 // stream's subject must be a wildcard, like every stream here: the server sends a push consumer's
 // deliveries to a literal stream subject (it counts as interest), so anyone could write into a
@@ -120,6 +143,7 @@ import type { KV } from '@nats-io/kv';
 import { SEG_RE } from '../addr.js';
 import { AREA_PREFIX, areaAddress, areaOf, checkOffers } from '../areas.js';
 import { checkEvent } from '../events.js';
+import { isService, parseService } from '../services.js';
 import { checkBranch, checkParent, checkRepo, checkRole, checkStatus } from '../session-meta.js';
 import type {
   Cursor,
@@ -133,6 +157,8 @@ import type {
   PresenceEntry,
   PresenceOptions,
   PresenceRecord,
+  ServiceClaim,
+  Services,
   SubscribeOptions,
   Transport,
   TransportOptions,
@@ -155,6 +181,10 @@ const ASK_PREFIX = 'ask';
 const ASK_STREAM = 'ASKS';
 /** At most this many area positions are kept in a cursor (more only after many offer changes). */
 const MAX_AREA_POSITIONS = 64;
+/** The subject token (and claim key token) of service addresses: no host can be called that. */
+const SVC = '_svc';
+/** Service consumers are `svc=<name>`: consumerName never yields an '=', so no session's can be. */
+const SVC_CONSUMER = 'svc=';
 
 // ---------------------------------------------------------------- names
 function parseAddr(s: unknown): [string, string, string] | null {
@@ -177,9 +207,15 @@ export const eventsStreamFor = (user: string): string =>
 export const areaToken = (area: string): string =>
   crypto.createHash('sha256').update(area).digest('hex').slice(0, 32);
 
+/** The subject service mail to `user`'s service `name` from `fromUser` is stored under. */
+const serviceSubject = (user: string, name: string, fromUser: string): string =>
+  `${PREFIX}.${user}.${SVC}.${name}.${fromUser}`;
+
 export function subjectFor(to: string, fromUser: string): string {
   if (!SEG_RE.test(fromUser || '')) throw new Error(`invalid sender user "${fromUser}"`);
   if (to === 'all') return `${PREFIX}.all.${fromUser}`;
+  const svc = parseService(to);
+  if (svc) return serviceSubject(svc.user, svc.name, fromUser);
   const area = areaOf(to);
   if (area !== null) return `${ASK_PREFIX}.${areaToken(area)}.${fromUser}`;
   if (to.startsWith(AREA_PREFIX)) throw new Error(`invalid area in "${to}"`);
@@ -197,6 +233,10 @@ export function parseSubject(subject: string): { to: string; sender: string } | 
   const [, second, third] = t;
   if (t.length === 3 && second === 'all' && third !== undefined && SEG_RE.test(third))
     return { to: 'all', sender: third };
+  if (t.length === 5 && third === SVC) {
+    const to = `${second}.${t[3]}`;
+    return isService(to) && SEG_RE.test(t[4]!) ? { to, sender: t[4]! } : null; // length is 5
+  }
   if (t.length === 5 && t.slice(1).every((x) => SEG_RE.test(x)))
     return { to: t.slice(1, 4).join('.'), sender: t[4]! }; // length is 5
   return null;
@@ -209,7 +249,10 @@ export function parseAskSubject(subject: string): { token: string; sender: strin
   return SEG_RE.test(t[2] ?? '') ? { token: t[1]!, sender: t[2]! } : null; // length is 3
 }
 
-/** Durable consumer name for a session id (consumer names may not contain '.', '*', '>' or spaces). */
+/**
+ * Durable consumer name for a session id (consumer names may not contain '.', '*', '>' or spaces).
+ * Never contains '=', which keeps the service consumers' names (`svc=<name>`) apart.
+ */
 export function consumerName(sid: string): string {
   const s = String(sid);
   if (/^[A-Za-z0-9_-]{1,64}$/.test(s)) return s;
@@ -220,6 +263,71 @@ const sessionShort = (sid: string): string =>
   crypto.createHash('sha256').update(String(sid)).digest('hex').slice(0, 12);
 export const presenceKey = (user: string, host: string, sid: string): string =>
   `${user}.${host}.${sessionShort(sid)}`;
+
+/** The presence-bucket key of a service's claim: `<user>._svc.<name>`. */
+const claimKey = (service: string): string => {
+  const p = parseService(service);
+  if (!p) throw new Error(`invalid service address "${service}"`);
+  return `${p.user}.${SVC}.${p.name}`;
+};
+
+/** A claim entry as stored: written by the service's user, so nothing in it is trusted. */
+interface UntrustedClaim {
+  service?: unknown;
+  holder?: unknown;
+  session?: unknown;
+  at?: unknown;
+}
+
+/**
+ * A stored claim entry -> a checked claim, or null when the entry is not a well-formed claim. The
+ * key says whose service it is (only that user may write it): the claim must name that service
+ * and a session address of that user. Claims have no `address` field, so readers of presence
+ * entries (this version and every earlier one) skip them.
+ */
+function checkClaim(key: string, data: Uint8Array, timeMs: number): ServiceClaim | null {
+  const t = key.split('.');
+  if (t.length !== 3 || t[1] !== SVC) return null;
+  const service = `${t[0]}.${t[2]}`;
+  const p = parseService(service);
+  if (!p) return null;
+  let j: UntrustedClaim | null;
+  try {
+    j = JSON.parse(td.decode(data)) as UntrustedClaim | null;
+  } catch {
+    return null;
+  }
+  if (!j || typeof j !== 'object' || j.service !== service) return null;
+  if (parseAddr(j.holder)?.[0] !== p.user) return null;
+  if (typeof j.session !== 'string' || !j.session || j.session.length > 256) return null;
+  return {
+    service,
+    holder: j.holder as string, // parseAddr accepted it, so it is a string
+    session: j.session,
+    at: typeof j.at === 'string' && j.at.length <= 64 ? j.at : null,
+    lastSeen: timeMs,
+  };
+}
+
+/** The claim on `service` and its entry's version (0: no entry), read with one direct get. */
+async function readClaim(
+  jsm: JetStreamManager,
+  service: string,
+): Promise<{ claim: ServiceClaim | null; version: number }> {
+  const key = claimKey(service);
+  let m: Awaited<ReturnType<JetStreamManager['direct']['getMessage']>>;
+  try {
+    m = await jsm.direct.getMessage(BUCKET_STREAM, { last_by_subj: `$KV.${BUCKET}.${key}` });
+  } catch (e) {
+    if (/message not found|no message/i.test(String(shape(e)?.message)))
+      return { claim: null, version: 0 };
+    throw tag(e);
+  }
+  if (!m) return { claim: null, version: 0 };
+  const op = m.header.get('KV-Operation');
+  const claim = op === 'DEL' || op === 'PURGE' ? null : checkClaim(key, m.data, m.time.getTime());
+  return { claim, version: m.seq };
+}
 
 const maxLabelLen = (user: string, host: string): number =>
   MAX_ADDR_LEN - (user.length + 1 + host.length + 1);
@@ -277,6 +385,11 @@ const isAskPermission = (e: unknown): boolean => {
     String(subject || '').startsWith(`${ASK_PREFIX}.`)
   );
 };
+/** A compare-and-set write that lost: the entry is no longer at the expected sequence. */
+const isWrongLastSeq = (e: unknown): boolean =>
+  shape(e)?.code === 10071 ||
+  shape(e)?.api_error?.err_code === 10071 ||
+  /wrong last sequence/i.test(String(shape(e)?.message || ''));
 const isNotFound = (e: unknown): boolean =>
   shape(e)?.code === 10014 ||
   shape(e)?.api_error?.err_code === 10014 ||
@@ -371,6 +484,21 @@ interface NatsCursor {
   k?: Record<string, number>;
   /** Where to start when there is no sequence yet (ISO-8601). */
   t: string;
+}
+
+/** One durable consumer a subscription reads (the session's own, or a claimed service's). */
+interface Puller {
+  messages: ConsumerMessages | null;
+  /** Takes each message; ends (resolves) only when a service is lost, else rejects. */
+  loop: Promise<void> | null;
+  /** Mail held until the messages owed from the consumer's previous reader are back. */
+  gate: {
+    held: Map<number, JsMsg>; // by stream sequence; a redelivery replaces the older copy
+    back: Set<number>; // owed sequences received
+    timer: ReturnType<typeof setTimeout>;
+  } | null;
+  /** Offering what the gate held; later mail waits for it. */
+  released: Promise<void>;
 }
 
 /** What `createTransport` needs from the client config (`Config` satisfies it). */
@@ -514,7 +642,8 @@ export function createTransport(
         shape(e)?.name === 'NoRespondersError' ||
         /no responders|jetstream is not enabled/i.test(String(shape(e)?.message))
       ) {
-        const who = to === 'all' ? 'broadcast' : `user "${parseAddr(to)?.[0]}"`; // `to` is a valid address: subjectFor checked it
+        const who =
+          to === 'all' ? 'broadcast' : `user "${parseAddr(to)?.[0] ?? parseService(to)?.user}"`; // `to` is a valid address: subjectFor checked it
         // eslint-disable-next-line preserve-caught-error -- the cause is left off on purpose: explainError() classifies an error by its cause's code, and this message must stand alone
         throw new Error(
           `the server has no mailbox stream for ${who}, so nothing stored the message. Check the address, or ask the admin to run mbox-admin.sh add-user.`,
@@ -644,11 +773,16 @@ export function createTransport(
     redeliverAfterMs = 60000,
     broadcastPollMs = 30000,
     settleMs = 3000,
+    onServiceLost,
   }: SubscribeOptions): Promise<never> {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const name = consumerName(session);
     const areas = [...new Set(addresses.map(areaOf).filter((a): a is string => a !== null))];
-    const own = addresses.filter((a) => a !== 'all' && areaOf(a) === null);
+    const svcAddrs = [...new Set(addresses.filter(isService))].sort();
+    for (const a of svcAddrs)
+      if (parseService(a)?.user !== user)
+        throw new Error(`service ${a} does not belong to user ${user}`);
+    const own = addresses.filter((a) => a !== 'all' && areaOf(a) === null && !isService(a));
     for (const a of own)
       if (parseAddr(a)?.[0] !== user)
         throw new Error(`address ${a} does not belong to user ${user}`);
@@ -724,23 +858,15 @@ export function createTransport(
         }
       })().catch(() => {});
     }
-    let messages: ConsumerMessages | null = null;
     let wakeSub: Subscription | null = null;
     const askSubs: Subscription[] = [];
-    let directLoop: Promise<never> | null = null;
+    // One per durable consumer read: the session's own, and one per claimed service.
+    const pullers: Puller[] = [];
 
     // Deferred acknowledgements still in flight (see the interface: {ackAfter}).
     const pendingAcks = new Set<Promise<unknown>>();
     // Ending: deliveries not acknowledged, handed back together and oldest first (see `finally`).
     const handBack: JsMsg[] = [];
-    // Mail held until the messages owed from the session's previous reader are back (see below).
-    let gate: {
-      held: Map<number, JsMsg>; // by stream sequence; a redelivery replaces the older copy
-      back: Set<number>; // owed sequences received
-      timer: ReturnType<typeof setTimeout>;
-    } | null = null;
-    // Offering what the gate held; later mail waits for it.
-    let released: Promise<void> = Promise.resolve();
     let handedBack = false;
     const giveBack = (m: JsMsg): void => {
       if (!handedBack) {
@@ -764,15 +890,22 @@ export function createTransport(
     try {
       const js = jetstream(nc, { checkAPI: false, timeout: 10000 });
       const jsm = await step(jetstreamManager(nc, { checkAPI: false, timeout: 10000 }));
+      /** A durable consumer's info, or null when there is none. */
+      const infoOf = async (consumer: string): Promise<ConsumerInfo | null> => {
+        try {
+          return await step(jsm.consumers.info(ownStream, consumer));
+        } catch (e) {
+          if (!isNotFound(e)) throw tag(e);
+          return null;
+        }
+      };
+      /** Does the claim on `service` name this session? */
+      const holds = async (service: string): Promise<boolean> =>
+        (await readClaim(jsm, service)).claim?.session === session;
 
       // Durable consumer: reuse (re-targeting its filter if aliases changed), or (re)create it at
       // the remembered position.
-      let info: ConsumerInfo | null = null;
-      try {
-        info = await step(jsm.consumers.info(ownStream, name));
-      } catch (e) {
-        if (!isNotFound(e)) throw tag(e);
-      }
+      const info = await infoOf(name);
       if (info) {
         const have = [
           ...(info.config.filter_subjects ||
@@ -806,106 +939,189 @@ export function createTransport(
           }),
         );
       }
-      const consumer = await step(js.consumers.get(ownStream, name));
 
-      // In-order hand-over between readers. Messages the session's previous reader received and
-      // never acknowledged (a daemon that handed over, was killed, or lost its connection) are
-      // still owed to the session: handed back, they return at once (though not always in the
-      // order they were handed back); otherwise the server sends them again after ack_wait, and
-      // anything newer it sends in the meantime would overtake them. So until every owed message
-      // is back (or a deadline a little past ack_wait passes), what arrives is held, and then all
-      // of it goes to onMessage in stream order. After that, arrival order is stream order: this
-      // subscription is the session's only reader and gets new mail in stream order.
-      const owed = info?.num_ack_pending ?? 0;
-      const owedUpTo = info?.delivered.stream_seq ?? 0;
+      // Each claimed service's durable consumer, the service's position whoever holds it. Made on
+      // first use to read everything stored for the service (the mail queued while nobody held
+      // it), and given no inactivity limit shorter than the stream keeps mail: one recreated while
+      // acknowledged mail is still stored would deliver it again. A service this session does not
+      // hold (taken over, released, or lapsed) is not read at all.
+      const svcPulls: Array<{ service: string; consumer: string; info: ConsumerInfo | null }> = [];
+      let maxAgeNs: number | null = null;
+      for (const service of svcAddrs) {
+        if (!(await step(holds(service)))) {
+          onServiceLost?.(service);
+          continue;
+        }
+        const svcName = parseService(service)!.name; // svcAddrs are service addresses
+        const consumer = `${SVC_CONSUMER}${svcName}`;
+        const sinfo = await infoOf(consumer);
+        if (sinfo) {
+          if (sinfo.config.ack_wait !== ackWait)
+            await step(jsm.consumers.update(ownStream, consumer, { ack_wait: ackWait }));
+        } else {
+          maxAgeNs ??= (await step(jsm.streams.info(ownStream))).config.max_age ?? 0;
+          await step(
+            jsm.consumers.add(ownStream, {
+              name: consumer,
+              durable_name: consumer,
+              description: `mailbox service ${service}`,
+              filter_subjects: [serviceSubject(user, svcName, '*')],
+              ack_policy: 'explicit',
+              ack_wait: ackWait,
+              max_deliver: -1,
+              replay_policy: 'instant',
+              deliver_policy: 'all',
+              ...(maxAgeNs > 0 ? { inactive_threshold: maxAgeNs } : {}),
+            }),
+          );
+        }
+        svcPulls.push({ service, consumer, info: sinfo });
+      }
       if (faults.startDelayMs) await step(sleep(faults.startDelayMs)); // test-only: a slow start
 
-      // One message to onMessage (or, ending, back to the server).
-      const take = async (m: JsMsg): Promise<void> => {
-        // Ending: what the client had already received goes back unseen.
-        if (stopped) {
-          giveBack(m);
-          return;
-        }
-        // What onMessage resolved to: nothing, or {ackAfter} to defer the acknowledgement.
-        const res = (await serial(async () => {
-          cur.u = m.seq;
-          return onMessage(
-            delivery(
-              {
-                subject: m.subject,
-                seq: m.seq,
-                stream: ownStream,
-                timeMs: Math.floor(m.info.timestampNanos / NS),
-                data: m.data,
-                msgId: m.headers?.get('Nats-Msg-Id') || null,
-              },
-              snapshot(),
-            ),
-          );
-        })) as { ackAfter?: Promise<unknown> } | null | undefined;
-        if (
-          res &&
-          typeof res === 'object' &&
-          res.ackAfter &&
-          typeof res.ackAfter.then === 'function'
-        ) {
-          // Deferred: ack once the caller has delivered it; on rejection hand it back (while
-          // running, with a short delay, so this subscription does not get it straight back;
-          // while ending, with the rest, in order).
-          const settled = res.ackAfter.then(
-            () => m.ackAck({ timeout: 5000 }).catch(() => {}),
-            () => {
-              if (stopped) return giveBack(m);
-              try {
-                m.nak(1000);
-              } catch {
-                /* connection gone: redelivered after ack_wait */
-              }
-            },
-          );
-          pendingAcks.add(settled);
-          void settled.finally(() => pendingAcks.delete(settled));
-          return;
-        }
-        await m.ackAck({ timeout: 5000 }).catch(() => {});
-      };
+      // In-order hand-over between readers, per durable consumer. Messages the previous reader
+      // received and never acknowledged (a daemon that handed over, was killed, or lost its
+      // connection; for a service, also its previous holder) are still owed: handed back, they
+      // return at once (though not always in the order they were handed back); otherwise the
+      // server sends them again after ack_wait, and anything newer it sends in the meantime would
+      // overtake them. So until every owed message is back (or a deadline a little past ack_wait
+      // passes), what arrives is held, and then all of it goes to onMessage in stream order. After
+      // that, arrival order is stream order: this subscription is the consumer's only reader and
+      // gets new mail in stream order. `service` is set for a service's consumer: each message is
+      // offered only while the service's claim names this session.
+      const pull = async (
+        consumerName: string,
+        cinfo: ConsumerInfo | null,
+        service: string | null,
+      ): Promise<void> => {
+        const consumer = await step(js.consumers.get(ownStream, consumerName));
+        const owed = cinfo?.num_ack_pending ?? 0;
+        const owedUpTo = cinfo?.delivered.stream_seq ?? 0;
+        const p: Puller = { messages: null, loop: null, gate: null, released: Promise.resolve() };
+        let lost = false;
+        pullers.push(p);
 
-      // Everything held, in stream order, ahead of whatever arrives next.
-      const openGate = (): void => {
-        if (!gate) return;
-        clearTimeout(gate.timer);
-        const ready = [...gate.held.values()].sort((a, b) => a.seq - b.seq);
-        gate = null;
-        released = (async () => {
-          for (const m of ready) await take(m);
-        })();
-        released.catch((e) => fail(tag(e)));
-      };
-      if (owed > 0) {
-        gate = {
-          held: new Map(),
-          back: new Set(),
-          timer: setTimeout(openGate, redeliverAfterMs + Math.max(5000, redeliverAfterMs / 2)),
-        };
-        gate.timer.unref?.();
-      }
-
-      messages = await consumer.consume({ max_messages: 64, abort_on_missing_resource: true });
-      directLoop = (async () => {
-        for await (const m of messages) {
-          if (gate && !stopped) {
-            gate.held.set(m.seq, m);
-            if (m.seq <= owedUpTo) gate.back.add(m.seq);
-            if (gate.back.size >= owed) openGate();
-            continue;
+        // The service is no longer this session's: read no more of it (stopped first, so that the
+        // server does not hand this message straight back), and hand the message back at once, for
+        // its holder. Whatever the pull had already received comes through here too.
+        const lose = (m: JsMsg): void => {
+          if (!lost) {
+            lost = true;
+            try {
+              p.messages?.stop();
+            } catch {
+              /* already ended */
+            }
+            onServiceLost?.(service!); // only a service's consumer is ever lost
           }
-          await released;
-          await take(m);
+          try {
+            m.nak();
+          } catch {
+            /* connection gone: redelivered after ack_wait */
+          }
+        };
+
+        // One message to onMessage (or, ending, back to the server).
+        const take = async (m: JsMsg): Promise<void> => {
+          // Ending: what the client had already received goes back unseen.
+          if (stopped) {
+            giveBack(m);
+            return;
+          }
+          if (service !== null) {
+            const mine = !lost && (await holds(service));
+            if (stopped) return giveBack(m);
+            if (!mine) return lose(m);
+          }
+          // What onMessage resolved to: nothing, or {ackAfter} to defer the acknowledgement.
+          const res = (await serial(async () => {
+            // The session's position in its own stream; a service's lives in the service's consumer.
+            if (service === null) cur.u = m.seq;
+            return onMessage(
+              delivery(
+                {
+                  subject: m.subject,
+                  seq: m.seq,
+                  stream: ownStream,
+                  timeMs: Math.floor(m.info.timestampNanos / NS),
+                  data: m.data,
+                  msgId: m.headers?.get('Nats-Msg-Id') || null,
+                },
+                snapshot(),
+              ),
+            );
+          })) as { ackAfter?: Promise<unknown> } | null | undefined;
+          if (
+            res &&
+            typeof res === 'object' &&
+            res.ackAfter &&
+            typeof res.ackAfter.then === 'function'
+          ) {
+            // Deferred: ack once the caller has delivered it; on rejection hand it back (while
+            // running, with a short delay, so this subscription does not get it straight back;
+            // while ending, with the rest, in order).
+            const settled = res.ackAfter.then(
+              () => m.ackAck({ timeout: 5000 }).catch(() => {}),
+              () => {
+                if (stopped) return giveBack(m);
+                try {
+                  m.nak(1000);
+                } catch {
+                  /* connection gone: redelivered after ack_wait */
+                }
+              },
+            );
+            pendingAcks.add(settled);
+            void settled.finally(() => pendingAcks.delete(settled));
+            return;
+          }
+          await m.ackAck({ timeout: 5000 }).catch(() => {});
+        };
+
+        // Everything held, in stream order, ahead of whatever arrives next.
+        const openGate = (): void => {
+          const gate = p.gate;
+          if (!gate) return;
+          clearTimeout(gate.timer);
+          const ready = [...gate.held.values()].sort((a, b) => a.seq - b.seq);
+          p.gate = null;
+          p.released = (async () => {
+            for (const m of ready) await take(m);
+          })();
+          p.released.catch((e) => fail(tag(e)));
+        };
+        if (owed > 0) {
+          p.gate = {
+            held: new Map(),
+            back: new Set(),
+            timer: setTimeout(openGate, redeliverAfterMs + Math.max(5000, redeliverAfterMs / 2)),
+          };
+          p.gate.timer.unref?.();
         }
-        throw new Error('message stream ended');
-      })();
-      directLoop.catch((e) => fail(tag(e)));
+
+        const messages = await consumer.consume({
+          max_messages: 64,
+          abort_on_missing_resource: true,
+        });
+        p.messages = messages;
+        p.loop = (async () => {
+          for await (const m of messages) {
+            const gate = p.gate;
+            if (gate && !stopped) {
+              gate.held.set(m.seq, m);
+              if (m.seq <= owedUpTo) gate.back.add(m.seq);
+              if (gate.back.size >= owed) openGate();
+              continue;
+            }
+            await p.released;
+            await take(m);
+          }
+          if (!lost) throw new Error('message stream ended'); // a lost service just stops
+        })();
+        p.loop.catch((e) => fail(tag(e)));
+      };
+      await pull(name, info, null);
+      for (const sp of svcPulls) await pull(sp.consumer, sp.info, sp.service);
 
       // Broadcasts: catch up with direct gets from the remembered sequence; a core subscription on
       // the broadcast subjects is only a wake-up signal (plus a slow poll as a safety net).
@@ -1029,18 +1245,20 @@ export function createTransport(
       signal?.removeEventListener('abort', onAbort);
       fail(new Error('closed'));
       // Mail still held for the owed messages was never offered: it goes back with the rest.
-      if (gate) {
-        clearTimeout(gate.timer);
-        handBack.push(...gate.held.values());
-        gate = null;
+      for (const p of pullers) {
+        if (!p.gate) continue;
+        clearTimeout(p.gate.timer);
+        handBack.push(...p.gate.held.values());
+        p.gate = null;
       }
-      // 1. Take nothing new. What the client already holds still runs through directLoop, which
-      //    collects it for handing back; the loop ends after it.
-      try {
-        messages?.stop();
-      } catch {
-        /* already ended */
-      }
+      // 1. Take nothing new. What the client already holds still runs through each puller's loop,
+      //    which collects it for handing back; the loop ends after it.
+      for (const p of pullers)
+        try {
+          p.messages?.stop();
+        } catch {
+          /* already ended */
+        }
       for (const sub of [wakeSub, ...askSubs])
         try {
           sub?.unsubscribe();
@@ -1051,7 +1269,12 @@ export function createTransport(
         // 2. Let the deliveries already handed out settle: acknowledged, or handed back.
         const settle = new Promise((r) => setTimeout(r, settleMs).unref?.());
         await Promise.race([
-          Promise.all([directLoop?.catch(() => {}), released.catch(() => {})]),
+          Promise.all(
+            pullers.flatMap((p) => [
+              (p.loop ?? Promise.resolve()).catch(() => {}),
+              p.released.catch(() => {}),
+            ]),
+          ),
           settle,
         ]);
         if (pendingAcks.size) await Promise.race([Promise.allSettled([...pendingAcks]), settle]);
@@ -1104,15 +1327,18 @@ export function createTransport(
             max,
           ))
             out.push({ m });
-        else
+        else {
+          const svc = parseService(a);
+          if (svc && svc.user !== user) continue; // another user's service: not in our stream
           for (const m of await directAll(
             s.jsm,
             ownStream,
             { start_time },
-            `${PREFIX}.${a}.*`,
+            svc ? serviceSubject(user, svc.name, '*') : `${PREFIX}.${a}.*`,
             max,
           ))
             out.push({ m });
+        }
       } catch (e) {
         throw tag(e);
       }
@@ -1203,6 +1429,61 @@ export function createTransport(
       }
       peers.sort((a, b) => b.lastSeen - a.lastSeen);
       return peers;
+    },
+  };
+
+  // ---- service addresses (claims in the presence bucket) ----
+  const services: Services = {
+    async read(service) {
+      const s = await conn();
+      return readClaim(s.jsm, service);
+    },
+    async write(claim, version) {
+      if (parseService(claim.service)?.user !== user)
+        throw new Error(`service ${claim.service} does not belong to user ${user}`);
+      const s = await conn();
+      const kv = await kvOf(s);
+      try {
+        await kv.put(claimKey(claim.service), JSON.stringify(claim), { previousSeq: version });
+        return true;
+      } catch (e) {
+        if (isWrongLastSeq(e)) return false;
+        throw tag(e);
+      }
+    },
+    async remove(service, version) {
+      if (parseService(service)?.user !== user)
+        throw new Error(`service ${service} does not belong to user ${user}`);
+      const s = await conn();
+      const kv = await kvOf(s);
+      try {
+        // A delete marker, never a purge: the bucket refuses rollups.
+        await kv.delete(claimKey(service), { previousSeq: version });
+        return true;
+      } catch (e) {
+        if (isWrongLastSeq(e)) return false;
+        throw tag(e);
+      }
+    },
+    async list() {
+      const s = await conn();
+      const out: ServiceClaim[] = [];
+      let it: Awaited<ReturnType<JetStreamManager['direct']['getLastMessagesFor']>>;
+      try {
+        it = await s.jsm.direct.getLastMessagesFor(BUCKET_STREAM, {
+          multi_last: [`$KV.${BUCKET}.*.${SVC}.*`],
+        });
+        for await (const m of it) {
+          const op = m.header.get('KV-Operation');
+          if (op === 'DEL' || op === 'PURGE') continue;
+          const c = checkClaim(m.subject.slice(`$KV.${BUCKET}.`.length), m.data, m.time.getTime());
+          if (c) out.push(c);
+        }
+      } catch (e) {
+        if (/no results|not found/i.test(String(shape(e)?.message))) return out; // no claims at all
+        throw tag(e);
+      }
+      return out.sort((a, b) => (a.service < b.service ? -1 : a.service > b.service ? 1 : 0));
     },
   };
 
@@ -1431,6 +1712,7 @@ export function createTransport(
     now,
     presence,
     events,
+    services,
     asksReadable,
     limits: { maxLabelLen },
     explainError,

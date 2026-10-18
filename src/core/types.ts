@@ -30,7 +30,10 @@ export interface Envelope {
   id: string;
   /** The sender's session address (self-asserted; the verified part is the user). */
   from: string;
-  /** The recipient address, or 'all' for a broadcast. */
+  /**
+   * The recipient: a session address, a service address `<user>.<name>`, 'all' for a broadcast or
+   * `area:<area>` for an ask.
+   */
   to: string;
   agent: string;
   subject: string | null;
@@ -54,7 +57,11 @@ export interface Delivery {
   id: string;
   /** Unix seconds. */
   time: number;
-  /** 'all', the recipient address, or an area's pseudo-address `area:<area>` (an ask). */
+  /**
+   * 'all', the recipient session address, a service address `<user>.<name>`, or an area's
+   * pseudo-address `area:<area>` (an ask). Always where the transport read it, never the envelope's
+   * claim.
+   */
   to: string;
   sender: string | null;
   payload: string;
@@ -93,6 +100,12 @@ export interface SessionState {
   status?: string | null;
   /** The help areas this session offers (`mbox offer`), sorted; absent until set. */
   offers?: string[];
+  /**
+   * The service addresses (`<user>.<name>`) this session has claimed (`mbox name --service`),
+   * sorted; absent until set. The claims on the server decide who holds them; this is what the
+   * session's receivers read and keep claimed.
+   */
+  services?: string[];
   /**
    * The address the session had before it was given this one because the mailbox user changed
    * (see ensureSession). A cursor written without an address predates that change.
@@ -281,9 +294,11 @@ export interface SubscribeOptions {
   /** Names the durable position, so mail that arrives while nobody is listening is queued. */
   session: string;
   /**
-   * This session's addresses (and aliases), plus 'all' for broadcasts and `area:<area>` for each
+   * This session's addresses (and aliases), plus 'all' for broadcasts, `area:<area>` for each
    * help area it offers (asks in it are read like broadcasts: no server-side acknowledgement, the
-   * saved cursor is the position; an area new to the cursor is read from the oldest stored ask).
+   * saved cursor is the position; an area new to the cursor is read from the oldest stored ask) and
+   * the service addresses `<user>.<name>` it has claimed (read from the service's own durable
+   * position, and only while the claim names `session`).
    */
   addresses: string[];
   /** Only used when the durable position has to be rebuilt. */
@@ -295,6 +310,11 @@ export interface SubscribeOptions {
   signal?: AbortSignal;
   /** Called each time the subscription is (re)established. */
   onOpen?: () => void | Promise<void>;
+  /**
+   * A service address among `addresses` is not (or no longer) claimed by `session`: its mail is
+   * left for the holder, and this subscription stops reading it.
+   */
+  onServiceLost?: (service: string) => void;
   /** Calls never overlap; resolving acknowledges (or `{ackAfter}` later). At-least-once. */
   onMessage: (delivery: Delivery) => DeliveryResult | Promise<DeliveryResult>;
   /** An unacknowledged delivery is offered again after this long (default 60 s). */
@@ -334,6 +354,53 @@ export interface Presence {
   list(): Promise<PresenceEntry[]>;
 }
 
+// ---------------------------------------------------------------- service addresses
+
+/**
+ * A claim on a service address, as written by the session that holds it. The field names and their
+ * order are the wire format (test/golden-presence.test.ts).
+ */
+export interface ServiceClaimRecord {
+  /** The service address, `<user>.<name>`. */
+  service: string;
+  /** The holding session's address. */
+  holder: string;
+  /** The holding session's id: what says which session holds it. */
+  session: string;
+  /** ISO-8601, when the holder last wrote it (self-asserted). */
+  at: string;
+}
+
+/** A claim as `services.read()` / `services.list()` return it: checked, with the server's time. */
+export interface ServiceClaim extends Omit<ServiceClaimRecord, 'at'> {
+  /** The writer's claim; null when malformed. */
+  at: string | null;
+  /** When the server stored it (ms since the epoch). */
+  lastSeen: number;
+}
+
+/**
+ * Claims on service addresses: one entry per service, written only by its user's sessions, with
+ * compare-and-set versions so that two sessions claiming at once cannot both win. An entry expires
+ * when its holder stops refreshing it (with presence), so a claim is only as live as its holder.
+ */
+export interface Services {
+  /**
+   * The current claim on `service` and the entry's version: 0 when there is no entry at all.
+   * `claim` is null when the entry is released or malformed (then the version still counts).
+   */
+  read(service: string): Promise<{ claim: ServiceClaim | null; version: number }>;
+  /**
+   * Write `claim` (a service of the own user) if the entry is still at `version`; false when it
+   * changed since it was read.
+   */
+  write(claim: ServiceClaimRecord, version: number): Promise<boolean>;
+  /** Release `service` if its entry is still at `version`; false when it changed meanwhile. */
+  remove(service: string, version: number): Promise<boolean>;
+  /** Every user's current claims (well-formed ones only). */
+  list(): Promise<ServiceClaim[]>;
+}
+
 /** One line of `mbox doctor`. */
 export interface DiagnoseCheck {
   ok: boolean;
@@ -342,14 +409,14 @@ export interface DiagnoseCheck {
 }
 
 /**
- * The broker, as the core sees it. Addresses are `<user>.<host>.<label>` strings, plus the
- * broadcast pseudo-address 'all'. The contract is written out in src/core/transport/nats.ts,
+ * The broker, as the core sees it. Addresses are `<user>.<host>.<label>` strings and service
+ * addresses `<user>.<name>`, plus the broadcast pseudo-address 'all'. The contract is written out in src/core/transport/nats.ts,
  * the one implementation.
  */
 export interface Transport {
   /**
-   * Store `envelope` durably for one address, 'all' or an area (`area:<area>`, an ask); a retry
-   * with the same id is deduped.
+   * Store `envelope` durably for one address (a session's or a service's), 'all' or an area
+   * (`area:<area>`, an ask); a retry with the same id is deduped.
    */
   publish(to: string, envelope: Envelope, opts?: { timeoutMs?: number }): Promise<{ id: string }>;
   /** Deliver mail for the addresses plus broadcasts. Never resolves: it rejects when the connection ends, or with an AbortError when `signal` aborts. */
@@ -360,6 +427,7 @@ export interface Transport {
   now(): Promise<Cursor>;
   presence: Presence;
   events: Events;
+  services: Services;
   /** Whether this user can read asks: false on a server set up before help areas. */
   asksReadable(): Promise<boolean>;
   limits: {
