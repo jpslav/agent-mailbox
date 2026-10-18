@@ -6,7 +6,16 @@ import fs from 'node:fs';
 import { BROADCAST } from './addr.js';
 import { parseDelivery } from './envelope.js';
 import { HEARTBEAT_MS, presenceRecord } from './registry.js';
-import { pidAlive, readCursor, readState, statePath, writeCursor } from './state.js';
+import {
+  ForeignAddressError,
+  addressUser,
+  cursorFits,
+  pidAlive,
+  readCursor,
+  readState,
+  statePath,
+  writeCursor,
+} from './state.js';
 import type {
   Config,
   Delivery,
@@ -86,6 +95,12 @@ export interface OpenReceiverInput {
   onStatus?: (kind: 'lost' | 'restored', hint?: string) => void;
   onTick?: () => void;
   onHostGone?: () => void;
+  /**
+   * The session was given another address while this receiver ran (the mailbox user changed, see
+   * ensureSession): the receiver has stopped and departed from the old address, and serves
+   * nothing more. `address` is the new one, under another user.
+   */
+  onReaddressed?: (address: string) => void;
 }
 
 /** Messages to record as delivered. */
@@ -102,7 +117,9 @@ export interface Receiver {
 }
 
 /**
- * Start receiving for session `sid` (whose state `st` exists, see ensureSession).
+ * Start receiving for session `sid` (whose state `st` exists, see ensureSession). Throws
+ * ForeignAddressError when one of the session's addresses belongs to another user than `cfg.user`:
+ * those credentials cannot read its mail, and retrying would never help.
  *
  *   onMessage(delivery, message, fresh) -> what the transport's onMessage returns (its resolution,
  *       or {ackAfter}, acknowledges). `fresh` is false for an id delivered before (redelivery) and
@@ -110,6 +127,7 @@ export interface Receiver {
  *   onStatus('lost', hint) | onStatus('restored')    connection state changes (once each)
  *   onTick()                                          every pollMs (lock upkeep)
  *   onHostGone()                                      the agent process named by hostPid exited
+ *   onReaddressed(address)                            the session has another address now (stopped)
  *
  * Returns {state(), commit(items), stop({depart})}. commit([{delivery, message}]) records them as
  * delivered (cursor + recently delivered ids) on disk; call it before acknowledging.
@@ -129,9 +147,13 @@ export async function openReceiver({
   onStatus = () => {},
   onTick = () => {},
   onHostGone = () => {},
+  onReaddressed = () => {},
 }: OpenReceiverInput): Promise<Receiver> {
+  for (const a of [initial.address, ...initial.aliases])
+    if (addressUser(a) !== cfg.user) throw new ForeignAddressError(a, cfg.user);
   const opt = receiverOptions(env);
   let st = initial;
+  let moved = false; // the session has another address: stop, and write no more cursors
   const stop = new AbortController();
   let stopping: Promise<void> | null = null;
   let streamAc: AbortController | null = null;
@@ -146,12 +168,22 @@ export async function openReceiver({
   const unlessAbandoned = <T>(p: Promise<T>): Promise<T | undefined> =>
     signal ? Promise.race([p, abandoned]) : p;
 
-  const saved = readCursor(sid, env);
+  const found = readCursor(sid, env);
+  const saved = found && cursorFits(found, initial) ? found : null;
   const cur = saved || { cursor: await unlessAbandoned(transport.now()), seen: {} };
   const seen = new Map<string, number>(Object.entries(cur.seen || {}));
   let cursor = cur.cursor;
 
+  // Set once stopReceiver exists (below); `moved` keeps it to one call.
+  let readdressed: (next: SessionState) => void = () => {};
   const persist = () => {
+    // A cursor is a position in one user's mail: once the session has another address it must not
+    // overwrite the fresh cursor ensureSession wrote for that one.
+    const disk = readState(sid, env);
+    if (moved || (disk && disk.address !== st.address)) {
+      if (disk) readdressed(disk);
+      return;
+    }
     // A small ring: keep the newest ids only (Map keeps insertion order).
     while (seen.size > MAX_SEEN) {
       const oldest = seen.keys().next();
@@ -159,7 +191,7 @@ export async function openReceiver({
       seen.delete(oldest.value);
     }
     try {
-      writeCursor(sid, { cursor, seen: Object.fromEntries(seen) }, env);
+      writeCursor(sid, { cursor, seen: Object.fromEntries(seen), address: st.address }, env);
     } catch {
       /* disk issue: dedupe still in memory */
     }
@@ -203,6 +235,10 @@ export async function openReceiver({
   const adoptState = (): boolean => {
     const next = readState(sid, env);
     if (!next) return false; // state file briefly missing
+    if (next.address !== st.address) {
+      readdressed(next);
+      return false;
+    }
     const aliasesChanged = JSON.stringify(next.aliases) !== JSON.stringify(st.aliases);
     const metaChanged =
       next.role !== st.role || next.parent !== st.parent || next.status !== st.status;
@@ -338,6 +374,15 @@ export async function openReceiver({
     })();
     return stopping;
   }
+
+  readdressed = (next) => {
+    if (moved) return;
+    moved = true;
+    const from = st.address;
+    void stopReceiver({ depart: true }).then(() => {
+      if (next.address !== from) onReaddressed(next.address);
+    });
+  };
 
   return { state: () => st, commit, stop: stopReceiver };
 }

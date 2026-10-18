@@ -13,11 +13,38 @@ export function xdgDir(envVar: string, fallback: string, env: Env = process.env)
   return v && path.isAbsolute(v) ? v : path.join(os.homedir(), fallback);
 }
 
+/** A profile name, as `--profile` and AGENT_MAILBOX_PROFILE take it. */
+export const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * The selected profile (AGENT_MAILBOX_PROFILE, which `--profile` sets), or null for the default
+ * one: unset, empty and "default" all mean the default profile. An invalid name throws rather than
+ * falling back to the default profile, which may be someone else's identity.
+ */
+export function profileName(env: Env = process.env): string | null {
+  const v = (env.AGENT_MAILBOX_PROFILE ?? '').trim();
+  if (!v || v === 'default') return null;
+  if (!PROFILE_RE.test(v))
+    throw new ConfigError(
+      `profile "${v.slice(0, 40)}" is invalid (allowed: a-z 0-9 -, starting with a letter or digit, at most 32 characters)`,
+    );
+  return v;
+}
+
+/**
+ * The client config file: `profiles/<name>.json` for a named profile, else AGENT_MAILBOX_CONFIG,
+ * else `config.json`. A named profile together with AGENT_MAILBOX_CONFIG is ambiguous (which
+ * identity?), so it is an error, not a silent choice.
+ */
 export function configPath(env: Env = process.env): string {
-  return (
-    env.AGENT_MAILBOX_CONFIG ||
-    path.join(xdgDir('XDG_CONFIG_HOME', '.config', env), 'agent-mailbox', 'config.json')
-  );
+  const profile = profileName(env);
+  if (profile && env.AGENT_MAILBOX_CONFIG)
+    throw new ConfigError(
+      `both a profile (${profile}) and AGENT_MAILBOX_CONFIG are set; unset one of them`,
+    );
+  const dir = path.join(xdgDir('XDG_CONFIG_HOME', '.config', env), 'agent-mailbox');
+  if (profile) return path.join(dir, 'profiles', `${profile}.json`);
+  return env.AGENT_MAILBOX_CONFIG || path.join(dir, 'config.json');
 }
 
 /**
@@ -54,6 +81,13 @@ export const splitServers = (s: unknown): string[] =>
  * -> {servers[], user, password, maxBytes|null}
  */
 export function loadConfig(env: Env = process.env): Config {
+  const profile = profileName(env);
+  // A named profile is an identity: its user and password come from its file alone, so the
+  // environment cannot quietly mix one person's profile with another's credentials.
+  if (profile && (env.AGENT_MAILBOX_USER || env.AGENT_MAILBOX_PASSWORD))
+    throw new ConfigError(
+      `profile ${profile} takes its user and password from ${configPath(env)}; unset AGENT_MAILBOX_USER and AGENT_MAILBOX_PASSWORD`,
+    );
   const file = readConfigFile(env) || {};
   const servers = env.AGENT_MAILBOX_SERVERS
     ? splitServers(env.AGENT_MAILBOX_SERVERS)
@@ -70,7 +104,7 @@ export function loadConfig(env: Env = process.env): Config {
   if (missing.length) {
     throw new ConfigError(
       `mailbox is not configured (missing ${missing.join(', ')}; looked in ${configPath(env)}). ` +
-        'Run: mbox setup --servers <url> --user <name> --password-stdin',
+        `Run: mbox setup${profile ? ` --profile ${profile}` : ''} --servers <url> --user <name> --password-stdin`,
     );
   }
   if (!USER_RE.test(user)) throw new ConfigError(`user "${user}" is invalid (allowed: a-z 0-9 -)`);
