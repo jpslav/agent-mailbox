@@ -138,12 +138,40 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   a core subscription on `mbx.all.*` is only a wake-up.
 - Ending a subscription (a receiver stopping, or a delivery daemon handing over to a newer one)
   stops the pull consumer first, waits for the deliveries already handed out to be acknowledged,
-  then naks everything else without delay, in stream-sequence order, and flushes, so the
-  session's next reader on the same durable consumer gets those messages first and in order. A
-  message the server sends in the instant the pull ends is seen by nobody and is redelivered
-  after `ack_wait`.
+  then naks everything else without delay, in stream-sequence order, and flushes. A message the
+  server sends in the instant the pull ends is seen by nobody and is redelivered after `ack_wait`.
+- Starting a subscription reads the consumer's `num_ack_pending` and `delivered.stream_seq`. If
+  messages are still unacknowledged (handed back by the previous reader, lost in that instant, or
+  held by a reader that crashed or lost its connection), everything the pull receives is held
+  until each of them is back (each sequence up to `delivered.stream_seq`, counted once), then
+  offered sorted by stream sequence; after that, arrival order is stream order. The hold gives up
+  after `ack_wait` plus max(5 s, half of `ack_wait`) (90 s with the default) and offers what it
+  has, sorted. The server does not always redeliver nak'd messages in the order they were nak'd,
+  so the sort matters even after a clean hand-back.
 - Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
   deleted when the session ends.
+
+### Delivery order
+
+What a session is guaranteed (DECISIONS.md, "Delivery order across readers"):
+
+- **Direct mail** reaches the session in stream order: the order the server stored it, which for
+  one sender is the order of sending (`mbox send` waits for the server's acknowledgement). This
+  holds within one reader and across readers: daemon handover, a daemon killed or restarted,
+  reconnects, alias changes, `mbox wait` and `mbox watch` taking turns.
+- **Exception:** a message unacknowledged when a reader starts that does not come back within
+  the hold (above) is shown when it does, after newer mail; in practice that needs a server that
+  redelivers late. (A previous reader that acknowledges a message after the next one started only
+  makes the hold run to its end.)
+- **Broadcasts** are read by sequence from the saved cursor, so they arrive in order among
+  themselves. Between a broadcast and direct mail there is no order guarantee, even from one
+  sender.
+- **Cost:** none while a session has a single reader. When a reader starts with messages
+  outstanding, newer mail waits for them: a clean handover hands them back at once (no visible
+  delay); a crash, or a message lost in the instant a reader stopped, delays newer mail by up to
+  about `ack_wait` (60 s; the hold ends after 90 s at most). Batching and throughput are
+  unchanged (no `max_ack_pending` limit).
+- Messages carry no sequence number in what the model sees; the wire formats are unchanged.
 
 ### Per-user permission block
 

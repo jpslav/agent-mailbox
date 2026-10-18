@@ -72,7 +72,13 @@ function reviveDeliverd(): void {
 // Every transport created by a command; closed before the process exits.
 const transports: Transport[] = [];
 function openTransport(cfg: Config, opts?: TransportOptions): Transport {
-  const t = createTransport(cfg, opts);
+  const env = process.env;
+  const faults = {
+    loseHandBack: Number(env.AGENT_MAILBOX_TEST_LOSE_HANDBACK) || 0,
+    handBackDelayMs: Number(env.AGENT_MAILBOX_TEST_HANDBACK_DELAY_MS) || 0,
+    startDelayMs: Number(env.AGENT_MAILBOX_TEST_START_DELAY_MS) || 0,
+  };
+  const t = createTransport(cfg, { ...opts, faults }); // faults: test-only, all zero otherwise
   transports.push(t);
   return t;
 }

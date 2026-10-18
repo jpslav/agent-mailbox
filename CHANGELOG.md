@@ -12,6 +12,17 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-17
+
+### Fixed
+- Direct mail now reaches a session in send order across a delivery-daemon handover, a daemon
+  that was killed or restarted, and reconnects. Mail the previous reader held unacknowledged
+  could come back after newer mail (seen as "3" before "2"); a reader that starts while earlier
+  mail is still out now holds newer mail until that is back, then delivers all of it in order.
+  After a clean handover there is no visible delay; after a crash, newer mail can wait up to
+  about a minute. Stopping such a reader still takes effect at once. Broadcasts stay in order
+  among themselves, not relative to direct mail.
+
 ## [0.5.4] - 2026-10-17
 
 ### Fixed
