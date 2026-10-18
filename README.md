@@ -7,7 +7,7 @@ delivery daemon posts it into the session's own inbox socket.
 Claude Code is the only supported agent today; the layout is built so others can follow.
 
 There is no custom server. The broker is a single open-source [NATS](https://nats.io) server with
-JetStream (file-backed streams, a KV bucket for presence, per-user permissions), behind a small
+JetStream (file-backed streams, a KV bucket for presence, an account per user), behind a small
 transport interface. This repo adds the `mbox` CLI, a Claude Code plugin and server helper scripts.
 
 ## Requirements
@@ -219,18 +219,20 @@ people you intend, without opening a port to the internet:
 On Linux, start the service after Tailscale is up (the unit orders itself after
 `tailscaled.service`; it also retries on failure).
 
-### Users and permissions
+### Users and accounts
 
 One NATS user per human, names `[a-z0-9-]+` (`all` is reserved). Users live in
-`$MBOX_CONF_DIR/users.d/<name>.conf`; `users.conf` is regenerated from them on every change and the
-server is reloaded with `nats-server --signal reload=<pid>` (SIGHUP, read from `pid_file`; existing
-connections stay up, removed users are disconnected).
+`$MBOX_CONF_DIR/users.d/<name>.conf` (name and bcrypt hash); `users.conf` is regenerated from them
+on every change and the server is reloaded with `nats-server --signal reload=<pid>` (SIGHUP, read
+from `pid_file`; existing connections stay up, removed users are disconnected). The script reloads
+twice, because nats-server wires a new account's imports only on the second reload
+(docs/DECISIONS.md).
 
 ```sh
 server/mbox-admin.sh add-user bob       # prints the line bob runs on each machine
 server/mbox-admin.sh list-users
 server/mbox-admin.sh remove-user bob [--delete-stream]
-server/mbox-admin.sh permissions bob    # show the block without changing anything
+server/mbox-admin.sh permissions bob    # show bob's account and imports without changing anything
 ```
 
 `add-user` generates a 32-character password, stores only its bcrypt hash (`nats server passwd`,
@@ -242,35 +244,59 @@ direct get on, message delete and purge denied), and prints:
 printf '%s\n' '<password>' | mbox setup --servers nats://100.x.y.z:4222 --user bob --password-stdin
 ```
 
-The admin user (`mbx_admin`, full permissions; its password is in `$MBOX_CONF_DIR/admin.creds`,
-mode 0600) is only used by `mbox-admin.sh`. Every mailbox user gets exactly this (shown for `bob`):
+The NATS layout (docs/PROTOCOL.md, "Accounts, imports and permissions", has the full lists):
 
-```
-publish allow:
-  mbx.*.*.*.bob                        send direct mail; the last token must be the sender
-  mbx.all.bob                          broadcast, stamped with the sender
-  $JS.API.INFO                         account info (mbox doctor)
-  $JS.API.STREAM.INFO.MBX_BOB          own stream position (new sessions, doctor)
-  $JS.API.STREAM.INFO.MBX_ALL          broadcast stream position (new sessions)
-  $JS.API.CONSUMER.DURABLE.CREATE.MBX_BOB.*   create / re-target own session consumers
-  $JS.API.CONSUMER.INFO.MBX_BOB.*
-  $JS.API.CONSUMER.MSG.NEXT.MBX_BOB.*  pull own mail
-  $JS.ACK.MBX_BOB.>                    ack own mail
-  $JS.API.DIRECT.GET.MBX_BOB           mbox inbox, doctor read-back
-  $JS.API.DIRECT.GET.MBX_ALL           read broadcasts (no consumer on the shared stream)
-  $JS.API.DIRECT.GET.KV_presence       list presence
-  $JS.API.DIRECT.GET.KV_presence.$KV.presence.>
-  $KV.presence.bob.>                   write own presence entries only
-subscribe allow:
-  mbx.all.*                            broadcast wake-ups
-  _INBOX_bob.>                         private reply inbox (the client's inboxPrefix)
-```
+- The **stream account** `MAILBOX` holds JetStream, every stream, the presence bucket and the admin
+  user (`mbx_admin`, full rights; its password is in `$MBOX_CONF_DIR/admin.creds`, mode 0600,
+  used only by `mbox-admin.sh`).
+- Every mailbox user has an **account of their own**, `USER_<name>`, without JetStream. It imports
+  from `MAILBOX` exactly what the client needs: sending mail, broadcasts and presence entries on
+  subjects that end in the user's own name; consumer create, info, pull and ack, stream info and
+  direct get on the user's own stream; read-only direct gets on `MBX_ALL` and the presence bucket;
+  account info; and broadcast wake-ups. `MAILBOX` exports each of these only to the accounts that
+  may import it.
+- Inside their account, each user also gets a permission block with the same list (defense in
+  depth; it is also what `mbox doctor`'s isolation check sees).
 
-Everything else is denied, including stream create/update/delete/purge, message delete, consumer
-list/delete, any access to other users' streams, consumers or reply inboxes, and consumers on
-`MBX_ALL` or `KV_presence`. `test/isolation.test.ts` proves each of these against a real server,
-including that a push consumer on your own stream cannot deliver into someone else's stream with a
-forged sender token. `mbox doctor` repeats the key negative check from the client side.
+Everything else is out of reach: stream create/update/delete/purge, message delete, consumer
+list/delete, any access to other users' streams, consumers or reply inboxes, consumers on
+`MBX_ALL` or `KV_presence`, and any traffic in other accounts. Because a reply to a user's request
+is delivered inside that user's own account, a hostile reply subject cannot land in anyone's
+stream either. `test/isolation.test.ts` proves each of these against a real server, once with the
+permission block and once without it (the account boundary alone), including reply subjects aimed
+at every stream and push consumers aimed at other streams or the JetStream API.
+
+### Upgrading a server set up before 0.5.8
+
+Servers provisioned by `mbox-admin.sh` 0.5.7 or earlier keep every user in the stream account.
+That layout lets a user forge mail that shows another user as `verified-user` (see the 0.5.8
+changelog entry). To upgrade, on the mailbox host, as the user that runs `mbox-admin.sh`:
+
+1. Install the new `server/mbox-admin.sh` (Linux: `/usr/local/bin/mbox-admin.sh`, as in
+   `install.sh`). Back up `$MBOX_CONF_DIR` and the JetStream store as under Backups, if you like;
+   the upgrade does not touch the store.
+2. Run `mbox-admin.sh init` (with the same `MBOX_CONF_DIR` as always). It prints:
+
+   ```
+   upgrading to per-user accounts; saved the previous users.conf and users.d/ in <conf>/pre-accounts-backup (for a rollback)
+   stream MBX_ALL already exists (kept)
+   stream MBX_ALL now republishes broadcast headers to mbxwake.all.* (wake-ups)
+   kv bucket presence already exists (kept)
+   reloaded nats-server (pid <pid>; twice, so that new accounts get their imports)
+   ```
+
+   Password hashes are kept, so nobody needs a new password. The reload disconnects every mailbox
+   user once (their account changed); clients reconnect on their own within seconds and resume
+   from their positions. Mail sent meanwhile waits in the streams. No client update is needed.
+
+3. Check: `mbox-admin.sh init` again prints `users.conf unchanged: no server reload needed`;
+   `mbox-admin.sh permissions <name>` shows the account; on a client, `mbox doctor` passes.
+
+`init` can be re-run at any point if it was interrupted (a `users.conf.pending` file marks a
+config the server has not reloaded yet). To roll back, restore `users.conf` and `users.d/` from
+`pre-accounts-backup/`, reload twice (`nats-server --signal reload=<pid>`, or
+`systemctl reload agent-mailbox-nats`) and reinstall the previous `mbox-admin.sh`; the broadcast
+republish it added to `MBX_ALL` is harmless and can stay. Rolling back re-opens the forgery.
 
 ### Backups
 
@@ -548,7 +574,10 @@ daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon bein
 ## Security model and limits
 
 - **The sender user is verified; the sender session is not.** The server enforces the trailing
-  sender token, so `verified-user` is trustworthy as far as the server and its admin are. Which of
+  sender token: each user's account can publish mail only on subjects ending in their own name,
+  and replies to their requests stay inside that account. So `verified-user` is trustworthy as
+  far as the server and its admin are (on servers upgraded to per-user accounts, 0.5.8 or later;
+  see "Upgrading a server set up before 0.5.8"). Which of
   that user's sessions sent a message (`from`'s host and label) is still self-asserted. Treat every
   body as untrusted: the watcher prints a reminder on each message and neutralizes body lines that
   start with `[mailbox]` (so a body cannot forge block boundaries); the skill tells Claude to treat

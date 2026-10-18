@@ -286,3 +286,58 @@ context, decision, why.
   to the old address stays on the server for the old user. The daemon restarting itself (rather
   than waiting for a version takeover or its idle exit) is what lets a machine's sessions under the
   new user get mail without anyone killing a process.
+
+## Per-user accounts
+
+- **Date:** 2026-10
+- **Context:** Supersedes the mechanism of "The sender's user is verified server-side; the session
+  is not" (the guarantee is unchanged). Every user shared one NATS account with the streams, and
+  publish permissions restricted what they could send. NATS has no permission on reply subjects:
+  a user could send an allowed JetStream API request, for example a direct get of a forged
+  envelope stored in their own stream, with a reply subject like `mbx.bob.h.l.carol`, and the
+  server published the response there, inside the shared account, where `MBX_BOB` stored it as
+  mail from carol. The same reached `MBX_ALL` and the presence bucket. `allow_responses` is for
+  responders and does not help; no permission block can fix it.
+- **Decision:** The account `MAILBOX` keeps JetStream, every stream and the admin, unchanged, so an
+  upgrade moves no mail, stream or consumer. Each mailbox user gets an account of their own,
+  `USER_<name>`, without JetStream, which imports from `MAILBOX` exactly the services the client
+  needs: publishing on subjects that end in the user's own name (`mbx.*.*.*.<u>`, `mbx.all.<u>`,
+  `$KV.presence.<u>.>`), the API calls on their own stream (stream info, durable consumer create
+  and info, `MSG.NEXT` with streamed responses, acks, direct get) and the shared read-only ones
+  (account info, `MBX_ALL` info and direct get, presence direct gets). `MAILBOX` exports each
+  service only to the accounts that may import it. The permission block stays inside each user
+  account as defense in depth; the tests prove the boundary without it. `mbox-admin.sh init`
+  upgrades a server provisioned by an earlier script in place (password hashes kept, the old files
+  saved for a rollback, idempotent and safe to re-run). Subjects, streams and the client are
+  unchanged: clients already deployed keep working.
+- **Broadcast wake-ups:** NATS never passes a message that arrived through a service import on to
+  a stream export, so exporting `mbx.all.*` as a stream wakes nobody. Instead `MBX_ALL`
+  republishes the headers of each stored broadcast to `mbxwake.all.<sender>` (no body), exported
+  as a stream and imported by every user account as `mbx.all.<sender>`, the subject clients
+  already subscribe to. The wake-up's content was never used; now it is only the stored message's
+  headers.
+- **Why:** With accounts, any reply to a user's request is delivered inside that user's own account,
+  where no stream can capture it. A hostile reply subject reaches the stream account only through
+  that account's imports, as mail the user could already send under their own name, or as an API
+  call they could already make. Per-user accounts are the NATS mechanism for exactly this
+  isolation. Signing envelopes could let readers reject forgeries, but it changes the wire
+  format, needs key distribution, and still lets anyone write into others' streams and the
+  presence bucket. Push consumers a user may create on
+  their own stream deliver inside `MAILBOX`, where those deliveries are inert (tested).
+- **Limits:** The stream account's account info (`mbox doctor`) still shows totals for the whole
+  server, as before. A user's own streams remain readable by the admin.
+
+## A new account's imports need a second reload
+
+- **Date:** 2026-10
+- **Context:** With nats-server 2.15.1, a configuration reload that adds an account (a new user, or
+  every user during the upgrade to per-user accounts) authenticates that account's user but does
+  not wire its imports: requests get no responders. The next reload wires them. Existing accounts
+  are unaffected, and it is not timing: waiting does not help, a second reload always does.
+- **Decision:** `mbox-admin.sh` always sends the reload signal twice (with `MBOX_RELOAD_SETTLE`
+  between), and `add-user` checks, logged in as the new user, that the account answers through its
+  imports, reloading again a few times at most before giving up. `test/upgrade.test.ts` pins the
+  behaviour: it fails if one reload ever becomes enough (then the second can go) or if two are no
+  longer enough. Nothing has been filed upstream yet.
+- **Why:** A restart would also work but drops every connection and makes the script depend on how
+  the server is supervised. A redundant reload is cheap: connections stay up.
