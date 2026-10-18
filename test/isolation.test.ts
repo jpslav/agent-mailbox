@@ -89,19 +89,17 @@ async function foreignWrites(
       const m = await jsm.streams.getMessage(s, { seq }).catch(() => null);
       if (!m) continue; // replaced (presence keeps one entry per key)
       const t = m.subject.split('.');
-      // A push delivery that some stream captures keeps the stored message's own subject, so it
-      // is stored under the consumer owner's name, wherever it lands (see the push-consumer test);
-      // readers of a feed or the sharing list ignore subjects that are not theirs.
-      const writer =
-        s.startsWith('EVT_') && t[0] === 'evt'
-          ? t.length === 3 && `EVT_${(t[1] ?? '').toUpperCase()}` === s
-            ? t[1]
-            : '(not this feed)'
-          : s === 'KV_sharing' && m.subject.startsWith('$KV.sharing.')
-            ? '(admin)'
-            : m.subject.startsWith('$KV.presence.')
-              ? t[2]
-              : t[t.length - 1];
+      // A feed or the sharing bucket holds only its own subjects: anything else stored there is
+      // foreign, whoever's name it carries (see the push-consumer test for the one tolerated case).
+      const writer = s.startsWith('EVT_')
+        ? t.length === 3 && t[0] === 'evt' && `EVT_${(t[1] ?? '').toUpperCase()}` === s
+          ? t[1]
+          : '(not this feed)'
+        : s === 'KV_sharing'
+          ? '(the admin, or not the sharing list)'
+          : m.subject.startsWith('$KV.presence.')
+            ? t[2]
+            : t[t.length - 1];
       if (writer === user) own++;
       else foreign.push(`${s}#${seq} ${m.subject}`);
     }
@@ -349,7 +347,16 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'no push consumer delivered: the test proves nothing',
       );
       for (const sub of listening) sub.unsubscribe();
-      assert.deepEqual((await foreignWrites(jsm, since, 'alice')).foreign, []);
+      // With the admin listening, a feed or the sharing bucket captures the deliveries aimed at it;
+      // they keep alice's own mail subject, which their readers ignore (feeds are read as
+      // evt.<owner>.*, the list as its one key). In production nothing listens, so nothing is
+      // delivered at all ("events feed isolation" proves that).
+      const tolerated = /^(EVT_BOB|KV_sharing)#\d+ mbx\.alice\.laptop\.x\.alice$/;
+      const { foreign } = await foreignWrites(jsm, since, 'alice');
+      assert.deepEqual(
+        foreign.filter((f) => !tolerated.test(f)),
+        [],
+      );
       assert.deepEqual(await streamNames(), namesBefore);
       assert.ok((await jsm.consumers.info('MBX_BOB', 'bobsess')).name === 'bobsess');
       // Without interest in the stream account, a consumer aimed at the wake-up export delivers
@@ -1040,6 +1047,45 @@ describe('events feed isolation', { skip: SERVER.skip }, () => {
       for (const [subject, body] of probes) await denied(subject, body);
       await unanswered(probes);
       await subDenied('$KV.sharing.>');
+    });
+    it('deliver into a feed or the sharing list through a push consumer, with nothing listening', async () => {
+      // Production: nothing in the stream account subscribes to a feed's or the list's subjects,
+      // and a stream with a wildcard subject does not count as a listener. The control, a stream on
+      // a literal subject, does capture: the check could see a delivery.
+      await jsm.streams.add({ name: 'TST_LIT', subjects: ['tst.lit'] });
+      try {
+        const targets = ['evt.bob.box', 'evt.carol.box', 'evt.alice.box', '$KV.sharing.team'];
+        const before = await Promise.all([...FEEDS, 'KV_sharing'].map(count));
+        for (const [nc, user] of [
+          [alice, 'alice'],
+          [mallory, 'mallory'],
+        ] as const) {
+          const S = `MBX_${user.toUpperCase()}`;
+          await jetstream(nc, { checkAPI: false }).publish(`mbx.${user}.h.p.${user}`, ev('bob', 3));
+          let n = 0;
+          for (const target of [...targets, 'tst.lit'])
+            await nc.request(
+              `$JS.API.CONSUMER.DURABLE.CREATE.${S}.push${++n}`,
+              enc({
+                stream_name: S,
+                config: {
+                  durable_name: `push${n}`,
+                  deliver_subject: target,
+                  ack_policy: 'none',
+                  deliver_policy: 'all',
+                  filter_subject: `mbx.${user}.h.p.*`,
+                },
+              }),
+              { timeout: 15000 },
+            );
+        }
+        for (let i = 0; i < 300 && (await count('TST_LIT')) < 2; i++) await sleep(100);
+        assert.equal(await count('TST_LIT'), 2, 'the control stream captured nothing');
+        await sleep(1500);
+        assert.deepEqual(await Promise.all([...FEEDS, 'KV_sharing'].map(count)), before);
+      } finally {
+        await jsm.streams.delete('TST_LIT');
+      }
     });
     it('reply-inject into a feed or the sharing list with any request they may send', async () => {
       // As on main for the mail streams: an allowed request whose reply subject is another

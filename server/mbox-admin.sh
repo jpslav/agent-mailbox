@@ -137,12 +137,13 @@ user_names() {
 # Functions below that loop, or that callers' loops call, prefix their variables with their own
 # initials: POSIX sh has no local variables, and a shared name would clobber the caller's.
 
-# $1's events feed sharing: team or private (no file, or anything else in it: team).
+# $1's events feed sharing: team when there is no file or it says exactly `team`; anything else in
+# it is private (an access decision fails closed).
 sharing_of() {
-  if [ -f "$USERS_DIR/$1.sharing" ] && [ "$(cat "$USERS_DIR/$1.sharing")" = private ]; then
-    echo private
-  else
+  if [ ! -f "$USERS_DIR/$1.sharing" ] || [ "$(cat "$USERS_DIR/$1.sharing")" = team ]; then
     echo team
+  else
+    echo private
   fi
 }
 
@@ -467,14 +468,15 @@ await_user() {
 add_stream() {
   # $1 name, $2 subjects, then extra `nats stream add` flags. STREAM_AGE / STREAM_BYTES, when set,
   # replace the mailbox's retention and size cap.
-  name=$1; subjects=$2; shift 2
-  age=${STREAM_AGE:-$MAX_AGE}; bytes=${STREAM_BYTES:-$MAX_BYTES}
-  if "$NATS" stream info "$name" >/dev/null 2>&1; then echo "stream $name already exists (kept)"; return; fi
-  "$NATS" stream add "$name" --subjects "$subjects" --storage file --retention limits --discard old \
-    --max-age "$age" --max-bytes "$bytes" --max-msgs=-1 --max-msgs-per-subject=-1 --max-msg-size=-1 \
+  # Its own variable names: callers keep theirs (cmd_add_user's $name is the user).
+  as_name=$1; as_subjects=$2; shift 2
+  as_age=${STREAM_AGE:-$MAX_AGE}; as_bytes=${STREAM_BYTES:-$MAX_BYTES}
+  if "$NATS" stream info "$as_name" >/dev/null 2>&1; then echo "stream $as_name already exists (kept)"; return; fi
+  "$NATS" stream add "$as_name" --subjects "$as_subjects" --storage file --retention limits --discard old \
+    --max-age "$as_age" --max-bytes "$as_bytes" --max-msgs=-1 --max-msgs-per-subject=-1 --max-msg-size=-1 \
     --dupe-window 2m --replicas 1 --allow-direct --deny-delete --deny-purge --no-allow-rollup \
     --description "agent-mailbox" "$@" --defaults >/dev/null
-  echo "created stream $name ($subjects, file storage, max-age $age, max-bytes $bytes, discard old)"
+  echo "created stream $as_name ($as_subjects, file storage, max-age $as_age, max-bytes $as_bytes, discard old)"
 }
 
 # User $1's events stream. Its subject must be a wildcard: a stream on a literal subject counts as
@@ -492,10 +494,11 @@ team_json() {
   printf '[%s]' "$tj_out"
 }
 # Retried for a few seconds: right after a reload the admin's own requests can fail briefly.
+# Fails (status 1) when it could not; callers decide whether that stops them.
 publish_sharing() {
   want=$(team_json)
   ps_i=0
-  while [ $ps_i -lt 50 ]; do
+  while [ $ps_i -lt 20 ]; do
     if have=$("$NATS" kv get sharing team --raw 2>/dev/null) && [ "$have" = "$want" ]; then return 0; fi
     if "$NATS" kv put sharing team "$want" >/dev/null 2>&1; then
       echo "sharing list updated: feeds shared with the team: $want"
@@ -503,7 +506,12 @@ publish_sharing() {
     fi
     ps_i=$((ps_i + 1)); sleep 0.1
   done
-  die "could not write the sharing list (kv bucket sharing); run '$0 init' to retry"
+  return 1
+}
+# The same, as a warning: the list only reports what the exports already decide.
+publish_sharing_or_warn() {
+  publish_sharing ||
+    echo "warning: could not write the sharing list (kv bucket sharing); run '$0 init' to retry" >&2
 }
 
 # A stream created while the server is still applying a reload can be lost when the reload finishes
@@ -531,12 +539,16 @@ has_wake() {
 }
 # Does the presence bucket accept rollups? `nats kv add` allows them, and a rollup on any key, even
 # a user's own, purges every entry in the bucket. The client only puts and deletes.
-presence_rollup() {
-  "$NATS" stream info KV_presence --json 2>/dev/null | tr -d ' \n\t' | grep -qF '"allow_rollup_hdrs":true'
+presence_rollup() { bucket_rollup KV_presence; }
+# Does the KV stream $1 accept rollups? (The sharing bucket refuses them too, as defense in depth:
+# only the admin writes it.)
+bucket_rollup() {
+  "$NATS" stream info "$1" --json 2>/dev/null | tr -d ' \n\t' | grep -qF '"allow_rollup_hdrs":true'
 }
 check_base() {
   "$NATS" stream info MBX_ALL >/dev/null 2>&1 && has_wake && "$NATS" kv info presence >/dev/null 2>&1 &&
-    ! presence_rollup && "$NATS" kv info sharing >/dev/null 2>&1 || return 1
+    ! presence_rollup && "$NATS" kv info sharing >/dev/null 2>&1 && ! bucket_rollup KV_sharing ||
+    return 1
   for cb_n in $(user_names); do
     "$NATS" stream info "$(events_stream_of "$cb_n")" >/dev/null 2>&1 || return 1
   done
@@ -564,19 +576,23 @@ ensure_base() {
     "$NATS" kv add sharing --history 5 --storage file --replicas 1 >/dev/null
     echo "created kv bucket sharing (history 5; written only by the admin)"
   fi
+  if bucket_rollup KV_sharing; then
+    refuse_rollup KV_sharing || die "could not make the sharing bucket refuse rollups; check the server log and re-run"
+  fi
   # Users provisioned before events feeds get theirs here.
   for eb_n in $(user_names); do add_events_stream "$eb_n"; done
 }
 # `nats stream edit` insists on a terminal to confirm editing a KV bucket's stream, so update the
 # stream through the JetStream API: its current config with allow_rollup_hdrs turned off.
-refuse_presence_rollup() {
-  info=$("$NATS" request '$JS.API.STREAM.INFO.KV_presence' '' --raw 2>/dev/null) || return 1
+refuse_presence_rollup() { refuse_rollup KV_presence; }
+refuse_rollup() {
+  info=$("$NATS" request "\$JS.API.STREAM.INFO.$1" '' --raw 2>/dev/null) || return 1
   cfg=$(printf '%s' "$info" | sed -n 's/.*"config":\({.*}\),"created":.*/\1/p' |
     sed 's/"allow_rollup_hdrs":true/"allow_rollup_hdrs":false/')
   [ -n "$cfg" ] || return 1
-  out=$("$NATS" request '$JS.API.STREAM.UPDATE.KV_presence' "$cfg" --raw 2>&1) || return 1
+  out=$("$NATS" request "\$JS.API.STREAM.UPDATE.$1" "$cfg" --raw 2>&1) || return 1
   case $out in *'"error"'*) echo "$out" >&2; return 1 ;; esac
-  ! presence_rollup
+  ! bucket_rollup "$1"
 }
 
 # add-user's stream, named by $USER_NAME.
@@ -637,7 +653,7 @@ cmd_init() {
     ensure_base
   fi
   if [ "$reloaded" = 1 ]; then settle check_base ensure_base; fi
-  publish_sharing
+  publish_sharing || die "could not write the sharing list (kv bucket sharing); check the server log and re-run"
 }
 
 cmd_add_user() {
@@ -659,7 +675,7 @@ cmd_add_user() {
   USER_NAME=$name
   ensure_user_stream
   settle check_user_stream ensure_user_stream
-  publish_sharing
+  publish_sharing_or_warn  # never stops add-user before it printed the password
   echo "events feed sharing for $name: $(sharing_of "$name") (change it with: $0 set-sharing $name team|private)"
   url=$(public_url)
   echo
@@ -682,7 +698,7 @@ cmd_remove_user() {
   if reload_server; then reloaded=1; else reloaded=0; fi
   echo "removed user $name and their account (their connections are closed by the reload)"
   if [ "$reloaded" = 1 ]; then
-    publish_sharing
+    publish_sharing_or_warn
   else
     echo "server not running: run '$0 init' once it runs, to update the sharing list"
   fi
@@ -707,10 +723,10 @@ cmd_set_sharing() {
   if [ -f "$PENDING" ]; then
     # The exports first: a feed made private stops being readable before the list says so.
     reload_server || die "sharing saved in $USERS_DIR/$name.sharing, but the server must be running to apply it; start it and run '$0 init'"
-    publish_sharing
+    publish_sharing_or_warn
   else
     echo "users.conf unchanged: no server reload needed"
-    if server_up; then publish_sharing; fi
+    if server_up; then publish_sharing_or_warn; fi
   fi
   case $2 in
     team) echo "events feed of $name: team (every mailbox user can read it)" ;;

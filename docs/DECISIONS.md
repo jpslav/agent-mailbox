@@ -389,3 +389,7 @@ context, decision, why.
   client probes a feed with a single get first. Feed entries are self-asserted except the user
   and the server time; readers check them for shape like presence entries. `mbox watch` and
   `mbox wait` write no `ended` when their session's process dies (only the delivery daemon does).
+  If anything in the stream account ever subscribed to a feed's subjects, a push consumer could
+  store messages in that feed under its owner's own mail subject: readers ignore them, but they
+  would count against the feed's 64 MiB and push out old events. Nothing subscribes there today,
+  and `test/isolation.test.ts` proves that nothing is then delivered.

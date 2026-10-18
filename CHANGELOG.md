@@ -29,6 +29,10 @@ treat them as approximate.
   enforces it: the stream account exports each feed's read only to the accounts allowed to
   read it. `mbox doctor` checks your feed and shows your setting.
 
+### Fixed
+- `mbox-admin.sh add-user` (0.5.8) printed the user's stream name (`--user MBX_<NAME>`) instead of
+  the user name in the `mbox setup` line it prints.
+
 ### Upgrading
 - On the mailbox host, install the new `server/mbox-admin.sh` and run `mbox-admin.sh init` once:
   it creates the `sharing` bucket and each user's events stream, and adds the feed exports and
