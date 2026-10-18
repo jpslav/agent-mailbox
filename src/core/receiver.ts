@@ -195,7 +195,32 @@ export async function openReceiver({
   }
 
   // ---- housekeeping timers ----
-  timers.push(setInterval(() => void post('heartbeat', 5000), opt.heartbeatMs));
+  /**
+   * Take in what `mbox name`, `mbox whoami` and `mbox status` wrote to the state file: a new alias
+   * resubscribes, role, parent and status only change what presence says. Returns whether
+   * anything changed.
+   */
+  const adoptState = (): boolean => {
+    const next = readState(sid, env);
+    if (!next) return false; // state file briefly missing
+    const aliasesChanged = JSON.stringify(next.aliases) !== JSON.stringify(st.aliases);
+    const metaChanged =
+      next.role !== st.role || next.parent !== st.parent || next.status !== st.status;
+    if (!aliasesChanged && !metaChanged) return false;
+    st = next;
+    if (aliasesChanged) {
+      reconnectRequested = true;
+      streamAc?.abort();
+    }
+    return true;
+  };
+  // Every heartbeat reads the state first, so none can put back values a command just replaced.
+  timers.push(
+    setInterval(() => {
+      adoptState();
+      void post('heartbeat', 5000);
+    }, opt.heartbeatMs),
+  );
   let lastMtime = 0;
   try {
     lastMtime = fs.statSync(statePath(sid, env)).mtimeMs;
@@ -209,22 +234,7 @@ export async function openReceiver({
         const m = fs.statSync(statePath(sid, env)).mtimeMs;
         if (m !== lastMtime) {
           lastMtime = m;
-          const next = readState(sid, env);
-          const aliasesChanged =
-            !!next && JSON.stringify(next.aliases) !== JSON.stringify(st.aliases);
-          // Role, parent and status (`mbox whoami`, `mbox status`): adopt them, or the next
-          // heartbeat would put the old values back.
-          const metaChanged =
-            !!next &&
-            (next.role !== st.role || next.parent !== st.parent || next.status !== st.status);
-          if (next && (aliasesChanged || metaChanged)) {
-            st = next;
-            if (aliasesChanged) {
-              reconnectRequested = true;
-              streamAc?.abort();
-            }
-            void post('heartbeat', 5000);
-          }
+          if (adoptState()) void post('heartbeat', 5000);
         }
       } catch {
         /* state file briefly missing */

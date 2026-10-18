@@ -478,7 +478,8 @@ session's working directory, `origin` first), `branch`, `role` (`manager`, `work
 `parent` (the address of the session that spawned it) and `status` (one line, at most 120
 characters). Repo and branch are read from git's files (no `git` process runs) on every
 heartbeat. Role and parent come from `AGENT_MAILBOX_ROLE` and `AGENT_MAILBOX_PARENT` in the
-session's environment, applied at each session start, or from `mbox whoami --role/--parent`;
+session's environment when the session is new (a resume or a compaction does not reapply them),
+or from `mbox whoami --role/--parent`;
 status from `mbox status`. Changes reach `mbox peers` at once. `mbox peers --tree` nests sessions
 under their parents; one whose parent is not live is shown at the top level and marked. All of it
 is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as

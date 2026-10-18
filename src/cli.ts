@@ -21,7 +21,14 @@ import {
   versionName,
 } from './core/registrations.js';
 import { ResolveError, peerTree, presenceRecord, resolveTarget } from './core/registry.js';
-import { ROLES, STATUS_MAX, checkParent, checkRole, statusLine } from './core/session-meta.js';
+import {
+  ROLES,
+  STATUS_MAX,
+  checkParent,
+  checkRole,
+  statusLength,
+  statusLine,
+} from './core/session-meta.js';
 import { NoSessionError, ensureSession, pidAlive, readState, updateState } from './core/state.js';
 import { createTransport, explainError, validateServer } from './core/transport/nats.js'; // composition root: the only place that picks the broker
 import type {
@@ -205,6 +212,8 @@ program
         if (opts.role !== undefined && opts.role !== 'none' && !role)
           throw new UsageError(`invalid role "${opts.role}" (allowed: ${ROLES.join(', ')}, none)`);
         const parent = opts.parent === 'none' ? null : checkParent(opts.parent);
+        if (parent && (parent === st.address || st.aliases.includes(parent)))
+          throw new UsageError(`a session cannot be its own parent (${parent})`);
         if (opts.parent !== undefined && opts.parent !== 'none' && !parent)
           throw new UsageError(
             `invalid parent "${opts.parent}" (a full address <user>.<host>.<label>, or none)`,
@@ -243,9 +252,9 @@ program
       const status = opts.clear ? null : statusLine(text);
       if (status !== null && !status)
         throw new UsageError('empty status: use --clear to remove it');
-      if (status && status.length > STATUS_MAX)
+      if (status && statusLength(status) > STATUS_MAX)
         throw new UsageError(
-          `status is ${status.length} characters; the limit is ${STATUS_MAX}. Shorten it.`,
+          `status is ${statusLength(status)} characters; the limit is ${STATUS_MAX}. Shorten it.`,
         );
       const next = await saveAndAnnounce(ctx, (s) => ({ ...s, status }));
       console.log(next.status ?? '(no status)');
@@ -894,13 +903,7 @@ program
         launcher: launcherPath(),
         configError,
         ensure: (sid, cwd) =>
-          ensureSession({
-            sid,
-            ...configured(),
-            cwd,
-            hostPid: adapter.hostPid(process.env),
-            adoptEnv: true, // a spawner's AGENT_MAILBOX_ROLE / _PARENT apply at each session start
-          }),
+          ensureSession({ sid, ...configured(), cwd, hostPid: adapter.hostPid(process.env) }),
         endSession: (sid) => endSession({ sid, ...configured(), agent: adapter.id }),
         register: (reg) => register(reg),
         deregister: (sid) => deregister(sid),

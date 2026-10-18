@@ -6,7 +6,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isAddr } from './addr.js';
-import { oneLine } from './envelope.js';
 import type { Role } from './types.js';
 
 export const ROLES: readonly Role[] = ['manager', 'worker'];
@@ -17,20 +16,29 @@ const REPO_MAX = 100;
 
 export const checkRole = (v: unknown): Role | null => ROLES.find((r) => r === v) ?? null;
 
+/** Longer than any address a broker accepts (the NATS transport allows 128 characters). */
+const PARENT_MAX = 255;
 export const checkParent = (v: unknown): string | null =>
-  typeof v === 'string' && isAddr(v) ? v : null;
+  typeof v === 'string' && v.length <= PARENT_MAX && isAddr(v) ? v : null;
 
-/** A status as one line: control characters become spaces; '' means none. */
+// Controls (C0 and C1), invisible format characters (bidi overrides and the like) and line or
+// paragraph separators: a status is printed on every peer's terminal.
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\u2028\u2029]+/gu;
+
+/** A status as one line of printable text, spaces collapsed; '' means none. */
 export function statusLine(v: unknown): string {
-  return oneLine(v, Infinity).replace(/\s+/g, ' ');
+  return typeof v === 'string' ? v.replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim() : '';
 }
+
+/** Its length in characters (code points), as the STATUS_MAX limit counts it. */
+export const statusLength = (t: string): number => [...t].length;
 
 /** A peer's status: one line of at most STATUS_MAX characters, or null. */
 export function checkStatus(v: unknown): string | null {
-  if (typeof v !== 'string') return null;
   const t = statusLine(v);
   if (!t) return null;
-  return t.length > STATUS_MAX ? t.slice(0, STATUS_MAX - 1) + '…' : t;
+  const chars = [...t];
+  return chars.length > STATUS_MAX ? chars.slice(0, STATUS_MAX - 1).join('') + '…' : t;
 }
 
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -149,6 +157,8 @@ export function gitInfo(cwd: string | null | undefined): GitInfo {
   if (!dirs) return NO_GIT;
   const head = readSmall(path.join(dirs.gitDir, 'HEAD'))?.trim() ?? '';
   const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head)?.[1];
+  // Only the repository's own config file: include/includeIf and url.<base>.insteadOf are not
+  // followed, so such setups may show no repo or the un-rewritten one.
   const config = readSmall(path.join(dirs.commonDir, 'config'));
   const url = config ? remoteUrl(config) : null;
   return { repo: url ? repoFromUrl(url) : null, branch: checkBranch(ref) };

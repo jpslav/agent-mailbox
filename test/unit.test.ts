@@ -434,10 +434,15 @@ describe('session metadata', () => {
     assert.equal(checkRole('admin'), null);
     assert.equal(checkParent('alice.h.mgr-1'), 'alice.h.mgr-1');
     assert.equal(checkParent('not an address'), null);
+    assert.equal(checkParent(`alice.h.${'x'.repeat(300)}`), null);
     assert.equal(checkStatus('  two\nlines\u0007 here '), 'two lines here');
     assert.equal(checkStatus('x'.repeat(200))?.length, 120);
     assert.equal(checkStatus(''), null);
     assert.equal(checkStatus(42), null);
+    // C1 controls (an 8-bit CSI) and bidi overrides never reach a terminal.
+    assert.equal(checkStatus('a\u009b31mb\u202ec'), 'a 31mb c');
+    // Cut by characters: an emoji is never split into a lone surrogate.
+    assert.equal(checkStatus('😀'.repeat(130)), '😀'.repeat(119) + '…');
     assert.equal(checkRepo('acme/widgets'), 'acme/widgets');
     assert.equal(checkRepo('acme/wid gets'), null);
     assert.equal(checkRepo('a/b/c'), null);

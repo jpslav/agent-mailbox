@@ -147,9 +147,12 @@ describe('presence', { skip: SERVER.skip }, () => {
         cwd: mgrDir,
       });
       assert.equal(st.code, 0, st.stderr);
-      assert.match(row(mgrAddr), /\bmain\s+running the tests\s/);
+      // Shown by the command's own presence update, and kept by every later heartbeat; either way
+      // a condition to wait for, not a moment to assert on.
+      await until('the status', () => /\bmain\s+running the tests\s/.test(row(mgrAddr)));
       fs.writeFileSync(head, 'ref: refs/heads/feat/x\n');
       await until('the new branch', () => /\bfeat\/x\s/.test(row(mgrAddr)));
+      // A heartbeat sent after the status still carries it (each heartbeat re-reads the state).
       assert.match(row(mgrAddr), /\bfeat\/x\s+running the tests\s/);
 
       // whoami --role / --parent change it live too; none clears.
@@ -164,13 +167,19 @@ describe('presence', { skip: SERVER.skip }, () => {
         `parent: ${oAddr}`,
         'status: running the tests',
       ]);
-      assert.match(row(mgrAddr), /\bworker\s+acme\/widgets/);
+      await until('the new role', () => /\bworker\s+acme\/widgets/.test(row(mgrAddr)));
       const cleared = mbox(['status', '--clear'], {
         env: { ...env, AGENT_MAILBOX_SESSION: 'metamgr' },
         cwd: mgrDir,
       });
       assert.equal(cleared.code, 0, cleared.stderr);
-      assert.match(row(mgrAddr), /\bfeat\/x\s+-\s/);
+      await until('the cleared status', () => /\bfeat\/x\s+-\s/.test(row(mgrAddr)));
+      const self = mbox(['whoami', '--parent', mgrAddr], {
+        env: { ...env, AGENT_MAILBOX_SESSION: 'metamgr' },
+        cwd: mgrDir,
+      });
+      assert.equal(self.code, 2);
+      assert.match(self.stderr, /cannot be its own parent/);
       const tooLong = mbox(['status', 'x'.repeat(121)], {
         env: { ...env, AGENT_MAILBOX_SESSION: 'metamgr' },
         cwd: mgrDir,

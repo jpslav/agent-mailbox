@@ -176,13 +176,13 @@ token):
 }
 ```
 
-| field    | meaning                                                                                  |
-| -------- | ---------------------------------------------------------------------------------------- |
-| `repo`   | `owner/name` from the git remote (`origin`, else the first) of `cwd`; `null` outside git |
-| `branch` | the checked-out branch of `cwd`; `null` outside git or on a detached HEAD                |
-| `role`   | `manager`, `worker` or `null`                                                            |
-| `parent` | the address of the session that spawned this one, or `null`; need not be live            |
-| `status` | one line, at most 120 characters, or `null`                                              |
+| field    | meaning                                                                                                                                                                    |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repo`   | `owner/name` from the git remote (`origin`, else the first) in `cwd`'s own git config; `null` outside git or without a remote (`include` and `insteadOf` are not followed) |
+| `branch` | the checked-out branch of `cwd`; `null` outside git or on a detached HEAD                                                                                                  |
+| `role`   | `manager`, `worker` or `null`                                                                                                                                              |
+| `parent` | the address of the session that spawned this one, or `null`; need not be live                                                                                              |
+| `status` | one line, at most 120 characters, or `null`                                                                                                                                |
 
 The last five were added in 0.5.6, after `pid`; readers before that ignore them, and readers
 since then treat a missing one as `null`. Readers keep a field only when it has that shape

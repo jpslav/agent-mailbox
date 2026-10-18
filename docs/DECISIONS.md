@@ -207,9 +207,10 @@ context, decision, why.
 - **Decision:** Presence entries carry `repo`, `branch`, `role`, `parent` and `status`. Repo and
   branch are read from git's own files (`.git`, `HEAD`, `commondir`, `config`) on every
   heartbeat, never by running `git`. Role and parent come from `AGENT_MAILBOX_ROLE` /
-  `AGENT_MAILBOX_PARENT` (applied at each session start) or `mbox whoami --role/--parent`; status
-  from `mbox status`. They live in the session's state file, and a receiver adopts a change to
-  them as it does an alias change, so its heartbeats keep the new values. All five are
+  `AGENT_MAILBOX_PARENT` (taken when the session's state is created, so a resume or a compaction
+  never undoes a later change) or `mbox whoami --role/--parent`; status
+  from `mbox status`. They live in the session's state file; a receiver re-reads it before every
+  heartbeat, so no heartbeat puts back values a command just replaced. All five are
   self-asserted and display only; readers keep only well-formed values.
 - **Why:** The delivery daemon refreshes every session it serves every 10 minutes; spawning `git`
   there would cost a process per session per heartbeat and would run whatever the repository
@@ -217,3 +218,7 @@ context, decision, why.
   (any session can name any address), so it must never become a reason to trust mail: the guide
   and the skill say so explicitly. Unknown or malformed values become `null` rather than errors,
   so an odd entry cannot break `mbox peers` for everyone.
+- **Limits:** only the repository's own `config` is read (no `include`, `includeIf` or `insteadOf`),
+  so such setups may show no repo or the un-rewritten one. The reads are synchronous, so a working
+  directory on a stalled network mount would hold up the daemon's heartbeats for a while; local
+  checkouts are the normal case.

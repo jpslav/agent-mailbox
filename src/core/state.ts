@@ -145,8 +145,8 @@ export function writeCursor(sid: string, cur: CursorFile, env: Env = process.env
  * Ensure identity + cursor exist for the session. A new session starts "now" (the transport's
  * notion of the current position) so old mail is not replayed; a resumed session (same id) keeps
  * its address and cursor. A new session takes its role and parent from the environment
- * (`envMeta`); `adoptEnv` (the session-start hook) applies them to an existing one too, so a
- * spawner's values win at each start, and `mbox whoami --role/--parent` in between.
+ * (`envMeta`), as a spawner passes them; after that only `mbox whoami --role/--parent` changes
+ * them, so a resume or a compaction (the same environment again) never undoes such a change.
  */
 export async function ensureSession({
   sid,
@@ -155,7 +155,6 @@ export async function ensureSession({
   cwd,
   hostPid = null,
   env = process.env,
-  adoptEnv = false,
 }: {
   sid: string;
   cfg: Pick<Config, 'user'>;
@@ -163,7 +162,6 @@ export async function ensureSession({
   cwd: string;
   hostPid?: number | null;
   env?: Env;
-  adoptEnv?: boolean;
 }): Promise<SessionState> {
   validSid(sid);
   mkdirp(sessionsDir(env));
@@ -176,22 +174,21 @@ export async function ensureSession({
       defaultLabel(cwd, sid),
       transport.limits.maxLabelLen(cfg.user, host),
     );
+    const address = `${cfg.user}.${host}.${label}`;
+    const { role, parent } = envMeta(env);
     const created: SessionState = {
-      address: `${cfg.user}.${host}.${label}`,
+      address,
       aliases: [],
       cwd,
       createdAt: new Date().toISOString(),
-      ...envMeta(env),
+      ...(role && { role }),
+      ...(parent && parent !== address && { parent }), // a session is not its own parent
     };
     if (createExclusive(statePath(sid, env), created)) {
       createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {} });
     }
     st = readState(sid, env);
     if (!st) throw new Error(`could not create session state at ${statePath(sid, env)}`);
-  } else if (adoptEnv) {
-    const meta = envMeta(env);
-    if ((meta.role && meta.role !== st.role) || (meta.parent && meta.parent !== st.parent))
-      st = updateState(sid, (s) => ({ ...s, ...meta }), env);
   }
   if (!readCursor(sid, env)) {
     createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {} });
