@@ -237,3 +237,39 @@ context, decision, why.
 - **Why:** A short volley proves what those changes can break (sessions wake, receive and reply);
   only the full one tests the relay-loop cap and the rate limit, which only the first group of
   changes can affect.
+
+## Events feeds: one stream per user, shared by permissions the admin generates
+
+- **Date:** 2026-10
+- **Context:** People and overseer sessions want to see what happens across their own sessions
+  and, where colleagues allow it, across theirs (#16): sessions starting and ending, status, role
+  and parent changes, and a session saying it is done, without reading anyone's mail. Some users
+  will not want colleagues to see their history.
+- **Decision:** Each user has a stream `EVT_<USER>` (subjects `evt.<user>.*`, 30 days, 64 MiB)
+  that only that user may publish. The subject is a wildcard on purpose: a first version used the
+  literal `evt.<user>`, and the isolation tests showed any user could then write into another's
+  feed through a push consumer on their own mailbox stream (the server delivers to a literal
+  stream subject as if it were a subscriber; wildcard stream subjects get nothing). Every stream
+  here must keep a wildcard subject. Events carry the presence metadata, never message contents. The
+  admin sets each user's sharing to `team` (the default) or `private` with
+  `mbox-admin.sh set-sharing`; every user's permission block grants a direct get on each `team`
+  feed, so the script regenerates every block (keeping each password hash) on any change to a user
+  or a sharing setting. A KV key (`sharing`/`team`, written only by the admin, readable by all)
+  lists the shared feeds so clients know what `--all` covers and users see their own setting.
+  Feeds are read on demand (`mbox events`) by batch direct gets; nobody subscribes or holds a
+  consumer, so no session is woken per event. Writing an event is best effort and bounded.
+- **Why:** NATS permissions are static per user and cannot depend on another user's setting, so
+  the setting must become permissions; generating them keeps the server the only judge, as for
+  mail (a client-side check would be no boundary at all). Per-user streams keep the owner verified
+  by the stream itself and keep one user's flood inside their own size cap. Direct get needs no
+  consumer, so nobody needs consumer rights on anyone's feed, their own included. The sharing
+  list is only a report: if it and the permissions ever disagree, the permissions win and the
+  client says the feed is not shared. Pull, not push: waking an overseer per event would cost a
+  turn per event.
+- **Limits:** `private` hides the history and `done` summaries, not the live picture: presence
+  entries (repo, branch, role, parent, status of every live session) stay readable by every user,
+  as before. A private user can still read the team's feeds. The list of shared feeds names those
+  users to everyone. Changing a setting reloads the server, and a reader denied mid-change sees the
+  feed as not shared. A batch direct get the server refuses goes unanswered, so the client probes
+  another user's feed with a single get first. Feed entries are self-asserted except the user and
+  the server time; readers check them for shape like presence entries.

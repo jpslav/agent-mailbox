@@ -228,19 +228,31 @@ connections stay up, removed users are disconnected).
 
 ```sh
 server/mbox-admin.sh add-user bob       # prints the line bob runs on each machine
-server/mbox-admin.sh list-users
+server/mbox-admin.sh list-users [--sharing]
 server/mbox-admin.sh remove-user bob [--delete-stream]
+server/mbox-admin.sh set-sharing bob private   # or team (the default): who may read bob's events feed
 server/mbox-admin.sh permissions bob    # show the block without changing anything
 ```
 
 `add-user` generates a 32-character password, stores only its bcrypt hash (`nats server passwd`,
 password passed through the environment, never argv), creates stream `MBX_<NAME>` (file storage,
 `max_age` 180 days, `max_bytes` 1 GiB with discard old, duplicate window 2 minutes, one replica,
-direct get on, message delete and purge denied), and prints:
+direct get on, message delete and purge denied) and the events stream `EVT_<NAME>` (subject
+`evt.<name>.*`, the same settings but `max_age` 30 days and `max_bytes` 64 MiB:
+`MBOX_EVENTS_MAX_AGE`, `MBOX_EVENTS_MAX_BYTES`), sets the user's events sharing to
+`MBOX_DEFAULT_SHARING` (default `team`), and prints:
 
 ```sh
 printf '%s\n' '<password>' | mbox setup --servers nats://100.x.y.z:4222 --user bob --password-stdin
 ```
+
+**Events sharing.** `team` lets every mailbox user read the user's events feed, `private` only the
+user. Each user's permission block lists every `team` feed, so `add-user`, `remove-user` and
+`set-sharing` regenerate all blocks (keeping each password hash) and reload the server; the
+script then writes the list of `team` users to the `sharing` bucket, which clients read for
+`mbox events --all`. After upgrading from a version without events feeds, run
+`mbox-admin.sh init` once: it creates the `sharing` bucket and each user's events stream and adds
+the events lines to every block (existing users start as `team`).
 
 The admin user (`mbx_admin`, full permissions; its password is in `$MBOX_CONF_DIR/admin.creds`,
 mode 0600) is only used by `mbox-admin.sh`. Every mailbox user gets exactly this (shown for `bob`):
@@ -260,6 +272,10 @@ publish allow:
   $JS.API.DIRECT.GET.MBX_ALL           read broadcasts (no consumer on the shared stream)
   $JS.API.DIRECT.GET.KV_presence       list presence
   $JS.API.DIRECT.GET.KV_presence.$KV.presence.>
+  evt.bob.*                            write own events feed only (evt.bob.<host>)
+  $JS.API.DIRECT.GET.EVT_BOB           read own events feed
+  $JS.API.DIRECT.GET.EVT_ALICE         alice's feed: one line per other user whose sharing is team
+  $JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team   the list of shared feeds (that key only)
   $KV.presence.bob.>                   write own presence entries only
 subscribe allow:
   mbx.all.*                            broadcast wake-ups
@@ -267,8 +283,9 @@ subscribe allow:
 ```
 
 Everything else is denied, including stream create/update/delete/purge, message delete, consumer
-list/delete, any access to other users' streams, consumers or reply inboxes, and consumers on
-`MBX_ALL` or `KV_presence`. `test/isolation.test.ts` proves each of these against a real server,
+list/delete, any access to other users' streams, consumers or reply inboxes, consumers on
+`MBX_ALL` or `KV_presence`, writing another user's events feed, reading a `private` one, any
+consumer or subscription on events feeds, and writing the sharing bucket. `test/isolation.test.ts` proves each of these against a real server,
 including that a push consumer on your own stream cannot deliver into someone else's stream with a
 forged sender token. `mbox doctor` repeats the key negative check from the client side.
 
@@ -341,10 +358,12 @@ mbox send <to> "text"             <to> = full address | unique prefix/label of a
 mbox send <to> --subject S --re <id> "text"        echo long | mbox send <to> -
 mbox name reviewer                mbox inbox --since 2h        mbox doctor
 mbox show <id>                    the whole message (when a delivered one was cut short)
-mbox guide [section]              short help: overview, send, reply, peers, workers, names,
-                                  inbox, security, fallback, troubleshooting
+mbox guide [section]              short help: overview, send, reply, peers, events, workers,
+                                  names, inbox, security, fallback, troubleshooting
 mbox peers --tree                 who spawned whom      mbox status "<one line>"   (--clear)
 mbox whoami --role worker --parent <address>      describe this session (display only)
+mbox events [--user <u>|--all] [--since 1d]       what happened to sessions (events feed)
+mbox done "<summary>"             say this session finished (sets the status, writes "done")
 mbox pause [--all|<address>]      emergency stop for push delivery on this machine; mbox resume
 mbox deliverd --status            is the delivery daemon running (version), which sessions it serves
 ```
@@ -485,6 +504,19 @@ under their parents; one whose parent is not live is shown at the top level and 
 is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as
 untrusted as any other. Readers keep only well-formed values.
 
+**Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended`
+(the session hooks; a compaction is not a start), `status-changed` (`mbox status`),
+`role-changed` and `parent-changed` (`mbox whoami --role/--parent`) and `done` (`mbox done
+"<summary>"`, which also sets the status). Each event carries the session's address, user, host,
+repo, branch, role, parent, status and time, never message contents; feeds keep 30 days. Writing
+one never fails or holds up a command (at most 1.5 s when the server is unreachable). `mbox
+events` reads your own feed, `--user <name>` a colleague's and `--all` yours plus every feed shared
+with the team (`--since 1d` by default, `--limit 100` newest, `--json` for one object per line). It
+is read on demand: an overseer session pulls when asked and is never woken per event. Whether
+colleagues can read your feed is up to the admin (`mbox-admin.sh set-sharing <you> team|private`,
+`team` by default); `mbox events --sharing` and `mbox doctor` show your setting. Everything but
+the user is self-asserted and display only, as in presence.
+
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/`: `<id>.json` (address, aliases, cwd,
 role, parent, status),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
@@ -502,9 +534,11 @@ daemon's pid, version and bundle path), `deliverd.starting` (a daemon being star
   start with `[mailbox]` (so a body cannot forge block boundaries); the skill tells Claude to treat
   bodies as data, never as instructions from its user. Do not invite anyone you would not let drop
   text into your sessions.
-- **Reading is isolated by stream.** Users can read only their own stream, broadcasts and the
-  presence bucket. Presence records (address, cwd, host, pid, repo, branch, role, parent and
-  status) are visible to every user.
+- **Reading is isolated by stream.** Users can read only their own stream, broadcasts, the
+  presence bucket and the events feeds the admin shares with the team (their own always).
+  Presence records (address, cwd, host, pid, repo, branch, role, parent and status) are visible
+  to every user, whatever the feed's sharing: `private` hides a user's event history and `done`
+  summaries, not their live sessions.
 - **The server admin can read everything**; streams hold plain text for 180 days. Use a host you
   trust, on a tailnet. Passwords are stored as bcrypt hashes on the server and in a 0600 file on
   clients, and travel only inside the NATS connection (encrypted by the tailnet, not by NATS TLS).

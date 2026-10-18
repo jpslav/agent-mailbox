@@ -12,6 +12,26 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-10-17
+
+### Added
+- Events feeds: each user's sessions write `started`, `ended`, `status-changed`, `role-changed`,
+  `parent-changed` and `done` events (address, repo, branch, role, parent, status and time; never
+  message contents), kept 30 days. Writing one never fails a command or hook.
+- `mbox events [--user <name>|--all] [--since 1d] [--limit 100] [--json]` reads your feed, a
+  colleague's, or every feed shared with the team, on demand; `mbox events --sharing` shows how
+  yours is shared.
+- `mbox done "<summary>"` says a session finished: it sets the status and writes a `done` event.
+- `mbox-admin.sh set-sharing <user> team|private` decides who may read a user's feed (`team`, the
+  default, lets every mailbox user read it); `list-users --sharing` shows the settings. The server
+  enforces it with permissions. `mbox doctor` checks your feed and shows your setting.
+
+### Upgrading
+- On the mailbox host, run `mbox-admin.sh init` once after updating the scripts: it creates the
+  `sharing` bucket and each user's events stream and regenerates every user's permissions (one
+  server reload). Existing users start as `team`. Until then clients warn that the server has no
+  events feed, and nothing else changes.
+
 ## [0.5.6] - 2026-10-17
 
 ### Added
