@@ -19123,7 +19123,7 @@ import fs6 from "node:fs";
 import path6 from "node:path";
 
 // src/core/version.ts
-var BUILD_VERSION = true ? "0.5.7" : "0.0.0-dev";
+var BUILD_VERSION = true ? "0.5.8" : "0.0.0-dev";
 function ownVersion(env = process.env) {
   return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
 }
