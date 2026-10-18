@@ -12,7 +12,7 @@ treat them as approximate.
 
 ## [Unreleased]
 
-## [0.5.8] - 2026-10-17
+## [0.6.0] - 2026-10-18
 
 ### Added
 - Events feeds: each user's sessions write `started`, `ended`, `status-changed`, `role-changed`,
@@ -26,13 +26,42 @@ treat them as approximate.
 - `mbox done "<summary>"` says a session finished: it sets the status and writes a `done` event.
 - `mbox-admin.sh set-sharing <user> team|private` decides who may read a user's feed (`team`, the
   default, lets every mailbox user read it); `list-users --sharing` shows the settings. The server
-  enforces it with permissions. `mbox doctor` checks your feed and shows your setting.
+  enforces it: the stream account exports each feed's read only to the accounts allowed to
+  read it. `mbox doctor` checks your feed and shows your setting.
 
 ### Upgrading
-- On the mailbox host, run `mbox-admin.sh init` once after updating the scripts: it creates the
-  `sharing` bucket and each user's events stream and regenerates every user's permissions (one
-  server reload). Existing users start as `team`. Until then clients warn that the server has no
-  events feed, and nothing else changes.
+- On the mailbox host, install the new `server/mbox-admin.sh` and run `mbox-admin.sh init` once:
+  it creates the `sharing` bucket and each user's events stream, and adds the feed exports and
+  imports to every account (two server reloads). Existing users start as
+  `team`. Until then, clients of this version warn that the server has no events feed, and
+  nothing else changes; clients of 0.5.x keep working against the upgraded server.
+
+## [0.5.8] - 2026-10-18
+
+### Security
+- Fixed sender forgery between mailbox users (GHSA-9xj2-7h7w-786h). On servers provisioned by
+  `mbox-admin.sh` 0.5.7 or earlier, any mailbox user could make the server store attacker-chosen
+  bytes in another user's mailbox, in the broadcast stream or in the presence registry, under a
+  third user's name: a JetStream API request the user was allowed to send, given a hostile reply
+  subject, had its response published to that subject inside the account that holds the streams.
+  Recipients saw such mail with a wrong `verified-user`. Reading other users' mail was not
+  possible. `mbox-admin.sh` now gives every mailbox user an account of their own, which imports
+  from the stream account only what the client needs; replies stay in the user's account.
+  **Server admins must upgrade:** install the new `server/mbox-admin.sh` and run
+  `mbox-admin.sh init` (README, "Upgrading a server set up before 0.5.8"). Mail, streams,
+  consumers and passwords are kept; clients reconnect on their own and need no update.
+- The presence bucket refuses rollups. Before, any user could purge every user's presence
+  entries with one publish on their own key (`init` fixes existing servers).
+
+### Changed
+- `mbox-admin.sh` reloads the server twice per change (a new account's imports are wired only by
+  the second reload), checks the generated `users.conf` with `nats-server -t` before reloading,
+  fails instead of skipping the reload when the server answers but its pid file is missing, and
+  `permissions <name>` shows the user's account, imports and permissions. The files in `users.d/`
+  carry a deny-all block, so an older `mbox-admin.sh` run by mistake locks users out instead of
+  widening their access.
+- Broadcast wake-ups carry only the stored broadcast's headers (`MBX_ALL` republishes them);
+  clients only ever used them as a wake-up.
 
 ## [0.5.7] - 2026-10-17
 

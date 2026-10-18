@@ -287,38 +287,105 @@ context, decision, why.
   than waiting for a version takeover or its idle exit) is what lets a machine's sessions under the
   new user get mail without anyone killing a process.
 
-## Events feeds: one stream per user, shared by permissions the admin generates
+## Per-user accounts
+
+- **Date:** 2026-10
+- **Context:** Supersedes the mechanism of "The sender's user is verified server-side; the session
+  is not" (the guarantee is unchanged). Every user shared one NATS account with the streams, and
+  publish permissions restricted what they could send. NATS has no permission on reply subjects:
+  a user could send an allowed JetStream API request, for example a direct get of a forged
+  envelope stored in their own stream, with a reply subject like `mbx.bob.h.l.carol`, and the
+  server published the response there, inside the shared account, where `MBX_BOB` stored it as
+  mail from carol. The same reached `MBX_ALL` and the presence bucket. `allow_responses` is for
+  responders and does not help; no permission block can fix it.
+- **Decision:** The account `MAILBOX` keeps JetStream, every stream and the admin, unchanged, so an
+  upgrade moves no mail, stream or consumer. Each mailbox user gets an account of their own,
+  `USER_<name>`, without JetStream, which imports from `MAILBOX` exactly the services the client
+  needs: publishing on subjects that end in the user's own name (`mbx.*.*.*.<u>`, `mbx.all.<u>`,
+  `$KV.presence.<u>.>`), the API calls on their own stream (stream info, durable consumer create
+  and info, `MSG.NEXT` with streamed responses, acks, direct get) and the shared read-only ones
+  (account info, `MBX_ALL` info and direct get, presence direct gets). `MAILBOX` exports each
+  service only to the accounts that may import it. The permission block stays inside each user
+  account as defense in depth; the tests prove the boundary without it. `mbox-admin.sh init`
+  upgrades a server provisioned by an earlier script in place (password hashes kept, the old files
+  saved for a rollback, idempotent and safe to re-run). Subjects, streams and the client are
+  unchanged: clients already deployed keep working.
+- **Broadcast wake-ups:** NATS never passes a message that arrived through a service import on to
+  a stream export, so exporting `mbx.all.*` as a stream wakes nobody. Instead `MBX_ALL`
+  republishes the headers of each stored broadcast to `mbxwake.all.<sender>` (no body), exported
+  as a stream and imported by every user account as `mbx.all.<sender>`, the subject clients
+  already subscribe to. The wake-up's content was never used; now it is only the stored message's
+  headers.
+- **Why:** With accounts, any reply to a user's request is delivered inside that user's own account,
+  where no stream can capture it. A hostile reply subject reaches the stream account only through
+  that account's imports, as mail the user could already send under their own name, or as an API
+  call they could already make. Per-user accounts are the NATS mechanism for exactly this
+  isolation. Signing envelopes could let readers reject forgeries, but it changes the wire
+  format, needs key distribution, and still lets anyone write into others' streams and the
+  presence bucket. Push consumers a user may create on
+  their own stream deliver inside `MAILBOX`, only to listeners there (none in production), and a
+  delivery keeps its stored subject, so it stays in the user's own name (tested).
+- **Safety around the change:** the `users.d` files carry a deny-all permission block that the
+  script ignores, so an older `mbox-admin.sh` run by mistake afterwards (it copies those files
+  into the stream account) locks users out instead of giving them the whole account. The
+  presence bucket now refuses rollups, which let any user purge everyone's entries.
+- **Limits:** The stream account's account info (`mbox doctor`) still shows totals for the whole
+  server, as before. A user's own streams remain readable by the admin.
+
+## A new account's imports need a second reload
+
+- **Date:** 2026-10
+- **Context:** With nats-server 2.15.1, a configuration reload that adds an account (a new user, or
+  every user during the upgrade to per-user accounts) authenticates that account's user but does
+  not wire its imports: requests get no responders. The next reload wires them. Existing accounts
+  are unaffected, and it is not timing: waiting does not help, a second reload always does.
+- **Decision:** `mbox-admin.sh` always sends the reload signal twice (with `MBOX_RELOAD_SETTLE`
+  between), and `add-user` checks, logged in as the new user, that the account answers through its
+  imports, reloading again a few times at most before giving up. `test/upgrade.test.ts` pins the
+  behaviour: it fails if one reload ever becomes enough (then the second can go) or if two are no
+  longer enough. Nothing has been filed upstream yet.
+- **Why:** A restart would also work but drops every connection and makes the script depend on how
+  the server is supervised. A redundant reload is cheap: connections stay up.
+
+## Events feeds: one stream per user, read through exports the admin's sharing decides
 
 - **Date:** 2026-10
 - **Context:** People and overseer sessions want to see what happens across their own sessions
   and, where colleagues allow it, across theirs (#16): sessions starting and ending, status, role
   and parent changes, and a session saying it is done, without reading anyone's mail. Some users
   will not want colleagues to see their history.
-- **Decision:** Each user has a stream `EVT_<USER>` (subjects `evt.<user>.*`, 30 days, 64 MiB)
-  that only that user may publish. The subject is a wildcard on purpose: a first version used the
-  literal `evt.<user>`, and the isolation tests showed any user could then write into another's
-  feed through a push consumer on their own mailbox stream (the server delivers to a literal
-  stream subject as if it were a subscriber; wildcard stream subjects get none of those
-  deliveries). Every stream here must keep a wildcard subject. Events carry the presence
-  metadata, never message contents. The admin sets each user's sharing to `team` (the default)
-  or `private` with `mbox-admin.sh set-sharing`; every user's permission block grants a direct get on each `team`
-  feed, so the script regenerates every block (keeping each password hash) on any change to a user
-  or a sharing setting. A KV key (`sharing`/`team`, written only by the admin, readable by all)
-  lists the shared feeds so clients know what `--all` covers and users see their own setting.
-  Feeds are read on demand (`mbox events`) by batch direct gets; nobody subscribes or holds a
-  consumer, so no session is woken per event. Writing an event is best effort and bounded.
-- **Why:** NATS permissions are static per user and cannot depend on another user's setting, so
-  the setting must become permissions; generating them keeps the server the only judge, as for
-  mail (a client-side check would be no boundary at all). Per-user streams keep the owner verified
-  by the stream itself and keep one user's flood inside their own size cap. Direct get needs no
-  consumer, so nobody needs consumer rights on anyone's feed, their own included. The sharing
-  list is only a report: if it and the permissions ever disagree, the permissions win and the
-  client says the feed is not shared. Pull, not push: waking an overseer per event would cost a
-  turn per event.
+- **Decision:** Each user has a stream `EVT_<USER>` (subjects `evt.<user>.*`, 30 days, 64 MiB) in
+  the stream account; only that user's account imports the publish on it. The subject is a
+  wildcard on purpose: a first version used the literal `evt.<user>`, and the isolation tests
+  showed any user could then write into another's feed through a push consumer on their own
+  mailbox stream (a literal stream subject counts as a subscriber for push deliveries; wildcard
+  stream subjects get none). Every stream here must keep a wildcard subject. Events carry the
+  presence metadata, never message contents. The admin sets each user's sharing to `team` (the
+  default) or `private` with `mbox-admin.sh set-sharing`; the stream account exports the direct
+  get on a feed to its owner's account and, while it is `team`, to every other user account,
+  which imports it (the permission block lists the same, as defense in depth). Any change to a
+  user or a sharing setting regenerates `users.conf` and reloads twice, as for every change. A KV
+  key (`sharing`/`team`, written only by the admin, exported read-only to every account) lists the
+  shared feeds, so clients know what `--all` covers and users see their own setting. Feeds are
+  read on demand (`mbox events`) by direct gets; nobody subscribes or holds a consumer, so no
+  session is woken per event. Writing an event is best effort and bounded; `ended` is written
+  once per start, by the session-end hook or by the delivery daemon when the session's process
+  is gone, whichever comes first.
+- **Why:** The account boundary is the server's own isolation (see "Per-user accounts"); a feed a
+  user may read is just one more service their account imports, and one they may not read is
+  absent from it, so a reply-subject trick or a missing permission line cannot reach it. Static
+  config cannot depend on another user's setting at run time, so the setting becomes exports,
+  generated by the script, which keeps the server the only judge (a client-side check would be no
+  boundary at all). Per-user streams keep the owner verified by the stream itself and keep one
+  user's flood inside their own size cap. Direct get needs no consumer, so nobody needs consumer
+  rights on anyone's feed, their own included. The sharing list is only a report: if it and the
+  exports ever disagree, the exports win and the client says the feed is not shared. Pull, not
+  push: waking an overseer per event would cost a turn per event.
 - **Limits:** `private` hides the history and `done` summaries, not the live picture: presence
   entries (repo, branch, role, parent, status of every live session) stay readable by every user,
   as before. A private user can still read the team's feeds. The list of shared feeds names those
   users to everyone. Changing a setting reloads the server, and a reader denied mid-change sees the
-  feed as not shared. A batch direct get the server refuses goes unanswered, so the client probes
-  another user's feed with a single get first. Feed entries are self-asserted except the user and
-  the server time; readers check them for shape like presence entries.
+  feed as not shared. A batch direct get the permission block refuses goes unanswered, so the
+  client probes a feed with a single get first. Feed entries are self-asserted except the user
+  and the server time; readers check them for shape like presence entries. `mbox watch` and
+  `mbox wait` write no `ended` when their session's process dies (only the delivery daemon does).

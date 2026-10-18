@@ -1042,7 +1042,8 @@ export function createTransport(
           timeoutMs,
         );
       } catch (e) {
-        if (isNoStream(e))
+        // A server provisioned before events feeds has no stream for it and grants no access to it.
+        if (isNoStream(e) || isPermission(e))
           // eslint-disable-next-line preserve-caught-error -- as in publish(): the message must stand alone
           throw new Error(
             `the server has no events feed for user "${user}"; ask the admin to run mbox-admin.sh init`,
@@ -1057,12 +1058,12 @@ export function createTransport(
       let stored: StoredMessage[];
       try {
         // A batch get the server refuses is never answered (it looks like a timeout, after the
-        // full request timeout); a single get is refused at once. So probe another user's feed
-        // first, with one get that any outcome but a refusal shows is allowed.
-        if (target !== user)
-          await s.jsm.direct.getMessage(eventsStreamFor(target), { seq: 1 }).catch((e) => {
-            if (isPermission(e) || isNoStream(e)) throw e;
-          });
+        // full request timeout); a single get is refused at once. So probe the feed first (another
+        // user's, or the own one on a server provisioned before feeds), with one get that any
+        // outcome but a refusal shows is allowed.
+        await s.jsm.direct.getMessage(eventsStreamFor(target), { seq: 1 }).catch((e) => {
+          if (isPermission(e) || isNoStream(e)) throw e;
+        });
         stored = await directAll(
           s.jsm,
           eventsStreamFor(target),
@@ -1072,7 +1073,7 @@ export function createTransport(
         );
       } catch (e) {
         if (target !== user && (isPermission(e) || isNoStream(e))) throw notShared(target, e);
-        if (target === user && isNoStream(e))
+        if (target === user && (isNoStream(e) || isPermission(e)))
           // eslint-disable-next-line preserve-caught-error -- as in publish(): the message must stand alone
           throw new Error(
             'the server has no events feed for you yet; ask the admin to run mbox-admin.sh init',
@@ -1177,17 +1178,14 @@ export function createTransport(
       add(false, 'presence registry', explainError(e));
     }
     try {
-      await directBatch(s.jsm, ownEvents, {
-        seq: 1,
-        batch: 1,
-        next_by_subj: `${EVT_PREFIX}.${user}.*`,
-      });
+      // A single get: a refused batch get is never answered (see events.read).
+      await s.jsm.direct.getMessage(ownEvents, { seq: 1 });
       add(true, `own events feed ${ownEvents} is readable`);
     } catch (e) {
       add(
         false,
         `own events feed ${ownEvents}`,
-        isNoStream(e)
+        isNoStream(e) || isPermission(e)
           ? 'the server has no events feed for you yet; ask the admin to run mbox-admin.sh init'
           : explainError(e),
       );

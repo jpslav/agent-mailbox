@@ -19234,7 +19234,7 @@ import fs6 from "node:fs";
 import path6 from "node:path";
 
 // src/core/version.ts
-var BUILD_VERSION = true ? "0.5.8" : "0.0.0-dev";
+var BUILD_VERSION = true ? "0.6.0" : "0.0.0-dev";
 function ownVersion(env = process.env) {
   return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
 }
@@ -20957,7 +20957,7 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
           timeoutMs
         );
       } catch (e) {
-        if (isNoStream(e))
+        if (isNoStream(e) || isPermission(e))
           throw new Error(
             `the server has no events feed for user "${user}"; ask the admin to run mbox-admin.sh init`
           );
@@ -20970,10 +20970,9 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
       const start_time = new Date(Date.now() - sinceMs2).toISOString();
       let stored;
       try {
-        if (target !== user)
-          await s.jsm.direct.getMessage(eventsStreamFor(target), { seq: 1 }).catch((e) => {
-            if (isPermission(e) || isNoStream(e)) throw e;
-          });
+        await s.jsm.direct.getMessage(eventsStreamFor(target), { seq: 1 }).catch((e) => {
+          if (isPermission(e) || isNoStream(e)) throw e;
+        });
         stored = await directAll(
           s.jsm,
           eventsStreamFor(target),
@@ -20983,7 +20982,7 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
         );
       } catch (e) {
         if (target !== user && (isPermission(e) || isNoStream(e))) throw notShared(target, e);
-        if (target === user && isNoStream(e))
+        if (target === user && (isNoStream(e) || isPermission(e)))
           throw new Error(
             "the server has no events feed for you yet; ask the admin to run mbox-admin.sh init"
           );
@@ -21082,17 +21081,13 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
       add(false, "presence registry", explainError(e));
     }
     try {
-      await directBatch(s.jsm, ownEvents, {
-        seq: 1,
-        batch: 1,
-        next_by_subj: `${EVT_PREFIX}.${user}.*`
-      });
+      await s.jsm.direct.getMessage(ownEvents, { seq: 1 });
       add(true, `own events feed ${ownEvents} is readable`);
     } catch (e) {
       add(
         false,
         `own events feed ${ownEvents}`,
-        isNoStream(e) ? "the server has no events feed for you yet; ask the admin to run mbox-admin.sh init" : explainError(e)
+        isNoStream(e) || isPermission(e) ? "the server has no events feed for you yet; ask the admin to run mbox-admin.sh init" : explainError(e)
       );
     }
     try {

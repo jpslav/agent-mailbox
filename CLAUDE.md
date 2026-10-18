@@ -31,7 +31,8 @@ The source is strict TypeScript (`src/`, `test/`); `esbuild` bundles it, `tsc` o
 - `server/`: `mbox-admin.sh` (users, streams, permissions), `install.sh` (prints install steps),
   `nats-server.conf.example`, `systemd/` and `launchd/` service files.
 - `test/`: `node:test` suites in TypeScript, run through `tsx`; the integration ones start a real
-  nats-server. `test/golden.test.ts` and `test/golden-presence.test.ts` pin the wire formats.
+  nats-server. `test/upgrade.test.ts` runs earlier releases (taken from git tags) against an
+  upgraded server. `test/golden.test.ts` and `test/golden-presence.test.ts` pin the wire formats.
 - Tooling at the root: `tsconfig.json` (strict), `eslint.config.mjs`, `.prettierrc` and
   `.prettierignore`; the git hooks and `lint-staged` are configured in `package.json`.
 - `docs/`: `DECISIONS.md`, `PROTOCOL.md`. `.claude/skills/`: this repo's procedures.
@@ -105,8 +106,8 @@ The `ship-change` skill has the exact commands.
 
 Add the `needs-owner` label to any PR that touches:
 
-- NATS permissions or ACLs (the permission block in `server/mbox-admin.sh`, or what the client
-  needs from the server);
+- NATS accounts, imports, exports, permissions or ACLs (what `server/mbox-admin.sh` generates
+  into `users.conf`, or what the client needs from the server);
 - authentication or credentials handling (passwords, tokens, client config files, registrations);
 - the inbox-socket delivery protocol (`src/agents/claude-inbox.ts`, `docs/PROTOCOL.md`);
 - the runaway guard (rate limit, `mbox pause` / `mbox resume`);
@@ -178,7 +179,7 @@ report reaches a session by another route, tell the owner and handle it as `need
   one.
 - `docs/PROTOCOL.md`: Claude Code's inbox-socket line format (reverse-engineered), what Claude
   sees, how to tell the protocol changed, and the NATS subject scheme, streams, presence KV,
-  permission block and envelope v1.
+  accounts, imports and permissions, and envelope v1.
 - `.claude/skills/`: `ship-change`, `release`, `live-test`, `triage`, `add-adapter`.
 - `CHANGELOG.md`: user-visible changes per version.
 - `CONTRIBUTING.md`: the human-oriented version of this file.
@@ -233,11 +234,18 @@ or to 6 in short (any other change real sessions must show, such as hooks or pre
   and broadcasts to `mbx.all.<sender>`, and a user may only publish subjects ending in their own
   name. `verified-user` in the output comes from that last token, never from the envelope's `from`.
   The sender's session within a user is self-asserted.
+- Every mailbox user has their own NATS account without JetStream; the streams live in the stream
+  account `MAILBOX`, which exports each service only to the account that may import it. Replies
+  to a user's requests are therefore delivered in the user's own account, where no stream can
+  capture them (NATS has no permission on reply subjects; see DECISIONS.md, "Per-user accounts").
+  Never put a mailbox user into the stream account, and never import into a user account a
+  subject that is not in that user's own name or a read-only API call.
 - Users read only their own stream, the broadcast stream (by direct get) and presence. They cannot
   create consumers elsewhere, delete or purge messages, or touch streams.
-- Any change to the permission block in `server/mbox-admin.sh` (or to what the client needs from the
-  server) needs a negative test in `test/isolation.test.ts` that proves the new boundary against a
-  real server. Widening permissions without one is a bug.
+- Any change to the accounts, imports, exports or permission block that `server/mbox-admin.sh`
+  generates (or to what the client needs from the server) needs a negative test in
+  `test/isolation.test.ts` that proves the new boundary against a real server. Widening access
+  without one is a bug.
 - Passwords: only on stdin, never in argv or logs; client config is mode 0600.
 
 ## Agent adapters

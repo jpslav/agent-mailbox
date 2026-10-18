@@ -128,8 +128,9 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
 | the feeds shared with the team       | KV bucket `sharing`, key `team`                | stream `KV_sharing`                     |
 
 - An address is `<user>.<host>.<label>`, each part `[a-z0-9-]+`. `all` is reserved.
-- The last subject token is always the sender's user. The server enforces it with publish
-  permissions (below), so it is the verified sender.
+- The last subject token is always the sender's user. The server enforces it: a user's own
+  account can publish mail only on subjects ending in their name (accounts, below), so it is the
+  verified sender.
 - Streams: file storage, limits retention, discard old, `max_age` 180 days, `max_bytes` 1 GiB,
   duplicate window 2 minutes, one replica, direct get on, delete and purge denied. Created by
   `server/mbox-admin.sh`.
@@ -137,7 +138,9 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
 - Each session has one durable pull consumer on its user's stream, named after the session id,
   filtered to `mbx.U.H.L.*` for the address and each alias, explicit ack, `ack_wait` 60 s,
   `inactive_threshold` 30 days. Broadcasts are read with direct gets from the last seen sequence;
-  a core subscription on `mbx.all.*` is only a wake-up.
+  a core subscription on `mbx.all.*` is only a wake-up. Since 0.5.8 the wake-up is the headers of
+  the stored broadcast, without its body: `MBX_ALL` republishes them to `mbxwake.all.<sender>`,
+  which every user account imports as `mbx.all.<sender>` (clients see the same subject as before).
 - Ending a subscription (a receiver stopping, or a delivery daemon handing over to a newer one)
   stops the pull consumer first, waits for the deliveries already handed out to be acknowledged,
   then naks everything else without delay, in stream-sequence order, and flushes. A message the
@@ -152,33 +155,34 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   so the sort matters even after a clean hand-back.
 - Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
   deleted when the session ends.
-- Events feeds: one stream `EVT_U` per user (subjects `evt.U.*`, which only `U` may publish, so
-  the stream names the verified owner), with the mailbox streams' settings except `max_age` 30 days
+- Events feeds: one stream `EVT_U` per user (subjects `evt.U.*`, which only `U`'s account imports,
+  so the stream names the verified owner), with the mailbox streams' settings except `max_age` 30 days
   and `max_bytes` 64 MiB (`MBOX_EVENTS_MAX_AGE`, `MBOX_EVENTS_MAX_BYTES`). Publishers set a fresh
   UUID as `Nats-Msg-Id`. Feeds are read with batch direct gets from a start time, filtered to
   `evt.U.*`; nobody has consumer rights on them and nothing subscribes to them, so no session is
   woken per event. **Every stream subject must be a wildcard** (`evt.U.*`, like `mbx.U.>`,
-  `mbx.all.*` and the KV buckets): the server sends a push consumer's deliveries to a deliver
-  subject that a stream with a _literal_ subject captures (it counts as interest), so any user
-  could write into such a stream through a push consumer on their own mailbox stream, whatever
-  their publish permissions. Streams with wildcard subjects never receive those deliveries;
-  `test/isolation.test.ts` ("forge into another stream") checks push-consumer deliveries into
-  every stream. A batch direct get the server refuses is never answered (it looks like a
-  timeout), so a client reading another user's feed first sends one single direct get (`seq` 1),
-  which the server refuses at once with a permission error.
+  `mbx.all.*` and the KV buckets): a stream with a _literal_ subject counts as a subscriber in
+  `MAILBOX` for a push consumer's deliveries (see "Push consumers" below), so any user could write
+  into it through a push consumer on their own mailbox stream. Streams with wildcard subjects
+  never receive those deliveries; `test/isolation.test.ts` ("forge into another stream") checks
+  push-consumer deliveries into every stream. A batch direct get that the permission block refuses
+  is never answered (it looks like a timeout), so a client first sends one single direct get
+  (`seq` 1) on the feed it reads, which is refused at once (a permission error, or no responders
+  without an import).
 - Sharing: `mbox-admin.sh set-sharing U team|private` (stored in `users.d/U.sharing`; no file means
-  `team`; `add-user` writes `MBOX_DEFAULT_SHARING`, default `team`). Every user's permission block
-  lists the direct-get subject of each other user's feed whose sharing is `team`, so a change to a
-  user or a sharing setting regenerates every block and reloads the server. KV bucket `sharing`
+  `team`; `add-user` writes `MBOX_DEFAULT_SHARING`, default `team`). `MAILBOX` exports the direct
+  get on each feed to its owner's account and, while it is `team`, to every other user account;
+  each account imports the feeds it may read, and its permission block lists them. So a change to
+  a user or a sharing setting regenerates `users.conf` and reloads the server. KV bucket `sharing`
   (history 5, no TTL, written only by the admin) holds under key `team` a JSON array of the users
   whose feed is `team`, sorted, for example `["alice","bob"]`; clients read that key only (`mbox
-events --all`, `--sharing`, `mbox doctor`). The permissions decide who reads what; the list only
+events --all`, `--sharing`, `mbox doctor`). The exports decide who reads what; the list only
   reports it, and is written after the reload that applies a change.
 
 ### Presence entry
 
-The value under `U.H.<session hash>` is JSON, written by user `U` only (publish permission
-`$KV.presence.U.>`), so every field is self-asserted except the user itself (the key's first
+The value under `U.H.<session hash>` is JSON, written by user `U` only (`U`'s account imports
+no other presence subjects than `$KV.presence.U.>`), so every field is self-asserted except the user itself (the key's first
 token):
 
 ```json
@@ -272,9 +276,69 @@ What a session is guaranteed (DECISIONS.md, "Delivery order across readers"):
   unchanged (no `max_ack_pending` limit).
 - Messages carry no sequence number in what the model sees; the wire formats are unchanged.
 
-### Per-user permission block
+### Accounts, imports and permissions
 
-Generated by `server/mbox-admin.sh permissions <name>`; shown for `alice`:
+Generated by `server/mbox-admin.sh` into `users.conf`; `mbox-admin.sh permissions <name>` prints
+one user's part. Since 0.5.8 (docs/DECISIONS.md, "Per-user accounts"):
+
+- **Stream account `MAILBOX`**: JetStream, every stream (`MBX_<USER>`, `MBX_ALL`, `KV_presence`,
+  `EVT_<USER>`, `KV_sharing`) and the admin user `mbx_admin`. Nothing else connects there.
+- **One account per mailbox user, `USER_<name>`**: no JetStream; the user, with their bcrypt hash
+  and the permission block below. Everything the user can reach is a service import from
+  `MAILBOX`, and `MAILBOX` exports each service only to the accounts listed:
+
+```
+service (MAILBOX export -> USER_alice import)       response   exported to
+  mbx.*.*.*.alice                                   single     USER_alice   send direct mail as alice
+  mbx.all.alice                                     single     USER_alice   broadcast as alice
+  $KV.presence.alice.>                              single     USER_alice   own presence entries
+  $JS.API.STREAM.INFO.MBX_ALICE                     single     USER_alice   own stream position
+  $JS.API.CONSUMER.DURABLE.CREATE.MBX_ALICE.*       single     USER_alice   create / re-target own consumers
+  $JS.API.CONSUMER.INFO.MBX_ALICE.*                 single     USER_alice
+  $JS.API.CONSUMER.MSG.NEXT.MBX_ALICE.*             stream     USER_alice   pull own mail
+  $JS.ACK.MBX_ALICE.>                               single     USER_alice   ack own mail
+  $JS.API.DIRECT.GET.MBX_ALICE                      stream     USER_alice   mbox inbox, doctor read-back
+  evt.alice.*                                       single     USER_alice   write own events feed
+  $JS.API.DIRECT.GET.EVT_ALICE                      stream     USER_alice   read alice's events feed;
+                                                               + every other user while it is team
+  $JS.API.INFO                                      single     every user   account info (mbox doctor)
+  $JS.API.STREAM.INFO.MBX_ALL                       single     every user   broadcast position
+  $JS.API.DIRECT.GET.MBX_ALL                        stream     every user   read broadcasts
+  $JS.API.DIRECT.GET.KV_presence                    stream     every user   list presence
+  $JS.API.DIRECT.GET.KV_presence.$KV.presence.>     stream     every user   read one presence entry
+  $JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team    single     every user   the list of shared feeds
+stream
+  mbxwake.all.*  ->  mbx.all.*                                 every user   broadcast wake-ups (headers only)
+```
+
+- **Why accounts:** NATS has no permission on reply subjects. Before 0.5.8 every user shared the
+  stream account, so a user could send an allowed API request (a direct get of a forged envelope
+  stored in their own stream, say) with a reply subject such as `mbx.bob.h.l.carol`, and the
+  server published the response there, where `MBX_BOB` stored it as mail from carol. Now a
+  response is delivered in the requester's own account, where no stream exists, and a reply
+  subject can reach the stream account only through that account's imports: subjects ending in
+  the user's own name, or API calls the user may make anyway.
+- **Push consumers:** `CONSUMER.DURABLE.CREATE` accepts any consumer config, so a user can create
+  a push consumer on their own stream. It lives in `MAILBOX` and delivers there, and only while
+  something in `MAILBOX` subscribes to its deliver subject (an import's interest does not count),
+  which nothing does in production. Even then a delivery keeps the stored message's own subject,
+  so a stream that captures it stores it under the user's own name, and JetStream API subjects
+  ignore it; none reach a user account (`test/isolation.test.ts`, with the admin listening on
+  every target). A stream with a literal subject would be such a subscriber, so the events
+  streams use wildcard subjects (`evt.U.*`), like every other stream. The client uses only pull
+  consumers.
+- **Presence rollups:** the `presence` bucket refuses rollup headers. With them, a `Nats-Rollup:
+all` publish on a user's own key purged every user's entries. The client only puts and deletes.
+- **`users.d/`:** each user's file holds the name, the bcrypt hash and a deny-all permission block
+  that the script ignores. An `mbox-admin.sh` from before 0.5.8 copies these files verbatim into
+  the stream account; the block then locks the users out instead of granting them the account.
+- **New accounts and reloads:** nats-server 2.15 wires the imports of an account that a config
+  reload adds only on the next reload, so the script always reloads twice and `add-user` checks
+  as the new user that their imports answer (`test/upgrade.test.ts` pins this behaviour).
+
+The permission block inside each user account, shown for `alice`, is defense in depth: the
+account boundary isolates users without it (`test/isolation.test.ts` proves both), and it is what
+`mbox doctor`'s isolation check sees (a permission error):
 
 ```
 publish allow:
@@ -303,8 +367,8 @@ subscribe allow:
 
 Everything else is denied: in particular nobody may publish another user's `evt.*`, subscribe to
 `evt.*`, create consumers on, purge, delete or query the info of any `EVT_*` stream (their own
-included), read a `private` feed, write the sharing bucket or read any other key in it. Any change here is a `needs-owner` change and needs a negative test in
-`test/isolation.test.ts` (see CLAUDE.md).
+included), read a `private` feed, write the sharing bucket or read any other key in it. Any change to the accounts, exports, imports or this block is a
+`needs-owner` change and needs a negative test in `test/isolation.test.ts` (see CLAUDE.md).
 
 ### Envelope v1
 
