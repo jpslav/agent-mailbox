@@ -26,11 +26,16 @@ treat them as approximate.
   **Server admins must upgrade:** install the new `server/mbox-admin.sh` and run
   `mbox-admin.sh init` (README, "Upgrading a server set up before 0.5.8"). Mail, streams,
   consumers and passwords are kept; clients reconnect on their own and need no update.
+- The presence bucket refuses rollups. Before, any user could purge every user's presence
+  entries with one publish on their own key (`init` fixes existing servers).
 
 ### Changed
 - `mbox-admin.sh` reloads the server twice per change (a new account's imports are wired only by
   the second reload), checks the generated `users.conf` with `nats-server -t` before reloading,
-  and `permissions <name>` shows the user's account, imports and permissions.
+  fails instead of skipping the reload when the server answers but its pid file is missing, and
+  `permissions <name>` shows the user's account, imports and permissions. The files in `users.d/`
+  carry a deny-all block, so an older `mbox-admin.sh` run by mistake locks users out instead of
+  widening their access.
 - Broadcast wake-ups carry only the stored broadcast's headers (`MBX_ALL` republishes them);
   clients only ever used them as a wake-up.
 

@@ -254,9 +254,17 @@ stream
   subject can reach the stream account only through that account's imports: subjects ending in
   the user's own name, or API calls the user may make anyway.
 - **Push consumers:** `CONSUMER.DURABLE.CREATE` accepts any consumer config, so a user can create
-  a push consumer on their own stream. It lives in `MAILBOX` and delivers there; deliveries to
-  stream, API or wake-up subjects have no effect (`test/isolation.test.ts`), and none reach a user
-  account. The client uses only pull consumers.
+  a push consumer on their own stream. It lives in `MAILBOX` and delivers there, and only while
+  something in `MAILBOX` subscribes to its deliver subject (an import's interest does not count),
+  which nothing does in production. Even then a delivery keeps the stored message's own subject,
+  so a stream that captures it stores it under the user's own name, and JetStream API subjects
+  ignore it; none reach a user account (`test/isolation.test.ts`, with the admin listening on
+  every target). The client uses only pull consumers.
+- **Presence rollups:** the `presence` bucket refuses rollup headers. With them, a `Nats-Rollup:
+all` publish on a user's own key purged every user's entries. The client only puts and deletes.
+- **`users.d/`:** each user's file holds the name, the bcrypt hash and a deny-all permission block
+  that the script ignores. An `mbox-admin.sh` from before 0.5.8 copies these files verbatim into
+  the stream account; the block then locks the users out instead of granting them the account.
 - **New accounts and reloads:** nats-server 2.15 wires the imports of an account that a config
   reload adds only on the next reload, so the script always reloads twice and `add-user` checks
   as the new user that their imports answer (`test/upgrade.test.ts` pins this behaviour).

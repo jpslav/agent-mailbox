@@ -323,7 +323,12 @@ context, decision, why.
   isolation. Signing envelopes could let readers reject forgeries, but it changes the wire
   format, needs key distribution, and still lets anyone write into others' streams and the
   presence bucket. Push consumers a user may create on
-  their own stream deliver inside `MAILBOX`, where those deliveries are inert (tested).
+  their own stream deliver inside `MAILBOX`, only to listeners there (none in production), and a
+  delivery keeps its stored subject, so it stays in the user's own name (tested).
+- **Safety around the change:** the `users.d` files carry a deny-all permission block that the
+  script ignores, so an older `mbox-admin.sh` run by mistake afterwards (it copies those files
+  into the stream account) locks users out instead of giving them the whole account. The
+  presence bucket now refuses rollups, which let any user purge everyone's entries.
 - **Limits:** The stream account's account info (`mbox doctor`) still shows totals for the whole
   server, as before. A user's own streams remain readable by the admin.
 

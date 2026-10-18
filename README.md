@@ -272,9 +272,12 @@ Servers provisioned by `mbox-admin.sh` 0.5.7 or earlier keep every user in the s
 That layout lets a user forge mail that shows another user as `verified-user` (see the 0.5.8
 changelog entry). To upgrade, on the mailbox host, as the user that runs `mbox-admin.sh`:
 
-1. Install the new `server/mbox-admin.sh` (Linux: `/usr/local/bin/mbox-admin.sh`, as in
-   `install.sh`). Back up `$MBOX_CONF_DIR` and the JetStream store as under Backups, if you like;
-   the upgrade does not touch the store.
+1. Install the new `server/mbox-admin.sh` wherever you run it from, replacing the old copy
+   (Linux: `/usr/local/bin/mbox-admin.sh`, as in `install.sh`). Do not run an older copy
+   afterwards: it would rewrite `users.conf` in the old layout, and the users would be locked out
+   (the new `users.d` files deny everything outside the new layout) until the new `init` runs
+   again. Back up `$MBOX_CONF_DIR` and the JetStream store as under Backups, if you like; the
+   upgrade does not touch the store.
 2. Run `mbox-admin.sh init` (with the same `MBOX_CONF_DIR` as always). It prints:
 
    ```
@@ -282,6 +285,7 @@ changelog entry). To upgrade, on the mailbox host, as the user that runs `mbox-a
    stream MBX_ALL already exists (kept)
    stream MBX_ALL now republishes broadcast headers to mbxwake.all.* (wake-ups)
    kv bucket presence already exists (kept)
+   kv bucket presence now refuses rollups (one would purge every user's entries)
    reloaded nats-server (pid <pid>; twice, so that new accounts get their imports)
    ```
 
