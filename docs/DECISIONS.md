@@ -222,3 +222,18 @@ context, decision, why.
   so such setups may show no repo or the un-rewritten one. The reads are synchronous, so a working
   directory on a stalled network mount would hold up the daemon's heartbeats for a while; local
   checkouts are the normal case.
+
+## Live test: full length only where length matters
+
+- **Date:** 2026-10
+- **Context:** The live test's 40-round volley was built to show that Claude Code's relay-loop cap
+  does not cut a long exchange and that the mailbox's rate limit is the real guard ("Honest
+  sender"). It takes 3 to 4 minutes of two watched sessions, and was being run for every change
+  that touched hooks or presence too.
+- **Decision:** The `live-test` skill has two lengths: full (to 40) after any change to delivery,
+  the inbox socket, the delivery daemon, the rate limit or pause/resume, and after a new Claude
+  Code version; short (to 6) for any other change real sessions must show, plus whatever checks
+  that change needs.
+- **Why:** A short volley proves what those changes can break (sessions wake, receive and reply);
+  only the full one tests the relay-loop cap and the rate limit, which only the first group of
+  changes can affect.

@@ -211,8 +211,9 @@ them they are skipped, so make sure they ran. Each suite starts its own server o
 ## Live testing
 
 Unit and integration tests cannot see changes in Claude Code itself. The `live-test` skill is the
-recipe: a throwaway server, a temp client config and two real sessions counting to 40 over the
-mailbox. Rules:
+recipe: a throwaway server, a temp client config and two real sessions counting over the mailbox,
+to 40 in full (delivery, the inbox socket, the daemon, the rate limit, a new Claude Code version)
+or to 6 in short (any other change real sessions must show, such as hooks or presence). Rules:
 
 - Sessions launched for a live test run where a human can watch them, for example a visible
   terminal. **Never launch autonomous headless Claude sessions** (`claude -p`, background
@@ -220,7 +221,8 @@ mailbox. Rules:
 - Use only throwaway servers and temp config/state directories. Never point a test at a real
   mailbox server or the real client config.
 - Re-run it after any change to delivery, hooks or the inbox-socket code, and when a new Claude
-  Code version might have changed the protocol (see `docs/PROTOCOL.md`).
+  Code version might have changed the protocol (see `docs/PROTOCOL.md`); the skill says which
+  length each needs.
 
 ## Security model (invariants)
 

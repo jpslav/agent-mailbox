@@ -108,7 +108,7 @@ Suspect a Claude Code release when any of these appear after an upgrade:
 ### How to re-verify
 
 Run the `live-test` skill (`.claude/skills/live-test/SKILL.md`): two real sessions on a throwaway
-server count 1 to 40 over the mailbox. Pass criteria are in that skill. `test/deliverd.test.ts`
+server count 1 to 40 over the mailbox (the full length: a protocol check always runs in full). Pass criteria are in that skill. `test/deliverd.test.ts`
 only proves the daemon against `FakeInbox`; it cannot detect a change in Claude Code. After a
 confirmed change, update `claude-inbox.ts`, `FakeInbox`, this file, and DECISIONS.md if the
 delivery design changes. Protocol changes are `needs-owner` changes.
