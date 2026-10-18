@@ -18,7 +18,17 @@ import { describe, it } from './suite.js';
 
 const SERVER = findServer();
 const enc = (o: unknown): string => (typeof o === 'string' ? o : JSON.stringify(o));
-const STREAMS = ['MBX_ALICE', 'MBX_BOB', 'MBX_MALLORY', 'MBX_ALL', 'KV_presence'];
+const STREAMS = [
+  'MBX_ALICE',
+  'MBX_BOB',
+  'MBX_MALLORY',
+  'MBX_ALL',
+  'KV_presence',
+  'EVT_ALICE',
+  'EVT_BOB',
+  'EVT_MALLORY',
+  'KV_sharing',
+];
 
 /** Remove `user`'s permission block from the generated users.conf and reload (twice: a reload wires new imports only on the next one; here nothing is new, but it does no harm). */
 async function stripPermissions(b: Broker, user: string): Promise<void> {
@@ -62,7 +72,9 @@ async function positions(jsm: JetStreamManager): Promise<Record<string, number>>
 
 /**
  * The subjects stored since `since` whose writer is not `user`: the presence key's user for a
- * presence subject, else the sender token (the last one), whichever stream holds it.
+ * presence subject, the feed's owner for an events subject (a foreign one if it is not the
+ * feed's own), the admin for a sharing-list key, else the sender token (the last one), whichever
+ * stream holds it.
  */
 async function foreignWrites(
   jsm: JetStreamManager,
@@ -77,7 +89,17 @@ async function foreignWrites(
       const m = await jsm.streams.getMessage(s, { seq }).catch(() => null);
       if (!m) continue; // replaced (presence keeps one entry per key)
       const t = m.subject.split('.');
-      const writer = m.subject.startsWith('$KV.presence.') ? t[2] : t[t.length - 1];
+      // A feed or the sharing bucket holds only its own subjects: anything else stored there is
+      // foreign, whoever's name it carries (see the push-consumer test for the one tolerated case).
+      const writer = s.startsWith('EVT_')
+        ? t.length === 3 && t[0] === 'evt' && `EVT_${(t[1] ?? '').toUpperCase()}` === s
+          ? t[1]
+          : '(not this feed)'
+        : s === 'KV_sharing'
+          ? '(the admin, or not the sharing list)'
+          : m.subject.startsWith('$KV.presence.')
+            ? t[2]
+            : t[t.length - 1];
       if (writer === user) own++;
       else foreign.push(`${s}#${seq} ${m.subject}`);
     }
@@ -263,6 +285,8 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'mbx.bob.h.l.carol',
         'mbx.all.carol',
         '$KV.presence.carol.h.x',
+        'evt.bob.h',
+        '$KV.sharing.team',
         'mbxwake.all.carol',
         '$JS.API.STREAM.CREATE.MBX_EVIL',
         '$JS.API.STREAM.DELETE.MBX_BOB',
@@ -323,7 +347,16 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'no push consumer delivered: the test proves nothing',
       );
       for (const sub of listening) sub.unsubscribe();
-      assert.deepEqual((await foreignWrites(jsm, since, 'alice')).foreign, []);
+      // With the admin listening, a feed or the sharing bucket captures the deliveries aimed at it;
+      // they keep alice's own mail subject, which their readers ignore (feeds are read as
+      // evt.<owner>.*, the list as its one key). In production nothing listens, so nothing is
+      // delivered at all ("events feed isolation" proves that).
+      const tolerated = /^(EVT_BOB|KV_sharing)#\d+ mbx\.alice\.laptop\.x\.alice$/;
+      const { foreign } = await foreignWrites(jsm, since, 'alice');
+      assert.deepEqual(
+        foreign.filter((f) => !tolerated.test(f)),
+        [],
+      );
       assert.deepEqual(await streamNames(), namesBefore);
       assert.ok((await jsm.consumers.info('MBX_BOB', 'bobsess')).name === 'bobsess');
       // Without interest in the stream account, a consumer aimed at the wake-up export delivers
@@ -358,9 +391,12 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
      */
     async function injectEverywhere(nc: NatsConnection, user: string): Promise<void> {
       const S = `MBX_${user.toUpperCase()}`;
+      const E = `EVT_${user.toUpperCase()}`;
       const js = jetstream(nc, { checkAPI: false, timeout: 15000 });
       const forged = enc({ v: 1, id: `forged-${user}`, from: 'carol.h.x', body: 'spoof' });
       const pa = await js.publish(`mbx.${user}.h.x.${user}`, forged);
+      const forgedEvent = enc({ event: 'done', address: 'bob.h.forged', status: 'forged' });
+      const pe = await js.publish(`evt.${user}.h`, forgedEvent);
       await js.publish(`$KV.presence.${user}.h.s1`, forged);
       const consumer = enc({
         stream_name: S,
@@ -388,6 +424,11 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         [`mbx.bob.h.x.${user}`, forged], // the publish acknowledgement goes to the reply
         [`mbx.all.${user}`, forged],
         [`$KV.presence.${user}.h.s2`, forged],
+        [`$JS.API.DIRECT.GET.${E}`, enc({ seq: pe.seq })],
+        [`$JS.API.DIRECT.GET.${E}`, enc({ seq: 1, batch: 5, next_by_subj: `evt.${user}.*` })],
+        ['$JS.API.DIRECT.GET.EVT_BOB', enc({ seq: 1 })], // bob's feed is shared with the team
+        ['$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team', ''],
+        [`evt.${user}.h`, forgedEvent],
       ];
       const replies = [
         'mbx.bob.h.l.carol',
@@ -399,6 +440,9 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         '$JS.API.DIRECT.GET.MBX_BOB',
         '_INBOX_bob.x',
         '$JS.ACK.MBX_BOB.bobsess.1.1.1.1.1',
+        'evt.bob.h',
+        '$KV.sharing.team',
+        '$JS.API.DIRECT.GET.EVT_BOB',
       ];
       // a real delivery, acknowledged below with hostile replies (the ack's own response). Not
       // multiplexed: a pulled message keeps its own subject, which the shared inbox cannot route.
@@ -464,6 +508,16 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         ['$JS.API.STREAM.MSG.DELETE.MBX_ALL', { seq: 1 }],
         ['$JS.API.STREAM.CREATE.MBX_EVIL', { name: 'MBX_EVIL', subjects: ['mbx.bob.>'] }],
         ['$KV.presence.bob.h.x', '{}'],
+        ['$JS.API.STREAM.INFO.EVT_BOB', ''],
+        ['$JS.API.STREAM.MSG.GET.EVT_BOB', { seq: 1 }],
+        ['$JS.API.CONSUMER.CREATE.EVT_BOB', { stream_name: 'EVT_BOB', config: {} }],
+        ['$JS.API.STREAM.PURGE.EVT_BOB', {}],
+        ['$JS.API.DIRECT.GET.EVT_BOB.evt.bob.h', ''],
+        ['$JS.API.DIRECT.GET.KV_sharing', { seq: 1 }],
+        ['$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.bob', ''],
+        ['$JS.API.STREAM.PURGE.KV_sharing', {}],
+        ['$KV.sharing.team', '["mallory"]'],
+        ['evt.bob.h', '{}'],
       ];
       const answers = await Promise.all(
         probes.map(([subject, body]) =>
@@ -495,6 +549,11 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'mbx.bob.h.l.mallory.x',
         '$KV.presence.carol.h.x',
         '$KV.presence.bob',
+        'evt.bob.h',
+        'evt.bob',
+        'evt.mallory',
+        'evt.mallory.h.x',
+        '$KV.sharing.team',
       ])
         await assert.rejects(mjs.publish(subject, 'spoof'), subject);
       assert.deepEqual((await foreignWrites(jsm, since, 'mallory')).foreign, []);
@@ -672,12 +731,22 @@ describe('admin script', { skip: SERVER.skip }, () => {
 
   it('the generated config gives each user exactly their own surface', () => {
     const conf = fs.readFileSync(path.join(b.confDir, 'users.conf'), 'utf8');
-    // every export of a user's own subjects is restricted to that user's account
+    // every export of a user's own subjects is restricted to that user's account, except the
+    // read of their events feed, which goes to every account while it is shared with the team
+    const feed = /service: "\$JS\.API\.DIRECT\.GET\.EVT_ALICE"/;
     for (const line of conf.split('\n').filter((l) => /service: "[^"]*(ALICE|alice)[^"]*"/.test(l)))
-      assert.match(line, /accounts: \["USER_alice"\] \}$/, line);
+      if (!feed.test(line)) assert.match(line, /accounts: \["USER_alice"\] \}$/, line);
+    assert.match(
+      conf,
+      /service: "\$JS\.API\.DIRECT\.GET\.EVT_ALICE", response_type: stream, accounts: \["USER_alice", "USER_bob"\] \}/,
+    );
     const aliceAccount = /"USER_alice" \{[\s\S]*?\n {2}\}\n/.exec(conf)?.[0] ?? '';
     assert.ok(aliceAccount, 'no USER_alice account');
-    assert.doesNotMatch(aliceAccount, /jetstream|BOB|bob/);
+    assert.doesNotMatch(aliceAccount, /jetstream/);
+    // bob appears in alice's account only as the read of his shared feed (import and block)
+    const bobLines = aliceAccount.split('\n').filter((l) => /BOB|bob/.test(l));
+    assert.equal(bobLines.length, 2, bobLines.join('\n'));
+    for (const l of bobLines) assert.match(l, /\$JS\.API\.DIRECT\.GET\.EVT_BOB"/, l);
     assert.equal(conf.match(/jetstream: enabled/g)?.length, 1); // only the stream account
   });
 
@@ -757,5 +826,406 @@ describe('admin script', { skip: SERVER.skip }, () => {
     } finally {
       await b2.stop();
     }
+  });
+});
+
+// Events feeds: EVT_<USER>, written only by <user>, readable by another user only while the admin
+// shares it with the team (set-sharing), through a service export to exactly those accounts. bob
+// shares (the default); carol is private. alice has the permission block the script generates;
+// mallory's is stripped, so that her account's imports are the only boundary.
+describe('events feed isolation', { skip: SERVER.skip }, () => {
+  let b: Broker;
+  let alice: NatsConnection;
+  let mallory: NatsConnection;
+  let admin: NatsConnection;
+  let ajs: JetStreamClient;
+  let jsm: JetStreamManager;
+  const ev = (user: string, n: number, address = `${user}.box.s-${n}`): string =>
+    JSON.stringify({ event: 'started', address, user, at: '' });
+  before(async () => {
+    b = new Broker(SERVER);
+    await b.init(['alice', 'bob', 'carol', 'mallory']);
+    b.admin(['set-sharing', 'carol', 'private']);
+    await stripPermissions(b, 'mallory');
+    for (const u of ['bob', 'carol']) {
+      const nc = await b.conn(u);
+      await jetstream(nc, { checkAPI: false }).publish(`evt.${u}.box`, ev(u, 1));
+      await nc.close();
+    }
+    alice = await b.conn('alice');
+    mallory = await b.conn('mallory');
+    admin = await b.conn('admin');
+    ajs = jetstream(alice, { checkAPI: false, timeout: 15000 });
+    jsm = await jetstreamManager(admin);
+  });
+  after(async () => {
+    await alice?.close();
+    await mallory?.close();
+    await admin?.close();
+    await b?.stop();
+  });
+
+  /** A request alice sends must be refused by the server's permissions (her block). */
+  async function denied(subject: string, body: unknown = ''): Promise<void> {
+    await assert.rejects(
+      alice.request(subject, enc(body), { timeout: 15000 }),
+      /Permissions Violation for Publish to/,
+      subject,
+    );
+  }
+  /** Requests mallory sends that nothing in her account answers (no import serves them). */
+  async function unanswered(probes: Array<[string, unknown]>): Promise<void> {
+    const answers = await Promise.all(
+      probes.map(([subject, body]) =>
+        mallory.request(subject, enc(body), { timeout: 3000 }).then(
+          (m) => `${subject}: answered ${m.string().slice(0, 80)}`,
+          () => null,
+        ),
+      ),
+    );
+    assert.deepEqual(
+      answers.filter((a) => a !== null),
+      [],
+    );
+  }
+  async function subDenied(subject: string): Promise<void> {
+    const sub = alice.subscribe(subject);
+    const res = await Promise.race([sub.closed, sleep(2000).then(() => 'still open')]);
+    assert.ok(
+      res instanceof Error && /Permissions Violation for Subscription/.test(res.message),
+      `${subject}: ${String(res)}`,
+    );
+  }
+  async function count(stream: string): Promise<number> {
+    return (await jsm.streams.info(stream)).state.messages;
+  }
+  /** Every event in a feed, read the way the client reads it (batch direct get). */
+  async function readFeed(nc: NatsConnection, user: string): Promise<string[]> {
+    const njsm = await jetstreamManager(nc, { checkAPI: false });
+    const it = await njsm.direct.getBatch(`EVT_${user.toUpperCase()}`, {
+      seq: 1,
+      batch: 100,
+      next_by_subj: `evt.${user}.*`,
+    });
+    const out: string[] = [];
+    for await (const m of it) out.push(m.string());
+    return out;
+  }
+  /**
+   * Whether `nc` may read `user`'s feed. A refused batch get is never answered (a timeout), so
+   * this asks with one single get: refused at once by the permission block (alice), or answered
+   * by nobody in the account (mallory, no import).
+   */
+  async function canRead(nc: NatsConnection, user: string): Promise<boolean> {
+    const njsm = await jetstreamManager(nc, { checkAPI: false, timeout: 3000 });
+    return njsm.direct.getMessage(`EVT_${user.toUpperCase()}`, { seq: 1 }).then(
+      () => true,
+      (e: unknown) => {
+        if (/Permissions Violation|no responders|503|timeout/i.test(String(e))) return false;
+        throw e;
+      },
+    );
+  }
+  async function sharingList(nc: NatsConnection): Promise<unknown> {
+    const njsm = await jetstreamManager(nc, { checkAPI: false });
+    const m = await njsm.direct.getMessage('KV_sharing', { last_by_subj: '$KV.sharing.team' });
+    return m ? (JSON.parse(m.string()) as unknown) : null;
+  }
+  const FEEDS = ['EVT_ALICE', 'EVT_BOB', 'EVT_CAROL', 'EVT_MALLORY'];
+
+  describe('negative: alice and mallory cannot', () => {
+    it("read carol's private feed (any API form)", async () => {
+      await denied('$JS.API.DIRECT.GET.EVT_CAROL', { seq: 1 });
+      await denied('$JS.API.DIRECT.GET.EVT_CAROL', {
+        seq: 1,
+        batch: 10,
+        next_by_subj: 'evt.carol.*',
+      });
+      await denied('$JS.API.DIRECT.GET.EVT_CAROL.evt.carol.box');
+      await denied('$JS.API.STREAM.MSG.GET.EVT_CAROL', { seq: 1 });
+      await denied('$JS.API.STREAM.INFO.EVT_CAROL');
+      assert.equal(await canRead(alice, 'carol'), false);
+      await unanswered([
+        ['$JS.API.DIRECT.GET.EVT_CAROL', { seq: 1 }],
+        ['$JS.API.DIRECT.GET.EVT_CAROL', { seq: 1, batch: 10, next_by_subj: 'evt.carol.*' }],
+        ['$JS.API.DIRECT.GET.EVT_CAROL', { multi_last: ['evt.carol.*'] }],
+        ['$JS.API.DIRECT.GET.EVT_CAROL.evt.carol.box', ''],
+        ['$JS.API.STREAM.MSG.GET.EVT_CAROL', { seq: 1 }],
+        ['$JS.API.STREAM.INFO.EVT_CAROL', ''],
+      ]);
+      assert.equal(await canRead(mallory, 'carol'), false);
+    });
+    it("core-subscribe to anyone's events (alice), or hear any of them (mallory)", async () => {
+      await subDenied('evt.carol.*');
+      await subDenied('evt.bob.box');
+      await subDenied('evt.alice.*');
+      await subDenied('evt.>');
+      const heard: string[] = [];
+      mallory.subscribe('>', { callback: (_e, m) => void heard.push(m.subject) });
+      await mallory.flush();
+      const bob = await b.conn('bob');
+      await jetstream(bob, { checkAPI: false }).publish('evt.bob.box', ev('bob', 7));
+      await ajs.publish('evt.alice.box', ev('alice', 7));
+      await bob.close();
+      await sleep(1000);
+      assert.deepEqual(heard, []);
+    });
+    it("write another user's feed", async () => {
+      const before = await Promise.all(FEEDS.map(count));
+      const mjs = jetstream(mallory, { checkAPI: false, timeout: 3000 });
+      for (const subj of [
+        'evt.bob.box',
+        'evt.carol.box',
+        'evt.bob',
+        'evt.bob.box.x',
+        'evt.all.box',
+      ]) {
+        await assert.rejects(ajs.publish(subj, ev('bob', 9)), /Permissions Violation/, subj);
+        await assert.rejects(mjs.publish(subj, ev('bob', 9)), subj);
+      }
+      for (const subj of ['evt.alice', 'evt.alice.box.x'])
+        await assert.rejects(ajs.publish(subj, ev('alice', 9)), /Permissions Violation/, subj);
+      for (const subj of ['evt.mallory', 'evt.mallory.box.x'])
+        await assert.rejects(mjs.publish(subj, ev('mallory', 9)), subj);
+      assert.deepEqual(await Promise.all(FEEDS.map(count)), before);
+    });
+    it('create, read or delete consumers on any feed, their own and shared ones included', async () => {
+      const probes: Array<[string, unknown]> = [];
+      for (const s of FEEDS) {
+        const cfg = { stream_name: s, config: { durable_name: 'x', ack_policy: 'none' } };
+        probes.push(
+          [`$JS.API.CONSUMER.DURABLE.CREATE.${s}.x`, cfg],
+          [`$JS.API.CONSUMER.CREATE.${s}.x`, cfg],
+          [`$JS.API.CONSUMER.CREATE.${s}`, cfg],
+          [`$JS.API.CONSUMER.MSG.NEXT.${s}.x`, { batch: 1 }],
+          [`$JS.API.CONSUMER.INFO.${s}.x`, ''],
+          [`$JS.API.CONSUMER.DELETE.${s}.x`, ''],
+          [`$JS.API.CONSUMER.NAMES.${s}`, ''],
+        );
+      }
+      for (const [subject, body] of probes) await denied(subject, body);
+      await unanswered(probes);
+    });
+    it('purge, delete, update or query any feed, or delete events in one', async () => {
+      const probes: Array<[string, unknown]> = [];
+      for (const s of FEEDS)
+        probes.push(
+          [`$JS.API.STREAM.PURGE.${s}`, {}],
+          [`$JS.API.STREAM.DELETE.${s}`, ''],
+          [`$JS.API.STREAM.UPDATE.${s}`, { name: s, subjects: ['evt.>'] }],
+          [`$JS.API.STREAM.MSG.DELETE.${s}`, { seq: 1 }],
+          [`$JS.API.STREAM.INFO.${s}`, ''], // not needed: feeds are read by direct get
+        );
+      probes.push([
+        '$JS.API.STREAM.CREATE.EVT_EVIL',
+        { name: 'EVT_EVIL', subjects: ['evt.bob.*'] },
+      ]);
+      for (const [subject, body] of probes) await denied(subject, body);
+      await unanswered(probes);
+      assert.deepEqual(
+        await Promise.all(FEEDS.map(async (s) => (await jsm.streams.info(s)).config.name)),
+        FEEDS,
+      );
+    });
+    it('write the sharing list, or read any of it but the team key', async () => {
+      const before = await count('KV_sharing');
+      const mjs = jetstream(mallory, { checkAPI: false, timeout: 3000 });
+      for (const subj of ['$KV.sharing.team', '$KV.sharing.alice', '$KV.sharing.x.y']) {
+        await assert.rejects(ajs.publish(subj, '["alice","carol"]'), /Permissions Violation/, subj);
+        await assert.rejects(mjs.publish(subj, '["mallory","carol"]'), subj);
+      }
+      assert.equal(await count('KV_sharing'), before);
+      const probes: Array<[string, unknown]> = [
+        ['$JS.API.DIRECT.GET.KV_sharing', { seq: 1 }],
+        ['$JS.API.DIRECT.GET.KV_sharing', { multi_last: ['$KV.sharing.>'] }],
+        ['$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.carol', ''],
+        ['$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.>', ''],
+        ['$JS.API.CONSUMER.CREATE.KV_sharing', { stream_name: 'KV_sharing', config: {} }],
+        ['$JS.API.STREAM.PURGE.KV_sharing', {}],
+        ['$JS.API.STREAM.INFO.KV_sharing', ''],
+      ];
+      for (const [subject, body] of probes) await denied(subject, body);
+      await unanswered(probes);
+      await subDenied('$KV.sharing.>');
+    });
+    it('deliver into a feed or the sharing list through a push consumer, with nothing listening', async () => {
+      // Production: nothing in the stream account subscribes to a feed's or the list's subjects,
+      // and a stream with a wildcard subject does not count as a listener. The control, a stream on
+      // a literal subject, does capture: the check could see a delivery.
+      await jsm.streams.add({ name: 'TST_LIT', subjects: ['tst.lit'] });
+      try {
+        const targets = ['evt.bob.box', 'evt.carol.box', 'evt.alice.box', '$KV.sharing.team'];
+        const before = await Promise.all([...FEEDS, 'KV_sharing'].map(count));
+        for (const [nc, user] of [
+          [alice, 'alice'],
+          [mallory, 'mallory'],
+        ] as const) {
+          const S = `MBX_${user.toUpperCase()}`;
+          await jetstream(nc, { checkAPI: false }).publish(`mbx.${user}.h.p.${user}`, ev('bob', 3));
+          let n = 0;
+          for (const target of [...targets, 'tst.lit'])
+            await nc.request(
+              `$JS.API.CONSUMER.DURABLE.CREATE.${S}.push${++n}`,
+              enc({
+                stream_name: S,
+                config: {
+                  durable_name: `push${n}`,
+                  deliver_subject: target,
+                  ack_policy: 'none',
+                  deliver_policy: 'all',
+                  filter_subject: `mbx.${user}.h.p.*`,
+                },
+              }),
+              { timeout: 15000 },
+            );
+        }
+        for (let i = 0; i < 300 && (await count('TST_LIT')) < 2; i++) await sleep(100);
+        assert.equal(await count('TST_LIT'), 2, 'the control stream captured nothing');
+        await sleep(1500);
+        assert.deepEqual(await Promise.all([...FEEDS, 'KV_sharing'].map(count)), before);
+      } finally {
+        await jsm.streams.delete('TST_LIT');
+      }
+    });
+    it('reply-inject into a feed or the sharing list with any request they may send', async () => {
+      // As on main for the mail streams: an allowed request whose reply subject is another
+      // user's feed or the sharing list; the response must never be stored there.
+      const since = await Promise.all([...FEEDS, 'KV_sharing'].map(count));
+      for (const [nc, user] of [
+        [alice, 'alice'],
+        [mallory, 'mallory'],
+      ] as const) {
+        const js = jetstream(nc, { checkAPI: false, timeout: 15000 });
+        const forged = ev('bob', 66, 'bob.box.forged');
+        const pa = await js.publish(`evt.${user}.box`, forged);
+        const U = user.toUpperCase();
+        const requests: Array<[string, string]> = [
+          [`$JS.API.DIRECT.GET.EVT_${U}`, enc({ seq: pa.seq })],
+          [`$JS.API.DIRECT.GET.EVT_${U}`, enc({ seq: 1, batch: 5, next_by_subj: `evt.${user}.*` })],
+          ['$JS.API.DIRECT.GET.EVT_BOB', enc({ seq: 1 })],
+          ['$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team', ''],
+          ['$JS.API.INFO', ''],
+          [`evt.${user}.box`, forged], // the publish acknowledgement goes to the reply
+        ];
+        const replies = [
+          'evt.bob.box',
+          'evt.carol.forged',
+          `evt.${user === 'alice' ? 'mallory' : 'alice'}.box`,
+          '$KV.sharing.team',
+          '$JS.API.DIRECT.GET.EVT_CAROL',
+        ];
+        for (const [subject, body] of requests)
+          for (const reply of replies) nc.publish(subject, body, { reply });
+        await nc.flush();
+      }
+      await sleep(1500);
+      const after = await Promise.all([...FEEDS, 'KV_sharing'].map(count));
+      // Each attacker's own feed grew by exactly their own six publishes (the forged event, and
+      // the five acknowledged ones); every other feed and the sharing list by nothing.
+      assert.deepEqual(
+        after.map((n, i) => n - (since[i] ?? 0)),
+        [6, 0, 0, 6, 0],
+        'EVT_ALICE, EVT_BOB, EVT_CAROL, EVT_MALLORY, KV_sharing',
+      );
+    });
+    it("read a feed once its owner's sharing is set to private (live reload), and again after team", async () => {
+      assert.equal(await canRead(alice, 'bob'), true);
+      assert.equal(await canRead(mallory, 'bob'), true);
+      try {
+        assert.match(b.admin(['set-sharing', 'bob', 'private']).out, /reloaded nats-server/);
+        // The reload signal is asynchronous: wait for it to take effect.
+        for (let i = 0; i < 300 && (await canRead(mallory, 'bob')); i++) await sleep(100);
+        assert.equal(await canRead(alice, 'bob'), false);
+        assert.equal(await canRead(mallory, 'bob'), false);
+        await denied('$JS.API.DIRECT.GET.EVT_BOB', {
+          seq: 1,
+          batch: 10,
+          next_by_subj: 'evt.bob.*',
+        });
+        assert.deepEqual(await sharingList(alice), ['alice', 'mallory']);
+      } finally {
+        b.admin(['set-sharing', 'bob', 'team']);
+      }
+      for (let i = 0; i < 300 && !(await canRead(mallory, 'bob')); i++) await sleep(100);
+      assert.equal((await readFeed(alice, 'bob')).length >= 1, true);
+      assert.equal((await readFeed(mallory, 'bob')).length >= 1, true);
+    });
+  });
+
+  describe('positive', () => {
+    it("alice reads her own feed and bob's shared one, and the sharing list (without carol)", async () => {
+      assert.ok((await readFeed(alice, 'alice')).length >= 1);
+      assert.match(await readFeed(alice, 'bob').then((l) => l[0] ?? ''), /bob\.box\.s-1/);
+      assert.deepEqual(await sharingList(alice), ['alice', 'bob', 'mallory']);
+    });
+    it("mallory, without a permission block, reads bob's shared feed through her import", async () => {
+      assert.match(await readFeed(mallory, 'bob').then((l) => l[0] ?? ''), /bob\.box\.s-1/);
+      assert.deepEqual(await sharingList(mallory), ['alice', 'bob', 'mallory']);
+    });
+    it('carol reads her own private feed, and the shared ones', async () => {
+      const carol = await b.conn('carol');
+      try {
+        assert.equal((await readFeed(carol, 'carol')).length, 1);
+        assert.ok((await readFeed(carol, 'bob')).length >= 1);
+      } finally {
+        await carol.close();
+      }
+    });
+  });
+
+  describe('admin script', () => {
+    it('set-sharing rejects bad input; list-users --sharing and permissions show the settings', () => {
+      assert.notEqual(b.admin(['set-sharing', 'bob', 'public'], { check: false }).code, 0);
+      assert.notEqual(b.admin(['set-sharing', 'nobody', 'team'], { check: false }).code, 0);
+      assert.notEqual(b.admin(['set-sharing', 'bob'], { check: false }).code, 0);
+      assert.deepEqual(b.admin(['list-users', '--sharing']).out.trim().split('\n'), [
+        'alice team',
+        'bob team',
+        'carol private',
+        'mallory team',
+      ]);
+      const perms = b.admin(['permissions', 'alice']).out;
+      assert.match(perms, /"\$JS\.API\.DIRECT\.GET\.EVT_BOB"/);
+      assert.doesNotMatch(perms, /EVT_CAROL/);
+      assert.match(perms, /"evt\.alice\.\*",/);
+      assert.match(perms, /service: "evt\.alice\.\*", accounts: \["USER_alice"\]/);
+      assert.match(b.admin(['permissions', 'carol']).out, /EVT_ALICE[\s\S]*EVT_BOB/);
+      // carol's feed is exported to her account alone; bob's to every account.
+      const conf = fs.readFileSync(path.join(b.confDir, 'users.conf'), 'utf8');
+      assert.match(
+        conf,
+        /service: "\$JS\.API\.DIRECT\.GET\.EVT_CAROL", response_type: stream, accounts: \["USER_carol"\] \}/,
+      );
+      assert.match(
+        conf,
+        /service: "\$JS\.API\.DIRECT\.GET\.EVT_BOB", response_type: stream, accounts: \["USER_bob", "USER_alice", "USER_carol", "USER_mallory"\] \}/,
+      );
+    });
+    it('set-sharing to the current value does not reload the server', () => {
+      const out = b.admin(['set-sharing', 'alice', 'team']).out;
+      assert.match(out, /users\.conf unchanged: no server reload needed/);
+      assert.doesNotMatch(out, /reloaded nats-server/);
+    });
+    it('add-user and remove-user keep every account and the sharing list in step', async () => {
+      b.addUser('dave');
+      try {
+        assert.match(b.admin(['permissions', 'alice']).out, /EVT_DAVE/);
+        assert.deepEqual(await sharingList(alice), ['alice', 'bob', 'dave', 'mallory']);
+        // an existing account gains the import of the new user's feed
+        const dave = await b.conn('dave');
+        await jetstream(dave, { checkAPI: false }).publish('evt.dave.box', ev('dave', 1));
+        await dave.close();
+        for (let i = 0; i < 300 && !(await canRead(mallory, 'dave')); i++) await sleep(100);
+        assert.equal((await readFeed(mallory, 'dave')).length, 1);
+        assert.equal((await readFeed(alice, 'dave')).length, 1);
+      } finally {
+        assert.match(
+          b.admin(['remove-user', 'dave', '--delete-stream']).out,
+          /deleted stream EVT_DAVE/,
+        );
+      }
+      assert.doesNotMatch(b.admin(['permissions', 'alice']).out, /EVT_DAVE/);
+      assert.deepEqual(await sharingList(alice), ['alice', 'bob', 'mallory']);
+    });
   });
 });

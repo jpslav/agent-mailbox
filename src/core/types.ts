@@ -219,6 +219,53 @@ export interface PresenceEntry {
   live: true;
 }
 
+// ---------------------------------------------------------------- events feed
+
+/** What happened to a session. `done` is the session saying it finished (`mbox done`). */
+export type EventKind =
+  'started' | 'ended' | 'status-changed' | 'role-changed' | 'parent-changed' | 'done';
+
+/**
+ * One entry in a user's events feed: a session's lifecycle and metadata, never message contents.
+ * The field names and their order are the wire format (test/golden-events.test.ts).
+ */
+export interface SessionEvent {
+  event: EventKind;
+  address: string;
+  user: string;
+  host: string | null;
+  repo: string | null;
+  branch: string | null;
+  role: Role | null;
+  parent: string | null;
+  status: string | null;
+  /** ISO-8601, as the writer stamped it. */
+  at: string;
+}
+
+/** An event as `events.read` returns it: checked for shape, with server-verified user and time. */
+export interface FeedEntry extends SessionEvent {
+  /** When the server stored it (ms since the epoch); `at` is the writer's claim. */
+  time: number;
+}
+
+/** How a user's feed is shared, as the mailbox admin set it. */
+export type Sharing = 'team' | 'private';
+
+/** The users' events feeds: written on session lifecycle and status changes, read on demand. */
+export interface Events {
+  /** Append to the own user's feed. */
+  publish(ev: SessionEvent, opts?: { timeoutMs?: number }): Promise<void>;
+  /**
+   * `user`'s feed from `sinceMs` ago, oldest first: the first `max` events (default 10000) of
+   * that window. Throws an error with `.notShared === true` when the server does not let this user
+   * read that feed (it is private, or there is no such user: the two look the same).
+   */
+  read(user: string, opts: { sinceMs: number; max?: number }): Promise<FeedEntry[]>;
+  /** The users whose feed the admin shares with the team, or null when the server has no list. */
+  shared(): Promise<string[] | null>;
+}
+
 // ---------------------------------------------------------------- the transport seam
 
 /** What a handler for a delivery may return: `{ackAfter}` defers the acknowledgement. */
@@ -299,6 +346,7 @@ export interface Transport {
   /** The "start from here" cursor for a brand-new session. */
   now(): Promise<Cursor>;
   presence: Presence;
+  events: Events;
   limits: {
     /** The longest label that still forms a routable address. */
     maxLabelLen(user: string, host: string): number;

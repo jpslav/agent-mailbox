@@ -30,6 +30,7 @@ const BUNDLE = 'adapters/claude-code/dist/mbox.mjs';
 const OLD_CLIENTS = [
   ['0.5.6', fromRelease('v0.5.6', BUNDLE)],
   ['0.5.7', fromRelease('v0.5.7', BUNDLE)],
+  ['0.5.8', fromRelease('v0.5.8', BUNDLE)],
 ] as const;
 const skip =
   SERVER.skip ?? OLD_ADMIN.skip ?? OLD_CLIENTS.map(([, c]) => c.skip).find((s) => s !== undefined);
@@ -466,3 +467,107 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
     assert.deepEqual(b.admin(['list-users']).out.trim().split('\n'), ['alice', 'bob']);
   });
 });
+
+// A server provisioned by v0.5.8 (per-user accounts, before events feeds): the first init of this
+// version adds the feeds, the sharing list and their exports in place; clients of either version
+// keep working, and a feed takes no reply-injected writes.
+const ADMIN_058 = fromRelease('v0.5.8', 'server/mbox-admin.sh');
+const CLIENT_058 = fromRelease('v0.5.8', BUNDLE);
+describe(
+  'upgrade from v0.5.8 to events feeds',
+  {
+    skip: SERVER.skip ?? ADMIN_058.skip ?? CLIENT_058.skip,
+  },
+  () => {
+    let b: Broker | null = null;
+    after(async () => {
+      await b?.stop();
+    });
+
+    it('init adds the feeds, the list and the exports; old and new clients work', async () => {
+      b = new Broker(SERVER, { adminScript: ADMIN_058.path });
+      const broker = b;
+      await broker.init(['alice', 'bob']);
+      const aliceEnv = makeEnv(broker, 'alice');
+      const bobEnv = makeEnv(broker, 'bob');
+      const dir = projectDir('evt-upgrade');
+      const run = (bundle: string | undefined, env: MachineEnv, s: string, args: string[]) =>
+        mbox(args, {
+          env: { ...env, AGENT_MAILBOX_SESSION: s },
+          cwd: dir,
+          ...(bundle ? { bundle } : {}),
+        });
+
+      // Before the upgrade: a new client warns about the missing feed, and nothing else breaks.
+      const st = run(undefined, aliceEnv, 'a-up', ['status', 'before the upgrade']);
+      assert.equal(st.code, 0, st.stderr);
+      assert.match(st.stderr, /could not write the "status-changed" event to your events feed/);
+      const none = run(undefined, aliceEnv, 'a-up', ['events']);
+      assert.equal(none.code, 1);
+      assert.match(
+        none.stderr,
+        /no events feed for you yet; ask the admin to run mbox-admin\.sh init/,
+      );
+
+      broker.adminScript = ADMIN;
+      const out = broker.admin(['init']).out;
+      assert.match(out, /created stream EVT_ALICE \(evt\.alice\.\*/);
+      assert.match(out, /created stream EVT_BOB \(evt\.bob\.\*/);
+      assert.match(out, /created kv bucket sharing/);
+      assert.match(out, /reloaded nats-server/);
+      assert.match(out, /sharing list updated: feeds shared with the team: \["alice","bob"\]/);
+      const again = broker.admin(['init']).out;
+      assert.match(again, /users\.conf unchanged: no server reload needed/);
+      assert.doesNotMatch(again, /created|updated|reloaded/);
+
+      // The new client writes and reads feeds across users.
+      await until('alice reaches the stream account again', async () => {
+        return (await reachesStreams(broker, 'alice')) === 'ok';
+      });
+      assert.equal(run(undefined, aliceEnv, 'a-up', ['status', 'after the upgrade']).code, 0);
+      await until("bob reads alice's feed", () => {
+        const r = run(undefined, bobEnv, 'b-up', ['events', '--user', 'alice', '--json']);
+        return r.code === 0 && r.stdout.includes('"status":"after the upgrade"');
+      });
+
+      // The v0.5.8 client, unchanged: doctor, mail, inbox.
+      const old = CLIENT_058.path;
+      const doctor = run(old, bobEnv, 'b-old', ['doctor']);
+      assert.equal(doctor.code, 0, doctor.stdout + doctor.stderr);
+      const bobAddr = (run(old, bobEnv, 'b-old', ['whoami']).stdout.split('\n')[0] ?? '').trim();
+      assert.equal(run(old, aliceEnv, 'a-old', ['send', bobAddr, 'from 0.5.8']).code, 0);
+      const inbox = run(old, bobEnv, 'b-old', ['inbox', '--since', '10m']);
+      assert.equal(inbox.code, 0, inbox.stderr);
+      assert.match(inbox.stdout, /from 0\.5\.8/);
+
+      // No reply to alice's requests lands in bob's feed or the sharing list.
+      const alice = await broker.conn('alice');
+      const admin = await broker.conn('admin');
+      try {
+        const jsm = await jetstreamManager(admin);
+        const before = [
+          (await jsm.streams.info('EVT_BOB')).state.messages,
+          (await jsm.streams.info('KV_sharing')).state.messages,
+        ];
+        const pe = await jetstream(alice, { checkAPI: false }).publish(
+          'evt.alice.h',
+          JSON.stringify({ event: 'done', address: 'bob.h.forged', status: 'forged' }),
+        );
+        for (const reply of ['evt.bob.h', '$KV.sharing.team'])
+          alice.publish('$JS.API.DIRECT.GET.EVT_ALICE', JSON.stringify({ seq: pe.seq }), { reply });
+        await alice.flush();
+        await sleep(1500);
+        assert.deepEqual(
+          [
+            (await jsm.streams.info('EVT_BOB')).state.messages,
+            (await jsm.streams.info('KV_sharing')).state.messages,
+          ],
+          before,
+        );
+      } finally {
+        await alice.close();
+        await admin.close();
+      }
+    });
+  },
+);

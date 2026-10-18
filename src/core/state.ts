@@ -6,6 +6,7 @@
 //                      each other's writes)
 //   <sid>.lock         single-receiver pidfile (`mbox watch`, or `mbox deliverd` serving the session)
 //   <sid>.wait.lock    current hook waiter (`mbox wait`); the newest claim wins
+//   <sid>.ended        the session's `ended` event was written (claimEnded); `started` removes it
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, parseAddr, shortHost } from './addr.js';
@@ -47,6 +48,35 @@ export const lockPath = (sid: string, env: Env = process.env): string =>
   path.join(sessionsDir(env), `${sid}.lock`);
 export const waitLockPath = (sid: string, env: Env = process.env): string =>
   path.join(sessionsDir(env), `${sid}.wait.lock`);
+/** Present once the session's `ended` event was claimed; `started` removes it (see events.ts). */
+export const endedPath = (sid: string, env: Env = process.env): string =>
+  path.join(sessionsDir(env), `${sid}.ended`);
+
+/**
+ * Claim writing the session's `ended` event: true for the first caller since the session last
+ * started, false for every later one, in any process (the file is created exclusively).
+ */
+export function claimEnded(sid: string, env: Env = process.env): boolean {
+  validSid(sid);
+  try {
+    mkdirp(sessionsDir(env));
+    fs.writeFileSync(endedPath(sid, env), new Date().toISOString() + '\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    return true;
+  } catch (e) {
+    // Only "already claimed" stops it; a state directory that cannot be written still gets its
+    // event (one duplicate at worst, never a missing end).
+    return (e as NodeJS.ErrnoException).code !== 'EEXIST';
+  }
+}
+
+/** The session is live again: its next end writes `ended` again. */
+export function clearEnded(sid: string, env: Env = process.env): void {
+  validSid(sid);
+  fs.rmSync(endedPath(sid, env), { force: true });
+}
 
 function validSid(sid: string): string {
   if (!SID_RE.test(sid))

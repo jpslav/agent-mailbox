@@ -23,8 +23,11 @@ import {
   repoFromUrl,
 } from '../src/core/session-meta.js';
 import { ConfigError, configPath, loadConfig, profileName } from '../src/core/config.js';
+import { checkEvent, emitEvent, sessionEvent } from '../src/core/events.js';
 import { replaces } from '../src/core/registrations.js';
 import {
+  claimEnded,
+  clearEnded,
   cursorFits,
   ensureSession,
   envMeta,
@@ -34,7 +37,7 @@ import {
   stateDir,
   writeCursor,
 } from '../src/core/state.js';
-import type { Delivery, PresenceEntry } from '../src/core/types.js';
+import type { Delivery, Events, PresenceEntry, Transport } from '../src/core/types.js';
 import { BUILD_VERSION, compareVersions, isVersion, ownVersion } from '../src/core/version.js';
 import { describe, it } from './suite.js';
 
@@ -541,6 +544,82 @@ describe('session metadata', () => {
     it('skips entries that are not live', () => {
       assert.deepEqual(show([{ ...peer('alice.h.x'), live: false as true }]), []);
     });
+  });
+});
+
+describe('events feed', () => {
+  const st = {
+    address: 'alice.laptop.web-1a2b',
+    aliases: [],
+    cwd: '/nowhere',
+    createdAt: '2026-01-02T03:04:05.678Z',
+    role: 'manager' as const,
+    status: 'planning',
+  };
+  it('sessionEvent: the session metadata, never anything else', () => {
+    const ev = sessionEvent('done', st, {
+      cfg: { user: 'alice' },
+      git: { repo: null, branch: null },
+      at: new Date('2026-10-17T12:00:00.000Z'),
+    });
+    assert.deepEqual(ev, {
+      event: 'done',
+      address: 'alice.laptop.web-1a2b',
+      user: 'alice',
+      host: 'laptop',
+      repo: null,
+      branch: null,
+      role: 'manager',
+      parent: null,
+      status: 'planning',
+      at: '2026-10-17T12:00:00.000Z',
+    });
+  });
+  it("checkEvent keeps only known events of the feed owner's addresses, fields checked for shape", () => {
+    const t = Date.parse('2026-10-17T12:00:00.000Z');
+    const ok = checkEvent(
+      JSON.stringify({ event: 'started', address: 'alice.h.x', parent: 'bob', at: 'soon' }),
+      'alice',
+      t,
+    );
+    assert.ok(ok);
+    assert.deepEqual(
+      [ok.user, ok.host, ok.parent, ok.at, ok.time],
+      ['alice', 'h', null, '2026-10-17T12:00:00.000Z', t],
+    );
+    assert.equal(
+      checkEvent(JSON.stringify({ event: 'started', address: 'bob.h.x' }), 'alice', t),
+      null,
+    );
+    assert.equal(
+      checkEvent(JSON.stringify({ event: 'boom', address: 'alice.h.x' }), 'alice', t),
+      null,
+    );
+    assert.equal(checkEvent(JSON.stringify({ event: 'ended' }), 'alice', t), null);
+    assert.equal(checkEvent('null', 'alice', t), null);
+    assert.equal(checkEvent('[1]', 'alice', t), null);
+    assert.equal(checkEvent('{', 'alice', t), null);
+  });
+  it('ended is claimed once per start, in any process', () => {
+    const env = { AGENT_MAILBOX_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'amb-ended-')) };
+    assert.equal(claimEnded('s-1', env), true);
+    assert.equal(claimEnded('s-1', env), false);
+    assert.equal(claimEnded('s-2', env), true, 'per session');
+    clearEnded('s-1', env);
+    clearEnded('s-1', env); // nothing to clear: fine
+    assert.equal(claimEnded('s-1', env), true, 'a new start ends again');
+    assert.throws(() => claimEnded('../x', env));
+  });
+  it('emitEvent never throws and never waits past its bound', async () => {
+    const fake = (publish: Events['publish']): Pick<Transport, 'events'> => ({
+      events: { publish, read: () => Promise.resolve([]), shared: () => Promise.resolve(null) },
+    });
+    const hang = fake(() => new Promise<void>(() => {}));
+    const fails = fake(() => Promise.reject(new Error('down')));
+    const opts = { cfg: { user: 'alice' }, git: { repo: null, branch: null }, timeoutMs: 50 };
+    const e1 = await emitEvent(hang, 'started', st, opts);
+    assert.match(String(e1), /timed out/);
+    assert.match(String(await emitEvent(fails, 'started', st, opts)), /down/);
   });
 });
 

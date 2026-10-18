@@ -53,6 +53,11 @@
 //       own when it is not refreshed (bucket TTL); list() returns only live records whose user
 //       is the server-verified writer.
 //
+//   events.publish(ev, {timeoutMs})  append an event to the own user's feed
+//   events.read(user, {sinceMs, max}) -> entry[]   a user's feed, oldest first; `.notShared` error
+//       when the server does not let this user read it (private, or no such user)
+//   events.shared() -> user[] | null  the users whose feed the admin shares with the team
+//
 //   limits.maxLabelLen(user, host)   longest label that still forms a routable address
 //   explainError(err) -> string      human-readable message for any error thrown above
 //   diagnose({user, host}) -> [{ok, name, hint?}]       connectivity / auth / permission self-check
@@ -71,6 +76,16 @@
 //   direct mail   mbx.<toUser>.<toHost>.<toLabel>.<fromUser>   stream MBX_<TOUSER> (mbx.<user>.>)
 //   broadcast     mbx.all.<fromUser>                           stream MBX_ALL      (mbx.all.*)
 //   presence      KV bucket `presence`, key <user>.<host>.<session hash>
+//   events        evt.<user>.<host>                            stream EVT_<USER>   (evt.<user>.*)
+//   sharing       KV bucket `sharing`, key `team` = JSON list of the users whose feed is shared
+// Only <user> may publish evt.<user>.*, so a feed's owner is verified by the stream it is in. The
+// stream's subject must be a wildcard, like every stream here: the server sends a push consumer's
+// deliveries to a literal stream subject (it counts as interest), so anyone could write into a
+// literal-subject stream through a push consumer on their own mailbox stream, whatever their
+// publish permissions say; test/isolation.test.ts proves that wildcard streams get nothing. Feeds
+// are read with direct gets; the server lets a user read another's feed only while the admin
+// shares it with the team (the permission block lists exactly those streams). The sharing list is
+// written by the admin and only says what the permissions already decide.
 // The trailing <fromUser> token is enforced by the server's publish permissions, so it is the
 // verified sender. Each session reads its own stream through one durable pull consumer named after
 // the session (filter = this session's addresses, explicit ack); broadcasts are read with direct
@@ -92,12 +107,15 @@ import type {
 import { Kvm } from '@nats-io/kv';
 import type { KV } from '@nats-io/kv';
 import { SEG_RE } from '../addr.js';
+import { checkEvent } from '../events.js';
 import { checkBranch, checkParent, checkRepo, checkRole, checkStatus } from '../session-meta.js';
 import type {
   Cursor,
   Delivery,
   DiagnoseCheck,
   Envelope,
+  Events,
+  FeedEntry,
   PollOptions,
   Presence,
   PresenceEntry,
@@ -116,6 +134,10 @@ const MAX_ADDR_LEN = 128;
 const NS = 1_000_000;
 const INACTIVE_NS = 30 * 86400_000 * NS;
 const DOCTOR_LABEL = 'mbox-doctor';
+const EVT_PREFIX = 'evt';
+const SHARING_BUCKET = 'sharing';
+const SHARING_STREAM = `KV_${SHARING_BUCKET}`;
+const SHARING_KEY = 'team';
 
 // ---------------------------------------------------------------- names
 function parseAddr(s: unknown): [string, string, string] | null {
@@ -129,6 +151,10 @@ function parseAddr(s: unknown): [string, string, string] | null {
 /** MBX_<USER>: users are [a-z0-9-]+ (no '_'), so mapping '-' to '_' cannot collide. */
 export const streamFor = (user: string): string =>
   `${PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, '_')}`;
+
+/** EVT_<USER>: a user's events feed (same mapping as streamFor). */
+export const eventsStreamFor = (user: string): string =>
+  `${EVT_PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, '_')}`;
 
 export function subjectFor(to: string, fromUser: string): string {
   if (!SEG_RE.test(fromUser || '')) throw new Error(`invalid sender user "${fromUser}"`);
@@ -203,6 +229,11 @@ const isPermission = (e: unknown): boolean =>
 const isAuth = (e: unknown): boolean =>
   shape(e)?.name === 'AuthorizationError' ||
   /authorization violation|authentication/i.test(String(shape(e)?.message || ''));
+const isNoStream = (e: unknown): boolean =>
+  shape(e)?.name === 'NoRespondersError' ||
+  shape(e)?.code === 10059 ||
+  shape(e)?.api_error?.err_code === 10059 ||
+  /no responders|stream not found|jetstream is not enabled/i.test(String(shape(e)?.message || ''));
 const isNotFound = (e: unknown): boolean =>
   shape(e)?.code === 10014 ||
   shape(e)?.api_error?.err_code === 10014 ||
@@ -218,6 +249,7 @@ function tag<E>(e: E): E {
 export function explainError(e: unknown): string {
   const err = shape(e);
   if (err?.tooLarge) return err.message ?? '';
+  if ((err as { notShared?: boolean } | null | undefined)?.notShared) return err?.message ?? '';
   if (isAuth(e))
     return 'authentication failed: the user name or password is wrong (or the user was removed). Re-run `mbox setup` with the credentials from the mailbox admin.';
   if (isPermission(e)) {
@@ -984,6 +1016,105 @@ export function createTransport(
     },
   };
 
+  // ---- events feed ----
+  const ownEvents = eventsStreamFor(user);
+  /** An error saying `target`'s feed is not readable here (the server refused it). */
+  const notShared = (target: string, cause: unknown): Error =>
+    Object.assign(
+      new Error(
+        `${target}'s events feed is not shared with you (it is private, or there is no such user)`,
+        { cause },
+      ),
+      { notShared: true },
+    );
+  const events: Events = {
+    async publish(ev, { timeoutMs } = {}) {
+      const host = parseAddr(ev.address)?.[1];
+      if (!host || parseAddr(ev.address)?.[0] !== user)
+        throw new Error(`event address ${ev.address} does not belong to user ${user}`);
+      const s = await conn({ timeoutMs });
+      try {
+        await jsPublish(
+          s,
+          `${EVT_PREFIX}.${user}.${host}`,
+          new TextEncoder().encode(JSON.stringify(ev)),
+          crypto.randomUUID(),
+          timeoutMs,
+        );
+      } catch (e) {
+        // A server provisioned before events feeds has no stream for it and grants no access to it.
+        if (isNoStream(e) || isPermission(e))
+          // eslint-disable-next-line preserve-caught-error -- as in publish(): the message must stand alone
+          throw new Error(
+            `the server has no events feed for user "${user}"; ask the admin to run mbox-admin.sh init`,
+          );
+        throw e;
+      }
+    },
+    async read(target, { sinceMs, max = 10000 }) {
+      if (!SEG_RE.test(target)) throw new Error(`invalid user name "${target}"`);
+      const s = await conn();
+      const start_time = new Date(Date.now() - sinceMs).toISOString();
+      let stored: StoredMessage[];
+      try {
+        // A batch get the server refuses is never answered (it looks like a timeout, after the
+        // full request timeout); a single get is refused at once. So probe the feed first (another
+        // user's, or the own one on a server provisioned before feeds), with one get that any
+        // outcome but a refusal shows is allowed.
+        await s.jsm.direct.getMessage(eventsStreamFor(target), { seq: 1 }).catch((e) => {
+          if (isPermission(e) || isNoStream(e)) throw e;
+        });
+        stored = await directAll(
+          s.jsm,
+          eventsStreamFor(target),
+          { start_time },
+          `${EVT_PREFIX}.${target}.*`,
+          max,
+        );
+      } catch (e) {
+        if (target !== user && (isPermission(e) || isNoStream(e))) throw notShared(target, e);
+        if (target === user && (isNoStream(e) || isPermission(e)))
+          // eslint-disable-next-line preserve-caught-error -- as in publish(): the message must stand alone
+          throw new Error(
+            'the server has no events feed for you yet; ask the admin to run mbox-admin.sh init',
+          );
+        throw tag(e);
+      }
+      const out: FeedEntry[] = [];
+      for (const m of stored) {
+        // The stream holds only evt.<target>.*, which only <target> may publish: the verified owner.
+        const t = m.subject.split('.');
+        if (t.length !== 3 || t[0] !== EVT_PREFIX || t[1] !== target) continue;
+        const ev = checkEvent(td.decode(m.data), target, m.timeMs);
+        if (ev) out.push(ev);
+      }
+      return out;
+    },
+    async shared() {
+      const s = await conn();
+      let m: Awaited<ReturnType<JetStreamManager['direct']['getMessage']>>;
+      try {
+        m = await s.jsm.direct.getMessage(SHARING_STREAM, {
+          last_by_subj: `$KV.${SHARING_BUCKET}.${SHARING_KEY}`,
+        });
+      } catch (e) {
+        if (isNoStream(e)) return null;
+        throw tag(e);
+      }
+      if (!m) return null;
+      const op = m.header.get('KV-Operation');
+      if (op === 'DEL' || op === 'PURGE') return null;
+      try {
+        // Written by the admin, but checked like anything read from the wire.
+        const j = JSON.parse(td.decode(m.data)) as unknown;
+        if (!Array.isArray(j)) return null;
+        return [...new Set(j.filter((u): u is string => typeof u === 'string' && SEG_RE.test(u)))];
+      } catch {
+        return null;
+      }
+    },
+  };
+
   // ---- diagnose ----
   async function diagnose({ host }: { user: string; host: string }): Promise<DiagnoseCheck[]> {
     const checks: DiagnoseCheck[] = [];
@@ -1046,6 +1177,33 @@ export function createTransport(
     } catch (e) {
       add(false, 'presence registry', explainError(e));
     }
+    try {
+      // A single get: a refused batch get is never answered (see events.read).
+      await s.jsm.direct.getMessage(ownEvents, { seq: 1 });
+      add(true, `own events feed ${ownEvents} is readable`);
+    } catch (e) {
+      add(
+        false,
+        `own events feed ${ownEvents}`,
+        isNoStream(e) || isPermission(e)
+          ? 'the server has no events feed for you yet; ask the admin to run mbox-admin.sh init'
+          : explainError(e),
+      );
+    }
+    try {
+      const team = await events.shared();
+      if (team === null)
+        add(
+          false,
+          'events feed sharing',
+          'the server has no sharing list; ask the admin to run mbox-admin.sh init',
+        );
+      else if (team.includes(user))
+        add(true, 'events feed sharing: team (every mailbox user can read your feed)');
+      else add(true, 'events feed sharing: private (only you can read your feed)');
+    } catch (e) {
+      add(false, 'events feed sharing', explainError(e));
+    }
     const other = `not-${user}`.slice(0, 40);
     try {
       await s.jsm.streams.info(streamFor(other));
@@ -1071,6 +1229,7 @@ export function createTransport(
     poll,
     now,
     presence,
+    events,
     limits: { maxLabelLen },
     explainError,
     diagnose,

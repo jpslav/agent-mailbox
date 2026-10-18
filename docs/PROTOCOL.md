@@ -124,6 +124,8 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
 | direct mail to `U.H.L` from user `S` | `mbx.U.H.L.S`                                  | stream `MBX_U` (subjects `mbx.U.>`)     |
 | broadcast from user `S`              | `mbx.all.S`                                    | stream `MBX_ALL` (subjects `mbx.all.*`) |
 | presence of a session                | KV bucket `presence`, key `U.H.<session hash>` | stream `KV_presence`                    |
+| an event in user `U`'s feed          | `evt.U.H` (`H`: the session's host)            | stream `EVT_U` (subjects `evt.U.*`)     |
+| the feeds shared with the team       | KV bucket `sharing`, key `team`                | stream `KV_sharing`                     |
 
 - An address is `<user>.<host>.<label>`, each part `[a-z0-9-]+`. `all` is reserved.
 - The last subject token is always the sender's user. The server enforces it: a user's own
@@ -153,6 +155,29 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   so the sort matters even after a clean hand-back.
 - Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
   deleted when the session ends.
+- Events feeds: one stream `EVT_U` per user (subjects `evt.U.*`, which only `U`'s account imports,
+  so the stream names the verified owner), with the mailbox streams' settings except `max_age` 30 days
+  and `max_bytes` 64 MiB (`MBOX_EVENTS_MAX_AGE`, `MBOX_EVENTS_MAX_BYTES`). Publishers set a fresh
+  UUID as `Nats-Msg-Id`. Feeds are read with batch direct gets from a start time, filtered to
+  `evt.U.*`; nobody has consumer rights on them and nothing subscribes to them, so no session is
+  woken per event. **Every stream subject must be a wildcard** (`evt.U.*`, like `mbx.U.>`,
+  `mbx.all.*` and the KV buckets): a stream with a _literal_ subject counts as a subscriber in
+  `MAILBOX` for a push consumer's deliveries (see "Push consumers" below), so any user could write
+  into it through a push consumer on their own mailbox stream. Streams with wildcard subjects
+  never receive those deliveries; `test/isolation.test.ts` ("forge into another stream") checks
+  push-consumer deliveries into every stream. A batch direct get that the permission block refuses
+  is never answered (it looks like a timeout), so a client first sends one single direct get
+  (`seq` 1) on the feed it reads, which is refused at once (a permission error, or no responders
+  without an import).
+- Sharing: `mbox-admin.sh set-sharing U team|private` (stored in `users.d/U.sharing`; no file means
+  `team`; `add-user` writes `MBOX_DEFAULT_SHARING`, default `team`). `MAILBOX` exports the direct
+  get on each feed to its owner's account and, while it is `team`, to every other user account;
+  each account imports the feeds it may read, and its permission block lists them. So a change to
+  a user or a sharing setting regenerates `users.conf` and reloads the server. KV bucket `sharing`
+  (history 5, no TTL, written only by the admin) holds under key `team` a JSON array of the users
+  whose feed is `team`, sorted, for example `["alice","bob"]`; clients read that key only (`mbox
+events --all`, `--sharing`, `mbox doctor`). The exports decide who reads what; the list only
+  reports it, and is written after the reload that applies a change.
 
 ### Presence entry
 
@@ -193,6 +218,42 @@ since then treat a missing one as `null`. Readers keep a field only when it has 
 display only: nothing in the mailbox grants a `parent` or a `manager` anything. The exact bytes
 are pinned by `test/golden-presence.test.ts`.
 
+### Events feed entry
+
+The payload on `evt.U.H` (`H` is the host of the event's address) is JSON, written by user `U`
+only:
+
+```json
+{
+  "event": "status-changed",
+  "address": "alice.laptop.web-1a2b",
+  "user": "alice",
+  "host": "laptop",
+  "repo": "acme/web",
+  "branch": "feat/login",
+  "role": "worker",
+  "parent": "alice.laptop.mgr-9c8d",
+  "status": "running the tests",
+  "at": "2026-10-17T12:00:00.000Z"
+}
+```
+
+| `event`          | written by                                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| `started`        | the session-start hook (Claude Code: not for `source: compact`)                                            |
+| `ended`          | the session-end hook, or the delivery daemon when the session's process is gone without it; once per start |
+| `status-changed` | `mbox status` (set or `--clear`), when the status changes                                                  |
+| `role-changed`   | `mbox whoami --role`, when the role changes                                                                |
+| `parent-changed` | `mbox whoami --parent`, when the parent changes                                                            |
+| `done`           | `mbox done "<summary>"`, which also sets the status to the summary                                         |
+
+The other fields are the session's presence metadata at that moment (see "Presence entry"); an
+event never carries message contents. Writing one is best effort, bounded at 1.5 s (1 s at
+session end), and never fails the command or hook. Readers drop an entry that is not JSON, names
+an unknown `event`, or has an `address` of another user than the feed's owner; they set `user` to
+the owner, keep the other fields only when well formed, and use the server's timestamp for order
+(and for `at` when it is malformed). The exact bytes are pinned by `test/golden-events.test.ts`.
+
 ### Delivery order
 
 What a session is guaranteed (DECISIONS.md, "Delivery order across readers"):
@@ -220,8 +281,8 @@ What a session is guaranteed (DECISIONS.md, "Delivery order across readers"):
 Generated by `server/mbox-admin.sh` into `users.conf`; `mbox-admin.sh permissions <name>` prints
 one user's part. Since 0.5.8 (docs/DECISIONS.md, "Per-user accounts"):
 
-- **Stream account `MAILBOX`**: JetStream, every stream (`MBX_<USER>`, `MBX_ALL`, `KV_presence`) and
-  the admin user `mbx_admin`. Nothing else connects there.
+- **Stream account `MAILBOX`**: JetStream, every stream (`MBX_<USER>`, `MBX_ALL`, `KV_presence`,
+  `EVT_<USER>`, `KV_sharing`) and the admin user `mbx_admin`. Nothing else connects there.
 - **One account per mailbox user, `USER_<name>`**: no JetStream; the user, with their bcrypt hash
   and the permission block below. Everything the user can reach is a service import from
   `MAILBOX`, and `MAILBOX` exports each service only to the accounts listed:
@@ -237,11 +298,15 @@ service (MAILBOX export -> USER_alice import)       response   exported to
   $JS.API.CONSUMER.MSG.NEXT.MBX_ALICE.*             stream     USER_alice   pull own mail
   $JS.ACK.MBX_ALICE.>                               single     USER_alice   ack own mail
   $JS.API.DIRECT.GET.MBX_ALICE                      stream     USER_alice   mbox inbox, doctor read-back
+  evt.alice.*                                       single     USER_alice   write own events feed
+  $JS.API.DIRECT.GET.EVT_ALICE                      stream     USER_alice   read alice's events feed;
+                                                               + every other user while it is team
   $JS.API.INFO                                      single     every user   account info (mbox doctor)
   $JS.API.STREAM.INFO.MBX_ALL                       single     every user   broadcast position
   $JS.API.DIRECT.GET.MBX_ALL                        stream     every user   read broadcasts
   $JS.API.DIRECT.GET.KV_presence                    stream     every user   list presence
   $JS.API.DIRECT.GET.KV_presence.$KV.presence.>     stream     every user   read one presence entry
+  $JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team    single     every user   the list of shared feeds
 stream
   mbxwake.all.*  ->  mbx.all.*                                 every user   broadcast wake-ups (headers only)
 ```
@@ -259,7 +324,9 @@ stream
   which nothing does in production. Even then a delivery keeps the stored message's own subject,
   so a stream that captures it stores it under the user's own name, and JetStream API subjects
   ignore it; none reach a user account (`test/isolation.test.ts`, with the admin listening on
-  every target). The client uses only pull consumers.
+  every target). A stream with a literal subject would be such a subscriber, so the events
+  streams use wildcard subjects (`evt.U.*`), like every other stream. The client uses only pull
+  consumers.
 - **Presence rollups:** the `presence` bucket refuses rollup headers. With them, a `Nats-Rollup:
 all` publish on a user's own key purged every user's entries. The client only puts and deletes.
 - **`users.d/`:** each user's file holds the name, the bcrypt hash and a deny-all permission block
@@ -288,13 +355,19 @@ publish allow:
   $JS.API.DIRECT.GET.MBX_ALL            read broadcasts without a shared consumer
   $JS.API.DIRECT.GET.KV_presence        list presence
   $JS.API.DIRECT.GET.KV_presence.$KV.presence.>
+  evt.alice.*                           write own events feed only
+  $JS.API.DIRECT.GET.EVT_ALICE          read own events feed
+  $JS.API.DIRECT.GET.EVT_BOB            bob's feed: one line per other user whose sharing is team
+  $JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team   the sharing list (that key only)
   $KV.presence.alice.>                  write own presence entries only
 subscribe allow:
   mbx.all.*                             broadcast wake-ups
   _INBOX_alice.>                        private reply inbox (client inboxPrefix)
 ```
 
-Everything else is denied. Any change to the accounts, exports, imports or this block is a
+Everything else is denied: in particular nobody may publish another user's `evt.*`, subscribe to
+`evt.*`, create consumers on, purge, delete or query the info of any `EVT_*` stream (their own
+included), read a `private` feed, write the sharing bucket or read any other key in it. Any change to the accounts, exports, imports or this block is a
 `needs-owner` change and needs a negative test in `test/isolation.test.ts` (see CLAUDE.md).
 
 ### Envelope v1

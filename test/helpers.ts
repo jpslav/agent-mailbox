@@ -203,11 +203,16 @@ export class Broker {
 
   addUser(u: string): string {
     const { out } = this.admin(['add-user', u]);
-    const password =
+    const m =
       /printf '%s\\n' '([A-Za-z0-9]+)' \| mbox setup --servers (\S+) --user (\S+) --password-stdin/.exec(
         out,
-      )?.[1];
+      );
+    const password = m?.[1];
     if (password === undefined) throw new Error(`no setup line in:\n${out}`);
+    // v0.5.8's script printed the user's stream name there (fixed in 0.6.0); earlier releases
+    // provisioning an upgrade test may run, so only the current one is held to it.
+    if (this.adminScript === ADMIN && m?.[3] !== u)
+      throw new Error(`the setup line names user ${m?.[3]}, not ${u}:\n${out}`);
     this.passwords[u] = password;
     return out;
   }

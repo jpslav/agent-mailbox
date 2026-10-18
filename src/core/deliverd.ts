@@ -13,6 +13,8 @@
 //     and a redelivery after a restart is recognised by its id and not shown again.
 //   - deliver() failing: if the session's host process is gone, the registration is removed and
 //     the session departs; otherwise the batch stays unacknowledged and is retried with backoff.
+//   - A session whose host process is gone without its session-end hook having run gets its
+//     `ended` event here (once: whichever of the hook and the daemon comes first writes it).
 //   - Runaway guard: at most maxPerMin messages per session per minute; the excess stays
 //     unacknowledged and follows in the next window, with one notice line in the delivery that held
 //     it back. `mbox pause` holds delivery entirely (pause.ts) until `mbox resume`.
@@ -31,6 +33,7 @@
 import fs from 'node:fs';
 import { loadConfig, profileName } from './config.js';
 import { formatBatch } from './envelope.js';
+import { emitEnded } from './events.js';
 import { isPaused, pausePath, readPause } from './pause.js';
 import { openReceiver } from './receiver.js';
 import type { Receiver } from './receiver.js';
@@ -213,6 +216,18 @@ export async function runDeliverd({
   const lock = acquired; // narrowed to the held lock, which function declarations below rely on
   settleStartClaim(version, env);
   log(`started (pid ${process.pid}, version ${version})`);
+
+  /**
+   * The session's process is gone and no session-end hook ran (a crash, a closed terminal): write
+   * its `ended` event, unless the hook already did (emitEnded writes it once per start).
+   */
+  function orphanEnded(sid: string, address: string): void {
+    const st = readState(sid, env);
+    if (!st) return;
+    void emitEnded(transport, st, { cfg, sid, env }).then((err) => {
+      if (err) log(`${address}: could not write the ended event (${transport.explainError(err)})`);
+    });
+  }
   const profile = profileName(env);
   log(`mailbox user ${cfg.user}${profile ? `, profile ${profile}` : ''}`);
   mkdirp(registrationsDir(env));
@@ -455,6 +470,7 @@ export async function runDeliverd({
       if (current.hostPid && pidAlive(current.hostPid)) return; // a stale check against an older registration
       log(`${addr()}: session process ${current.hostPid ?? '?'} is gone; deregistered`);
       deregister(sid, env, { only: current });
+      orphanEnded(sid, addr());
       void stop({ depart: true });
     }
 
@@ -592,8 +608,10 @@ export async function runDeliverd({
         continue;
       }
       if (reg.hostPid && !pidAlive(reg.hostPid)) {
-        if (deregister(reg.sid, env, { only: reg }))
+        if (deregister(reg.sid, env, { only: reg })) {
           log(`${reg.address}: session process ${reg.hostPid} is gone; deregistered`);
+          orphanEnded(reg.sid, reg.address);
+        }
         present.delete(reg.sid);
         continue;
       }

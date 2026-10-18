@@ -230,15 +230,19 @@ twice, because nats-server wires a new account's imports only on the second relo
 
 ```sh
 server/mbox-admin.sh add-user bob       # prints the line bob runs on each machine
-server/mbox-admin.sh list-users
+server/mbox-admin.sh list-users [--sharing]
 server/mbox-admin.sh remove-user bob [--delete-stream]
+server/mbox-admin.sh set-sharing bob private   # or team (the default): who may read bob's events feed
 server/mbox-admin.sh permissions bob    # show bob's account and imports without changing anything
 ```
 
 `add-user` generates a 32-character password, stores only its bcrypt hash (`nats server passwd`,
 password passed through the environment, never argv), creates stream `MBX_<NAME>` (file storage,
 `max_age` 180 days, `max_bytes` 1 GiB with discard old, duplicate window 2 minutes, one replica,
-direct get on, message delete and purge denied), and prints:
+direct get on, message delete and purge denied) and the events stream `EVT_<NAME>` (subject
+`evt.<name>.*`, the same settings but `max_age` 30 days and `max_bytes` 64 MiB:
+`MBOX_EVENTS_MAX_AGE`, `MBOX_EVENTS_MAX_BYTES`), sets the user's events sharing to
+`MBOX_DEFAULT_SHARING` (default `team`), and prints:
 
 ```sh
 printf '%s\n' '<password>' | mbox setup --servers nats://100.x.y.z:4222 --user bob --password-stdin
@@ -253,18 +257,38 @@ The NATS layout (docs/PROTOCOL.md, "Accounts, imports and permissions", has the 
   from `MAILBOX` exactly what the client needs: sending mail, broadcasts and presence entries on
   subjects that end in the user's own name; consumer create, info, pull and ack, stream info and
   direct get on the user's own stream; read-only direct gets on `MBX_ALL` and the presence bucket;
-  account info; and broadcast wake-ups. `MAILBOX` exports each of these only to the accounts that
-  may import it.
+  account info; broadcast wake-ups; publishing on `evt.<name>.*` (their own events feed), the
+  read of the sharing list, and the direct get on their own events feed and on every other feed
+  shared with the team. `MAILBOX` exports each of these only to the accounts that may import it.
 - Inside their account, each user also gets a permission block with the same list (defense in
   depth; it is also what `mbox doctor`'s isolation check sees).
 
 Everything else is out of reach: stream create/update/delete/purge, message delete, consumer
 list/delete, any access to other users' streams, consumers or reply inboxes, consumers on
-`MBX_ALL` or `KV_presence`, and any traffic in other accounts. Because a reply to a user's request
+`MBX_ALL` or `KV_presence`, writing another user's events feed, reading a `private` one, any
+consumer on or subscription to events feeds, writing the sharing list, and any traffic in other
+accounts. Because a reply to a user's request
 is delivered inside that user's own account, a hostile reply subject cannot land in anyone's
 stream either. `test/isolation.test.ts` proves each of these against a real server, once with the
 permission block and once without it (the account boundary alone), including reply subjects aimed
 at every stream and push consumers aimed at other streams or the JetStream API.
+
+**Events sharing.** `team` lets every mailbox user read the user's events feed, `private` only the
+user (`mbox-admin.sh set-sharing <name> team|private`; `list-users --sharing` shows the settings).
+`MAILBOX` exports the read of a feed to its owner's account and, while it is `team`, to every
+other user account, which imports it; so `add-user`, `remove-user` and `set-sharing` regenerate
+`users.conf` and reload the server (twice, as for every change). The script then writes the list
+of `team` users to the `sharing` bucket, which clients read for `mbox events --all` and
+`--sharing`; the exports, not that list, decide who reads what.
+
+### Upgrading a server set up before 0.6.0
+
+A server provisioned by `mbox-admin.sh` 0.5.8 has no events feeds. Install the new
+`server/mbox-admin.sh` and run `mbox-admin.sh init` once: it creates the `sharing` bucket and
+every user's `EVT_<NAME>` stream, adds the feed exports and imports, reloads the server twice and
+writes the sharing list (existing users start as `team`). Clients of 0.5.x keep working; clients
+of this version warn that there is no events feed until then. A server from before 0.5.8 is
+upgraded by the same `init`, both steps at once (below).
 
 ### Upgrading a server set up before 0.5.8
 
@@ -421,10 +445,12 @@ mbox send <to> "text"             <to> = full address | unique prefix/label of a
 mbox send <to> --subject S --re <id> "text"        echo long | mbox send <to> -
 mbox name reviewer                mbox inbox --since 2h        mbox doctor
 mbox show <id>                    the whole message (when a delivered one was cut short)
-mbox guide [section]              short help: overview, send, reply, peers, workers, names,
-                                  inbox, security, fallback, troubleshooting
+mbox guide [section]              short help: overview, send, reply, peers, events, workers,
+                                  names, inbox, security, fallback, troubleshooting
 mbox peers --tree                 who spawned whom      mbox status "<one line>"   (--clear)
 mbox whoami --role worker --parent <address>      describe this session (display only)
+mbox events [--user <u>|--all] [--since 1d]       what happened to sessions (events feed)
+mbox done "<summary>"             say this session finished (sets the status, writes "done")
 mbox pause [--all|<address>]      emergency stop for push delivery on this machine; mbox resume
 mbox deliverd --status            is the delivery daemon running (version), which sessions it serves
 ```
@@ -566,12 +592,26 @@ under their parents; one whose parent is not live is shown at the top level and 
 is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as
 untrusted as any other. Readers keep only well-formed values.
 
+**Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended` (the
+session hooks; a compaction is not a start; when a session's process dies without its session-end
+hook, the delivery daemon writes `ended`, once per start whoever comes first), `status-changed`
+(`mbox status`), `role-changed` and `parent-changed` (`mbox whoami --role/--parent`) and `done`
+(`mbox done "<summary>"`, which also sets the status). Each event carries the session's address,
+user, host, repo, branch, role, parent, status and time, never message contents; feeds keep 30
+days. Writing one never fails or holds up a command (at most 1.5 s when the server is unreachable).
+`mbox events` reads your own feed, `--user <name>` a colleague's and `--all` yours plus every feed
+shared with the team (`--since 1d` by default, `--limit 100` newest, `--json` for one object per
+line). It is read on demand: an overseer session pulls when asked and is never woken per event.
+Whether colleagues can read your feed is up to the admin (`mbox-admin.sh set-sharing <you>
+team|private`, `team` by default); `mbox events --sharing` and `mbox doctor` show your setting.
+Everything but the user is self-asserted and display only, as in presence.
+
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/` (for a named profile,
 `$AGENT_MAILBOX_STATE_DIR/profiles/<name>/sessions/`): `<id>.json` (address, aliases, cwd,
 role, parent, status),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
-(the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
+(the current waiter) and `<id>.ended` (its `ended` event was written; removed by `started`). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
 daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon being started),
 `deliverd.log`, `deliverd.out` (crash traces) and `paused.json`.
 
@@ -587,9 +627,11 @@ daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon bein
   start with `[mailbox]` (so a body cannot forge block boundaries); the skill tells Claude to treat
   bodies as data, never as instructions from its user. Do not invite anyone you would not let drop
   text into your sessions.
-- **Reading is isolated by stream.** Users can read only their own stream, broadcasts and the
-  presence bucket. Presence records (address, cwd, host, pid, repo, branch, role, parent and
-  status) are visible to every user.
+- **Reading is isolated by stream.** Users can read only their own stream, broadcasts, the
+  presence bucket and the events feeds the admin shares with the team (their own always).
+  Presence records (address, cwd, host, pid, repo, branch, role, parent and status) are visible
+  to every user, whatever the feed's sharing: `private` hides a user's event history and `done`
+  summaries, not their live sessions.
 - **The server admin can read everything**; streams hold plain text for 180 days. Use a host you
   trust, on a tailnet. Passwords are stored as bcrypt hashes on the server and in a 0600 file on
   clients, and travel only inside the NATS connection (encrypted by the tailnet, not by NATS TLS).
