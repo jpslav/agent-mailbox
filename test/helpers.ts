@@ -70,9 +70,27 @@ export async function freePort(): Promise<number> {
   });
 }
 
+/**
+ * A file as an earlier release shipped it (`git show <tag>:<path>`), copied to a temp dir; `skip`
+ * says why it is unavailable (a shallow clone without the tag) so a suite can pass it to describe.
+ */
+export function fromRelease(tag: string, file: string): { path: string; skip?: string } {
+  const r = spawnSync('git', ['-C', ROOT, 'show', `${tag}:${file}`], {
+    encoding: 'buffer',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.status !== 0 || r.error)
+    return { path: '', skip: `${tag} is not in this clone's git history (fetch the tags)` };
+  const out = path.join(tmp(`amb-${tag}-`), path.basename(file));
+  fs.writeFileSync(out, r.stdout, { mode: 0o755 });
+  return { path: out };
+}
+
 export interface BrokerOptions {
   presenceTtl?: string;
   maxAge?: string;
+  /** Provision with this copy of mbox-admin.sh (an older release's, see `fromRelease`). */
+  adminScript?: string;
 }
 
 /** What `Broker.admin` returns: the script's exit code and its stdout and stderr together. */
@@ -92,6 +110,8 @@ export class Broker {
   readonly server: ServerInfo;
   readonly presenceTtl: string;
   readonly maxAge: string | undefined;
+  /** The mbox-admin.sh that `admin` runs; tests may switch it (an upgrade). */
+  adminScript: string;
   readonly passwords: Record<string, string> = {};
   proc: ChildProcessByStdio<null, null, Readable> | null = null;
   readonly dir = tmp('amb-nats-');
@@ -102,10 +122,14 @@ export class Broker {
   url = '';
   log = '';
 
-  constructor(server: ServerInfo, { presenceTtl = '30m', maxAge }: BrokerOptions = {}) {
+  constructor(
+    server: ServerInfo,
+    { presenceTtl = '30m', maxAge, adminScript = ADMIN }: BrokerOptions = {},
+  ) {
     this.server = server;
     this.presenceTtl = presenceTtl;
     this.maxAge = maxAge;
+    this.adminScript = adminScript;
     fs.mkdirSync(this.confDir);
   }
 
@@ -137,7 +161,7 @@ export class Broker {
 
   /** Run server/mbox-admin.sh against this server. */
   admin(args: string[], { check = true, env = {} }: AdminCommandOptions = {}): AdminResult {
-    const r = spawnSync('/bin/sh', [ADMIN, ...args], {
+    const r = spawnSync('/bin/sh', [this.adminScript, ...args], {
       encoding: 'utf8',
       env: { ...this.adminEnv(), ...env },
     });
@@ -165,7 +189,7 @@ export class Broker {
       .readFileSync(CONF_EXAMPLE, 'utf8')
       .replace(/^listen: .*$/m, `listen: "127.0.0.1:${this.port}"`)
       .replace(/^http: .*$/m, '# http monitoring disabled in tests')
-      .replace(/^pid_file: .*$/m, `pid_file: "${path.join(this.dir, 'nats.pid')}"`)
+      .replace(/^pid_file: .*$/m, `pid_file: "${this.pidFile}"`)
       .replace(/^(\s*)store_dir: .*$/m, `$1store_dir: "${this.storeDir}"`);
     fs.writeFileSync(this.configFile, conf);
     this.admin(['init']); // server not running yet: writes users.conf + admin creds
@@ -186,6 +210,17 @@ export class Broker {
     if (password === undefined) throw new Error(`no setup line in:\n${out}`);
     this.passwords[u] = password;
     return out;
+  }
+
+  get pidFile(): string {
+    return path.join(this.dir, 'nats.pid');
+  }
+
+  /** Send the server one reload signal (what mbox-admin.sh does), without waiting for it. */
+  reload(): void {
+    const pid = fs.readFileSync(this.pidFile, 'utf8').trim();
+    const r = spawnSync(this.server.serverBin, ['--signal', `reload=${pid}`], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`reload signal failed: ${r.stderr}`);
   }
 
   async start(): Promise<void> {
@@ -325,6 +360,8 @@ export type ExitStatus = number | NodeJS.Signals | null;
 export interface WatcherOptions {
   cwd?: string;
   session?: string;
+  /** Run this copy of the bundle (an older release's, see `fromRelease`). */
+  bundle?: string;
 }
 
 /** Parses the "[mailbox] message" blocks out of some text. */
@@ -356,8 +393,8 @@ export class Watcher {
   readonly proc: ChildProcessByStdio<null, Readable, Readable>;
   readonly exited: Promise<ExitStatus>;
 
-  constructor(env: Env, { cwd, session }: WatcherOptions = {}) {
-    this.proc = spawn(process.execPath, [MBOX, 'watch'], {
+  constructor(env: Env, { cwd, session, bundle = MBOX }: WatcherOptions = {}) {
+    this.proc = spawn(process.execPath, [bundle, 'watch'], {
       env: withSession(env, session),
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
