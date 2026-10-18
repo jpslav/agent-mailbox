@@ -8,6 +8,7 @@
 //     each batch of mail into the session's inbox socket; an idle session starts a turn with it.
 //   - SessionEnd runs `mbox hook claude-code session-end` to remove the registration (also on
 //     /clear, so a cleared conversation does not get the old session's mail).
+// The two hooks also write `started` (not on a compaction) and `ended` to the user's events feed.
 // Nothing runs per session between those two hooks: no waiter, no background task, nothing for the
 // model to re-arm. A session without an inbox socket (messaging off, or an older Claude Code) is
 // told to use the generic fallback, `mbox wait` as a background task.
@@ -19,6 +20,12 @@ function jsonLine(additionalContext: string): string {
     JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext } }) +
     '\n'
   );
+}
+
+/** What started the session, from the SessionStart payload: startup, resume, clear or compact. */
+function startSource(input: unknown): string | null {
+  const o = (input && typeof input === 'object' ? input : {}) as { source?: unknown };
+  return typeof o.source === 'string' ? o.source : null;
 }
 
 // `satisfies` (not an annotation) keeps the optional parts that Claude Code does provide
@@ -92,6 +99,8 @@ const adapter = {
       if (!sid) return '';
       const cwd = hook.cwd || process.cwd();
       const st = await ctx.ensure(sid, cwd);
+      // A compaction restarts the hook inside a running session: not a start.
+      if (startSource(input) !== 'compact') await ctx.event(sid, 'started');
       const endpoint = adapter.delivery.endpointFromHook(input, ctx.env);
       let push = false;
       if (endpoint) {

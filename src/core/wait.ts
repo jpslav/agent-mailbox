@@ -16,6 +16,7 @@
 // cursor file, then acknowledged. A waiter killed after writing but before acknowledging leaves
 // them to be delivered again by the next waiter.
 import { formatBatch } from './envelope.js';
+import { emitEvent } from './events.js';
 import { presenceRecord } from './registry.js';
 import { openReceiver } from './receiver.js';
 import type { Receiver } from './receiver.js';
@@ -272,8 +273,9 @@ export async function runWait({
 }
 
 /**
- * The agent session ended: stop its waiter and remove its presence entry (unless a `watch`
- * owns the session, which departs by itself). Quick: an agent may give this well under 2 s.
+ * The agent session ended: write `ended` to the user's events feed, stop its waiter and remove its
+ * presence entry (unless a `watch` owns the session, which departs by itself). Quick: an agent may
+ * give this well under 2 s, so the event is written while the rest runs, with the same 1 s bound.
  */
 export async function endSession({
   cfg,
@@ -283,18 +285,19 @@ export async function endSession({
   env = process.env,
 }: {
   cfg: Pick<Config, 'user'>;
-  transport: Pick<Transport, 'presence'>;
+  transport: Pick<Transport, 'presence' | 'events'>;
   sid: string;
   agent?: string;
   env?: Env;
 }): Promise<void> {
   validateSessionId(sid);
+  const st = readState(sid, env);
+  const ended = st ? emitEvent(transport, 'ended', st, { cfg, timeoutMs: 1000 }) : null;
   const pid = stopWaiter(sid, env); // it steps aside within its lock poll, without departing
   if (pid) await awaitExit(pid, 300);
-  if (watcherPid(sid, env) || waiterPid(sid, env)) return;
-  const st = readState(sid, env);
-  if (!st) return;
-  await transport.presence
-    .depart(presenceRecord(st, { sid, cfg, agent }), { timeoutMs: 1000 })
-    .catch(() => {});
+  if (st && !watcherPid(sid, env) && !waiterPid(sid, env))
+    await transport.presence
+      .depart(presenceRecord(st, { sid, cfg, agent }), { timeoutMs: 1000 })
+      .catch(() => {});
+  await ended;
 }

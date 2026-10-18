@@ -2,7 +2,13 @@
 // its sessions, get mail into them and tell them their address. Agent-neutral: nothing in
 // src/core knows a specific agent; it only sees these interfaces. To add an agent, see the
 // `add-adapter` skill.
-import type { DeliveryCapability, Env, RegistrationInput, SessionState } from '../core/types.js';
+import type {
+  DeliveryCapability,
+  Env,
+  EventKind,
+  RegistrationInput,
+  SessionState,
+} from '../core/types.js';
 
 export type { DeliveryCapability, DeliveryMeta } from '../core/types.js';
 
@@ -23,8 +29,10 @@ export interface HookContext {
   configError: string | null;
   /** Make sure the session has an address and a cursor; resolves to its state. */
   ensure(sid: string, cwd: string): Promise<SessionState>;
-  /** The session ended: remove its presence entry. */
+  /** The session ended: write `ended` to the user's events feed and remove its presence entry. */
   endSession(sid: string): Promise<void>;
+  /** Write an event about the session (`ensure` it first) to the user's feed; never throws. */
+  event(sid: string, event: EventKind): Promise<void>;
   /** Register the session for push delivery (writes its registration file). */
   register(reg: RegistrationInput): unknown;
   deregister(sid: string): unknown;

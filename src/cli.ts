@@ -7,6 +7,7 @@ import type { HookContext, HookInput, ResolvedSession } from './agents/index.js'
 import { BROADCAST, fitLabel, isAddr, parseAddr, shortHost } from './core/addr.js';
 import { ConfigError, configPath, loadConfig, splitServers, writeConfig } from './core/config.js';
 import { buildEnvelope, formatBlock, oneLine, parseDelivery } from './core/envelope.js';
+import { emitEvent } from './core/events.js';
 import { fileLog, runDeliverd } from './core/deliverd.js';
 import { GUIDE_SECTIONS, guideText } from './core/guide.js';
 import { pause, readPause, resume } from './core/pause.js';
@@ -33,6 +34,8 @@ import { NoSessionError, ensureSession, pidAlive, readState, updateState } from 
 import { createTransport, explainError, validateServer } from './core/transport/nats.js'; // composition root: the only place that picks the broker
 import type {
   Config,
+  EventKind,
+  FeedEntry,
   PresenceEntry,
   SessionState,
   Transport,
@@ -196,6 +199,19 @@ async function saveAndAnnounce(
   return next;
 }
 
+/** Write `event` about the session to the user's feed; a failure is a warning, never an error. */
+async function recordEvent(
+  { cfg, transport }: SessionContext,
+  event: EventKind,
+  st: SessionState,
+): Promise<void> {
+  const err = await emitEvent(transport, event, st, { cfg });
+  if (err)
+    process.stderr.write(
+      `warning: could not write the "${event}" event to your events feed (${explainError(err)})\n`,
+    );
+}
+
 program
   .command('whoami')
   .description(
@@ -218,11 +234,15 @@ program
           throw new UsageError(
             `invalid parent "${opts.parent}" (a full address <user>.<host>.<label>, or none)`,
           );
+        const before = st;
         st = await saveAndAnnounce(ctx, (s) => ({
           ...s,
           ...(opts.role !== undefined && { role }),
           ...(opts.parent !== undefined && { parent }),
         }));
+        if ((before.role ?? null) !== (st.role ?? null)) await recordEvent(ctx, 'role-changed', st);
+        if ((before.parent ?? null) !== (st.parent ?? null))
+          await recordEvent(ctx, 'parent-changed', st);
       }
       console.log(st.address);
       if (st.aliases.length) console.log(`aliases: ${st.aliases.join(', ')}`);
@@ -249,14 +269,38 @@ program
         console.log(ctx.st.status ?? '(no status)');
         return;
       }
-      const status = opts.clear ? null : statusLine(text);
-      if (status !== null && !status)
-        throw new UsageError('empty status: use --clear to remove it');
-      if (status && statusLength(status) > STATUS_MAX)
-        throw new UsageError(
-          `status is ${statusLength(status)} characters; the limit is ${STATUS_MAX}. Shorten it.`,
-        );
+      const status = opts.clear ? null : checkedStatus(text);
       const next = await saveAndAnnounce(ctx, (s) => ({ ...s, status }));
+      if ((ctx.st.status ?? null) !== (next.status ?? null))
+        await recordEvent(ctx, 'status-changed', next);
+      console.log(next.status ?? '(no status)');
+    }),
+  );
+
+/** A status line from the command line, or a usage error saying what is wrong with it. */
+function checkedStatus(text: string | undefined): string {
+  const status = statusLine(text);
+  if (!status) throw new UsageError('empty status: use --clear to remove it');
+  if (statusLength(status) > STATUS_MAX)
+    throw new UsageError(
+      `status is ${statusLength(status)} characters; the limit is ${STATUS_MAX}. Shorten it.`,
+    );
+  return status;
+}
+
+// ---------------------------------------------------------------- done
+program
+  .command('done')
+  .description(
+    `say this session has finished: sets its status to <summary> (max ${STATUS_MAX} characters) and writes a "done" event to your events feed`,
+  )
+  .argument('<summary>', 'one line: what was done (no secrets: colleagues may read your feed)')
+  .action(
+    action(async (summary: string) => {
+      const ctx = await context();
+      const status = checkedStatus(summary);
+      const next = await saveAndAnnounce(ctx, (s) => ({ ...s, status }));
+      await recordEvent(ctx, 'done', next);
       console.log(next.status ?? '(no status)');
     }),
   );
@@ -673,17 +717,21 @@ program
           ago(p.lastSeen),
         ]);
       }
-      // Every row has as many cells as the header.
-      const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => [...r[i]!].length)));
-      for (const r of rows)
-        console.log(
-          r
-            .map((c, i) => c + ' '.repeat(widths[i]! - [...c].length))
-            .join('  ')
-            .trimEnd(),
-        );
+      printTable(rows);
     }),
   );
+
+/** Print rows as aligned columns; every row has as many cells as the first (the header). */
+function printTable(rows: string[][]): void {
+  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => [...r[i]!].length)));
+  for (const r of rows)
+    console.log(
+      r
+        .map((c, i) => c + ' '.repeat(widths[i]! - [...c].length))
+        .join('  ')
+        .trimEnd(),
+    );
+}
 
 // ---------------------------------------------------------------- name
 program
@@ -766,6 +814,119 @@ program
         n++;
       }
       if (!n) console.log(`no messages in the last ${opts.since}`);
+    }),
+  );
+
+// ---------------------------------------------------------------- events
+interface EventsOptions {
+  user?: string;
+  all?: boolean;
+  since: string;
+  limit: string;
+  json?: boolean;
+  sharing?: boolean;
+}
+
+/** How many events `mbox events` reads from one feed at most. */
+const FEED_READ_MAX = 10000;
+
+program
+  .command('events')
+  .description(
+    "print the events feed (sessions started, ended, status/role/parent changes, done): yours, a colleague's (--user) or every one you may read (--all)",
+  )
+  .option(
+    '--user <name>',
+    "a colleague's feed (readable only when the admin shares it with the team)",
+  )
+  .option('--all', 'your feed and every feed shared with the team')
+  .option('--since <dur>', 'how far back (e.g. 30m, 2h, 1d; feeds keep 30 days)', '1d')
+  .option('--limit <n>', 'print at most the newest <n> events', '100')
+  .option('--json', 'one JSON object per line instead of a table')
+  .option('--sharing', 'print how your feed is shared, and which feeds are shared with the team')
+  .action(
+    action(async (opts: EventsOptions) => {
+      if (opts.user !== undefined && opts.all)
+        throw new UsageError('pass either --user or --all, not both');
+      if (opts.user !== undefined && !/^[a-z0-9-]+$/.test(opts.user))
+        throw new UsageError(`--user must be a mailbox user name, [a-z0-9-]+ (got "${opts.user}")`);
+      if (!/^\d+[smhd]$/.test(opts.since))
+        throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
+      const limit = Number(opts.limit);
+      if (!Number.isInteger(limit) || limit < 1)
+        throw new UsageError(`--limit must be a positive whole number (got "${opts.limit}")`);
+      const { cfg, transport } = await context({ needSession: false });
+
+      if (opts.sharing) {
+        const team = await transport.events.shared();
+        if (team === null) {
+          console.log(
+            'sharing: unknown (the server has no sharing list; ask the admin to run mbox-admin.sh init)',
+          );
+          return;
+        }
+        console.log(
+          team.includes(cfg.user)
+            ? 'your feed: team (every mailbox user can read it)'
+            : 'your feed: private (only you can read it)',
+        );
+        const others = team.filter((u) => u !== cfg.user).sort();
+        console.log(`shared with the team: ${others.length ? others.join(', ') : '(none)'}`);
+        return;
+      }
+
+      let users = [opts.user ?? cfg.user];
+      if (opts.all) {
+        const team = await transport.events.shared();
+        if (team === null)
+          process.stderr.write(
+            'warning: the server has no sharing list, so only your own feed is shown (the admin runs mbox-admin.sh init)\n',
+          );
+        users = [...new Set([cfg.user, ...(team ?? []).sort()])];
+      }
+      const lookback = sinceMs(opts.since);
+      const entries: FeedEntry[] = [];
+      for (const u of users) {
+        try {
+          const got = await transport.events.read(u, { sinceMs: lookback, max: FEED_READ_MAX });
+          if (got.length >= FEED_READ_MAX)
+            process.stderr.write(
+              `warning: ${u}'s feed has more than ${FEED_READ_MAX} events since ${opts.since}; only the oldest ${FEED_READ_MAX} were read (use a shorter --since)\n`,
+            );
+          entries.push(...got);
+        } catch (e) {
+          // --all: a feed that stopped being shared since the list was written is skipped.
+          if (!opts.all || !(e as { notShared?: boolean } | null)?.notShared) throw e;
+          process.stderr.write(`warning: ${explainError(e)}; skipped\n`);
+        }
+      }
+      entries.sort((a, b) => a.time - b.time);
+      const shown = entries.slice(-limit);
+      if (opts.json) {
+        for (const e of shown) console.log(JSON.stringify(e));
+        return;
+      }
+      if (!shown.length) {
+        console.log(`no events in the last ${opts.since}`);
+        return;
+      }
+      if (entries.length > shown.length)
+        console.log(`(${entries.length - shown.length} older events not shown; --limit)`);
+      const rows: string[][] = [
+        ['TIME', 'EVENT', 'ADDRESS', 'ROLE', 'REPO', 'BRANCH', 'PARENT', 'STATUS'],
+      ];
+      for (const e of shown)
+        rows.push([
+          new Date(e.time).toISOString().replace(/\.\d+Z$/, 'Z'),
+          e.event,
+          oneLine(e.address, 80),
+          e.role ?? '-',
+          e.repo ?? '-',
+          oneLine(e.branch ?? '-', 40),
+          oneLine(e.parent ?? '-', 80),
+          oneLine(e.status ?? '-', 60),
+        ]);
+      printTable(rows);
     }),
   );
 
@@ -905,6 +1066,10 @@ program
         ensure: (sid, cwd) =>
           ensureSession({ sid, ...configured(), cwd, hostPid: adapter.hostPid(process.env) }),
         endSession: (sid) => endSession({ sid, ...configured(), agent: adapter.id }),
+        event: async (sid, event) => {
+          const st = readState(sid);
+          if (st && cfg && transport) await emitEvent(transport, event, st, { cfg });
+        },
         register: (reg) => register(reg),
         deregister: (sid) => deregister(sid),
         startDeliverd,
