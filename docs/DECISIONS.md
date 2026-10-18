@@ -441,3 +441,55 @@ context, decision, why.
   there are at most 64 positions in all (past that only the offered areas' are), so that offering
   one again goes on where it was. The area token reveals nothing to the
   server admin that the stored envelope does not already say.
+
+## Service addresses: the owner's stream and presence keys, a compare-and-set claim, no new permissions
+
+- **Date:** 2026-10
+- **Context:** People want a stable address that does not depend on which machine or session serves
+  it, for example `alice.helpdesk`, so colleagues' managers have a fixed place to send requests
+  (#19). At most one live session may hold one; mail must queue while nobody does and reach the
+  next holder; only alice's sessions may claim or read hers; the rules for helpers of "Asks and
+  offers" apply.
+- **Decision:** A service address is `<user>.<name>`: two parts, where a session address has three,
+  so a two-part target is always a service, never a prefix of session addresses (before 0.7.0 it
+  was a prefix; `mbox send` names the live session such a target used to reach). Mail to it is
+  stored in the owner's own stream under `mbx.<user>._svc.<name>.<sender>`, and the claim is an
+  entry `<user>._svc.<name>` in the presence bucket (`_svc` cannot be a host, so neither collides
+  with a session's subjects or keys). Both fall inside grants every user account already has (send
+  as yourself, read and write your own stream and presence keys), so no export, import or
+  permission line changed, and a server provisioned by 0.5.8 or later serves services as it is.
+  The claim is compare-and-set on the entry's last sequence: of two sessions claiming at once
+  exactly one write succeeds. A live holder (a presence entry naming its session) keeps the
+  service unless the claimer passes `--takeover`; a holder without presence is replaced without
+  asking. One durable consumer per service (`svc=<name>` on the owner's stream, created with
+  `deliver_policy` `all` and an inactivity limit equal to the stream's `max_age`) is the service's
+  position, whoever holds it, so the next holder gets what earlier ones left unacknowledged,
+  first and in order (the hold of "Delivery order across readers"). The holder's receiver keeps
+  the claim alive with each heartbeat and before each subscription, claims it again when it lapsed
+  and nobody took it, and checks before every service message that the claim still names its
+  session; a session that lost the service hands the message back at once, stops reading the
+  service and drops it from its state. Only `mbox name --service <name> --release` deletes a claim:
+  a session that ends keeps its claims until they lapse with its presence (30 minutes), which
+  costs nothing, since a holder without presence is free to take, and lets a resumed session keep
+  its services. Service mail carries the rules for helpers in its block, like an ask.
+- **Why:** Reusing the owner's stream and presence keys puts the isolation where it already is and
+  is already tested: the account boundary (see "Per-user accounts") decides who may read a stream
+  or write a key, and a hostile reply subject can reach `mbx.<user>._svc.*` or a claim key only
+  as something that user could do anyway. A separate stream or bucket would have needed new
+  per-user exports, a server upgrade and more ways to get the permissions wrong. Compare-and-set
+  is the broker's own atomic primitive for this; a lock service or leader election would add a
+  moving part for one key. Presence already says which sessions are live, so a claim needs no
+  liveness of its own beyond lapsing with it. A shared durable consumer, rather than each holder
+  adding the service to its own session consumer, is what makes queued and unacknowledged mail
+  follow the service across holders. Checking the claim before each message is what keeps a
+  taken-over holder from reading on until its next heartbeat; it costs one direct get per service
+  message.
+- **Limits:** a message the old holder took in the instant before a takeover can still reach it
+  (the check and the delivery are not one step). Claims and holders are visible to every user, as
+  presence is. A takeover is a label anyone of that user may apply: any of alice's sessions can
+  take any of her services. A holder that loses its service through the delivery daemon is not
+  told in the session (the daemon logs it; `mbox watch` prints it; `mbox whoami` stops listing
+  it). Clients before 0.7.0 cannot send to a service address (they find no matching peer and send
+  nothing). The receiver drops a service whose claim it finds gone while its subscription runs (a
+  claim that lapsed during a long stall without a reconnect) even if nobody took it; claiming it
+  again brings it back.
