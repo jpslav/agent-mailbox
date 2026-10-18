@@ -81,6 +81,13 @@ export const splitServers = (s: unknown): string[] =>
  * -> {servers[], user, password, maxBytes|null}
  */
 export function loadConfig(env: Env = process.env): Config {
+  const profile = profileName(env);
+  // A named profile is an identity: its user and password come from its file alone, so the
+  // environment cannot quietly mix one person's profile with another's credentials.
+  if (profile && (env.AGENT_MAILBOX_USER || env.AGENT_MAILBOX_PASSWORD))
+    throw new ConfigError(
+      `profile ${profile} takes its user and password from ${configPath(env)}; unset AGENT_MAILBOX_USER and AGENT_MAILBOX_PASSWORD`,
+    );
   const file = readConfigFile(env) || {};
   const servers = env.AGENT_MAILBOX_SERVERS
     ? splitServers(env.AGENT_MAILBOX_SERVERS)
@@ -95,7 +102,6 @@ export function loadConfig(env: Env = process.env): Config {
   if (!user) missing.push('user');
   if (!password) missing.push('password');
   if (missing.length) {
-    const profile = profileName(env);
     throw new ConfigError(
       `mailbox is not configured (missing ${missing.join(', ')}; looked in ${configPath(env)}). ` +
         `Run: mbox setup${profile ? ` --profile ${profile}` : ''} --servers <url> --user <name> --password-stdin`,

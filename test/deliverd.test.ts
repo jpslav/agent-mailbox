@@ -1454,6 +1454,13 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       who.stderr,
       new RegExp(`this session's address was ${re(first.address)}, .* it is now ${re(next)}\\.`),
     );
+    assert.equal(
+      parseJson<Registration>(
+        fs.readFileSync(statePath(env, 'registrations', `${sid}.json`), 'utf8'),
+      ).address,
+      next,
+      'the registration follows, which wakes the daemon',
+    );
     await until(() => logLines(env, new RegExp(`serving ${re(next)}$`)).length === 1, 'served');
     mail(next, 'to the new address');
     await fake.waitFor((f) => f.messages().length === 1);
@@ -1470,6 +1477,51 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     );
     const doc2 = mbox(['doctor'], { env });
     assert.match(doc2.stdout, /ok {4}registered sessions belong to user bob/);
+  });
+
+  it('a user change in the environment: the next session start with the new user takes delivery over', async () => {
+    const env = bobMachine({
+      AGENT_MAILBOX_USER: 'alice',
+      AGENT_MAILBOX_PASSWORD: b.password('alice'),
+    });
+    const dir = projectDir('ue');
+    const fa = await inbox('ea-env-1');
+    const first = sessionStart(env, 'ea-env-1', dir, { socket: fa.path, hostPid: fakeHost().pid });
+    assert.match(first.address, /^alice\./);
+    await until(() => alive(daemonPid(env)) && peers().includes(first.address), 'served as alice');
+    const oldPid = daemonPid(env);
+    // Same machine and state, but the user's shell now says bob.
+    const bobEnv = { ...env, AGENT_MAILBOX_USER: 'bob', AGENT_MAILBOX_PASSWORD: b.password('bob') };
+    const fb = await inbox('eb-env-2');
+    const second = sessionStart(bobEnv, 'eb-env-2', dir, {
+      socket: fb.path,
+      hostPid: fakeHost().pid,
+    });
+    assert.match(second.address, /^bob\./);
+    assert.match(
+      logOf(env),
+      new RegExp(
+        `handover requested: deliverd ${re(VERSION)} \\(pid ${oldPid}\\) -> ${re(VERSION)} \\(user alice -> bob\\)`,
+      ),
+    );
+    await until(() => !alive(oldPid), 'the alice daemon handed over', 30000);
+    await until(() => alive(daemonPid(env)) && lockOf(env).user === 'bob', 'a daemon for bob');
+    await until(
+      () => logLines(env, new RegExp(`serving ${re(second.address)}$`)).length === 1,
+      'served',
+    );
+    mail(second.address, 'for bob');
+    await fb.waitFor((f) => f.messages().length === 1);
+    await until(
+      () =>
+        logLines(
+          env,
+          new RegExp(
+            `${re(first.address)}: belongs to user alice, but this deliverd runs as user bob`,
+          ),
+        ).length === 1,
+      'the alice session is reported',
+    );
   });
 
   it('a watcher whose session is given a new address (another user) says so and stops', async () => {

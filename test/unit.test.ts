@@ -22,7 +22,8 @@ import {
   remoteUrl,
   repoFromUrl,
 } from '../src/core/session-meta.js';
-import { ConfigError, configPath, profileName } from '../src/core/config.js';
+import { ConfigError, configPath, loadConfig, profileName } from '../src/core/config.js';
+import { replaces } from '../src/core/registrations.js';
 import {
   cursorFits,
   ensureSession,
@@ -658,7 +659,9 @@ describe('ensureSession when the mailbox user changed', () => {
       statePath('s-1', env),
       JSON.stringify({ ...st, address: `bob.${host}.proj-s-1`, previousAddress: st.address }),
     );
-    await ensure(env, 'bob');
+    const late: string[] = [];
+    await ensure(env, 'bob', late);
+    assert.deepEqual(late, [`${st.address} -> bob.${host}.proj-s-1`], 'announced after all');
     assert.deepEqual(readCursor('s-1', env), {
       cursor: 'NOW',
       seen: {},
@@ -669,5 +672,45 @@ describe('ensureSession when the mailbox user changed', () => {
     assert.equal(cursorFits({ cursor: 1, seen: {}, address: `bob.${host}.y` }, bob), true);
     assert.equal(cursorFits({ cursor: 1, seen: {} }, bob), false);
     assert.equal(cursorFits({ cursor: 1, seen: {} }, { ...bob, previousAddress: undefined }), true);
+  });
+});
+
+describe('profiles and credentials', () => {
+  it('a named profile takes user and password only from its file', () => {
+    const env = { AGENT_MAILBOX_PROFILE: 'bob', XDG_CONFIG_HOME: '/nonexistent/cfg' };
+    for (const extra of [{ AGENT_MAILBOX_USER: 'alice' }, { AGENT_MAILBOX_PASSWORD: 'pw' }])
+      assert.throws(
+        () => loadConfig({ ...env, ...extra }),
+        (e: unknown) =>
+          e instanceof ConfigError &&
+          /profile bob takes its user and password from/.test(e.message),
+      );
+    // The default profile keeps the overrides.
+    assert.equal(
+      loadConfig({
+        AGENT_MAILBOX_SERVERS: 'nats://h:4222',
+        AGENT_MAILBOX_USER: 'alice',
+        AGENT_MAILBOX_PASSWORD: 'pw',
+        XDG_CONFIG_HOME: '/nonexistent/cfg',
+      }).user,
+      'alice',
+    );
+  });
+});
+
+describe('daemon takeover', () => {
+  it('a newer version, or the same version for another user, takes over; never a downgrade', () => {
+    const d = (version: string | null, user: string | null) => ({ version, user });
+    assert.equal(replaces(d('0.5.8', 'bob'), d('0.5.7', 'bob')), true);
+    assert.equal(replaces(d('0.5.7', 'bob'), d('0.5.7', 'bob')), false);
+    assert.equal(replaces(d('0.5.7', 'bob'), d('0.5.7', 'alice')), true);
+    assert.equal(replaces(d('0.5.7', 'bob'), d('0.5.8', 'alice')), false, 'no downgrade');
+    assert.equal(
+      replaces(d('0.5.7', null), d('0.5.7', 'alice')),
+      false,
+      'user unknown: version only',
+    );
+    assert.equal(replaces(d('0.5.7', 'bob'), d(null, null)), true, 'a daemon from before 0.5.3');
+    assert.equal(replaces(d('0.5.7', 'bob'), d('0.5.7', null)), false);
   });
 });

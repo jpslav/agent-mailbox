@@ -246,11 +246,48 @@ export function settleStartClaim(version: string, env: Env = process.env): void 
     fs.rmSync(startClaimPath(env), { force: true });
 }
 
+/** What decides whether one daemon replaces another. */
+export interface DaemonIdentity {
+  version: string | null;
+  /** The mailbox user it serves; null when unknown (a daemon from before 0.5.7). */
+  user: string | null;
+}
+
+/**
+ * Does a daemon `mine` take delivery over from the running daemon `running`? When it is newer
+ * (never a downgrade), and, at the same or a newer version, when it serves another user than the
+ * running one: the profile's identity was changed (for example in the environment), and the
+ * running daemon's credentials no longer match the sessions that start with the new one.
+ */
+export function replaces(mine: DaemonIdentity, running: DaemonIdentity): boolean {
+  const cmp = compareVersions(mine.version, running.version);
+  if (cmp > 0) return true;
+  return cmp === 0 && !!mine.user && !!running.user && mine.user !== running.user;
+}
+
+/** A session's address changed (ensureSession): rewrite its registration, if any, to match. */
+export function readdressRegistration(sid: string, address: string, env: Env = process.env): void {
+  let file: string;
+  try {
+    file = registrationPath(sid, env);
+  } catch {
+    return;
+  }
+  const cur = readJson(file);
+  if (!cur || cur.sid !== sid) return;
+  // Rewriting it also wakes the daemon, which watches this directory, so it serves the new address
+  // without waiting for its next rescan.
+  atomicWriteJson(file, { ...cur, address });
+  fs.chmodSync(file, 0o600);
+}
+
 export interface EnsureDeliverdOptions {
   /** Variables the daemon must not inherit. */
   dropEnv?: string[];
   /** The version of the daemon `argv` starts (this build's). */
   version: string;
+  /** The mailbox user it will serve (the caller's config), if known. */
+  user?: string | null;
   /** deliverd.log, for the handover request. */
   log?: (line: string) => void;
 }
@@ -268,18 +305,20 @@ export interface EnsureDeliverdOptions {
 export function ensureDeliverd(
   argv: string[],
   env: Env = process.env,
-  { dropEnv = [], version, log = () => {} }: EnsureDeliverdOptions,
+  { dropEnv = [], version, user = null, log = () => {} }: EnsureDeliverdOptions,
 ): number | null {
   const running = deliverdInfo(env);
-  if (running && compareVersions(version, running.version) <= 0) return null;
+  if (running && !replaces({ version, user }, running)) return null;
   const [command, ...args] = argv;
   if (!command) throw new TypeError('ensureDeliverd: argv must start with the executable');
   privateDir(stateDir(env));
   if (!claimStart(env, version, running)) return null;
   try {
     if (running) {
+      const users =
+        user && running.user && user !== running.user ? ` (user ${running.user} -> ${user})` : '';
       log(
-        `handover requested: deliverd ${versionName(running.version)} (pid ${running.pid}) -> ${version}`,
+        `handover requested: deliverd ${versionName(running.version)} (pid ${running.pid}) -> ${version}${users}`,
       );
       try {
         process.kill(running.pid, 'SIGTERM');

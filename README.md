@@ -355,6 +355,8 @@ mbox --profile bob doctor             # or pick the profile for one command
 --all` holds one profile's sessions.
 - `AGENT_MAILBOX_CONFIG` still works as before (one config file, the default state directory).
   Setting it together with a profile is an error, because it is unclear which identity is meant.
+  So is `AGENT_MAILBOX_USER` or `AGENT_MAILBOX_PASSWORD` with a named profile: a profile's user and
+  password come from its file only (`AGENT_MAILBOX_SERVERS` may still override its servers).
 - Switching profiles: resume the session with a different `AGENT_MAILBOX_PROFILE`. It gets that
   profile's address (`<that user>.<host>.<label>`). The other profile's address stops receiving.
 
@@ -373,11 +375,13 @@ their own shell or launcher. Do not put it in a shared `settings.json` (`env`): 
 everyone the same person.
 
 **Changing a profile's user.** If `mbox setup` gives a profile another user while sessions run,
-its delivery daemon notices at its next rescan (within 30 s) and restarts as the new user. Sessions
-registered under the old user are not served; the daemon log, `mbox deliverd --status` and
-`mbox doctor` name them. Each gets an address under the new user (same label, a fresh position,
-no aliases) at its next `mbox` command or session start, and the session-start hook tells Claude
-the old address. Mail sent to the old address stays on the server for the old user.
+its delivery daemon notices at its next rescan (within 30 s) and restarts as the new user. If the
+user changes in the environment instead (`AGENT_MAILBOX_USER` for the default profile), the next
+session start with the new user takes delivery over from the old daemon. Sessions registered under
+the old user are not served; the daemon log, `mbox deliverd --status` and `mbox doctor` name them.
+Each gets an address under the new user (same label, a fresh position, no aliases) at its next
+`mbox` command or session start, and the session-start hook tells Claude the old address. Mail sent
+to the old address stays on the server for the old user.
 
 ## 4. How sessions use it
 

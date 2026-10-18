@@ -277,7 +277,10 @@ context, decision, why.
   starts for an address of another user (a clear error, not a reconnect loop). The daemon records
   its user in its lock, does not serve sessions of another user (one log line each; `mbox deliverd
 --status` and `mbox doctor` name them), and when the client config names another identity it
-  stops and starts a daemon that reads the new config.
+  stops and starts a daemon that reads the new config. A session start whose configuration names
+  another user than the running daemon of the same version takes delivery over from it (the usual
+  handover; never a downgrade), which covers a user changed in the environment. A named profile
+  refuses `AGENT_MAILBOX_USER` / `AGENT_MAILBOX_PASSWORD`, so its identity is its file's.
 - **Why:** The old address cannot work with the new credentials, so keeping it only hides the
   failure. Re-addressing on the next command or session start is the least surprising repair; mail
   to the old address stays on the server for the old user. The daemon restarting itself (rather

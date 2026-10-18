@@ -4,7 +4,7 @@
 //   - SessionStart runs `mbox hook claude-code session-start` (synchronously, well under a second):
 //     it tells the session its address and how to use `mbox`, registers the session's inbox socket
 //     (CLAUDE_CODE_MESSAGING_SOCKET, see claude-inbox.ts) for the delivery daemon, and starts that
-//     daemon (`mbox deliverd`, one per user and machine) if it is not running. The daemon posts
+//     daemon (`mbox deliverd`, one per profile and machine) if it is not running. The daemon posts
 //     each batch of mail into the session's inbox socket; an idle session starts a turn with it.
 //   - SessionEnd runs `mbox hook claude-code session-end` to remove the registration (also on
 //     /clear, so a cleared conversation does not get the old session's mail).

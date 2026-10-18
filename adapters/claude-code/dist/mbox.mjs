@@ -17833,6 +17833,11 @@ function readConfigFile(env = process.env) {
 }
 var splitServers = (s) => lenientString(s).split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
 function loadConfig(env = process.env) {
+  const profile = profileName(env);
+  if (profile && (env.AGENT_MAILBOX_USER || env.AGENT_MAILBOX_PASSWORD))
+    throw new ConfigError(
+      `profile ${profile} takes its user and password from ${configPath(env)}; unset AGENT_MAILBOX_USER and AGENT_MAILBOX_PASSWORD`
+    );
   const file = readConfigFile(env) || {};
   const servers = env.AGENT_MAILBOX_SERVERS ? splitServers(env.AGENT_MAILBOX_SERVERS) : Array.isArray(file.servers) ? file.servers.flatMap(splitServers) : [];
   const user = lenientString(env.AGENT_MAILBOX_USER || file.user).trim();
@@ -17843,7 +17848,6 @@ function loadConfig(env = process.env) {
   if (!user) missing.push("user");
   if (!password) missing.push("password");
   if (missing.length) {
-    const profile = profileName(env);
     throw new ConfigError(
       `mailbox is not configured (missing ${missing.join(", ")}; looked in ${configPath(env)}). Run: mbox setup${profile ? ` --profile ${profile}` : ""} --servers <url> --user <name> --password-stdin`
     );
@@ -18155,6 +18159,8 @@ async function ensureSession({
     });
   } else if (!cursorFits(cur, st)) {
     writeCursor(sid, { cursor: await transport.now(), seen: {}, address: st.address }, env);
+    if (st.previousAddress && cur.address !== st.address)
+      onReaddress(st.previousAddress, st.address);
   }
   if (hostPid) {
     try {
@@ -19286,18 +19292,36 @@ function settleStartClaim(version, env = process.env) {
   if (cur && compareVersions(cur.version, version) <= 0)
     fs6.rmSync(startClaimPath(env), { force: true });
 }
-function ensureDeliverd(argv, env = process.env, { dropEnv = [], version, log = () => {
+function replaces(mine, running) {
+  const cmp = compareVersions(mine.version, running.version);
+  if (cmp > 0) return true;
+  return cmp === 0 && !!mine.user && !!running.user && mine.user !== running.user;
+}
+function readdressRegistration(sid, address, env = process.env) {
+  let file;
+  try {
+    file = registrationPath(sid, env);
+  } catch {
+    return;
+  }
+  const cur = readJson(file);
+  if (!cur || cur.sid !== sid) return;
+  atomicWriteJson(file, { ...cur, address });
+  fs6.chmodSync(file, 384);
+}
+function ensureDeliverd(argv, env = process.env, { dropEnv = [], version, user = null, log = () => {
 } }) {
   const running = deliverdInfo(env);
-  if (running && compareVersions(version, running.version) <= 0) return null;
+  if (running && !replaces({ version, user }, running)) return null;
   const [command, ...args] = argv;
   if (!command) throw new TypeError("ensureDeliverd: argv must start with the executable");
   privateDir(stateDir(env));
   if (!claimStart(env, version, running)) return null;
   try {
     if (running) {
+      const users = user && running.user && user !== running.user ? ` (user ${running.user} -> ${user})` : "";
       log(
-        `handover requested: deliverd ${versionName(running.version)} (pid ${running.pid}) -> ${version}`
+        `handover requested: deliverd ${versionName(running.version)} (pid ${running.pid}) -> ${version}${users}`
       );
       try {
         process.kill(running.pid, "SIGTERM");
@@ -19931,7 +19955,7 @@ async function acquireDaemonLock({
         await sleep2(50);
         continue;
       }
-      if (compareVersions(version, holder.version) <= 0) {
+      if (!replaces({ version, user }, holder)) {
         log(`another deliverd is running (pid ${holder.pid}); exiting`);
         return null;
       }
@@ -21160,6 +21184,7 @@ var sessionEnvVars = () => [
 var startDeliverd = () => ensureDeliverd(deliverdArgv(), process.env, {
   dropEnv: sessionEnvVars(),
   version: ownVersion(),
+  user: configuredUser(),
   log: fileLog(deliverdLogPath())
 });
 function reviveDeliverd() {
@@ -21236,7 +21261,10 @@ async function context({ needSession = true } = {}) {
     transport,
     cwd: process.cwd(),
     hostPid,
-    onReaddress: noteReaddress
+    onReaddress(from, to) {
+      noteReaddress(from, to);
+      readdressRegistration(sid, to);
+    }
   });
   return { cfg, transport, sid, st, agent: agent.id, hostPid };
 }
@@ -21473,7 +21501,10 @@ program2.command("deliverd").description(
     version: ownVersion(),
     exe: bundlePath,
     log,
-    restart: startDeliverd
+    restart() {
+      if (!fs8.existsSync(bundlePath)) throw new Error(`${bundlePath} no longer exists`);
+      startDeliverd();
+    }
   });
   process.exit(code);
 });
@@ -21799,7 +21830,7 @@ function localChecks(user) {
     out.push({
       ok: false,
       name: `delivery daemon runs as user ${d.user} (pid ${d.pid})`,
-      hint: `this profile is configured as ${user}; the daemon restarts itself within a minute of noticing the change`
+      hint: `this profile is configured as ${user}. After a change to the config file the daemon restarts itself within 30 s; the next session start with this configuration takes delivery over`
     });
   const foreign = listRegistrations().map((r) => readState(r.sid)?.address ?? r.address).filter((a) => addressUser(a) !== user);
   if (foreign.length)

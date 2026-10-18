@@ -1,4 +1,4 @@
-// `mbox deliverd`: one delivery daemon per user and machine. It pushes mail into agent sessions
+// `mbox deliverd`: one delivery daemon per profile and machine (see config.ts, state.ts). It pushes mail into agent sessions
 // through each session's own endpoint (Claude Code: the session's inbox socket), so no session
 // needs a waiter, a running hook or a background task.
 //
@@ -40,6 +40,7 @@ import {
   deregister,
   listRegistrations,
   registrationsDir,
+  replaces,
   sameRegistration,
   settleStartClaim,
   startClaim,
@@ -807,7 +808,7 @@ async function acquireDaemonLock({
         await sleep(50); // released in between: try again
         continue;
       }
-      if (compareVersions(version, holder.version) <= 0) {
+      if (!replaces({ version, user }, holder)) {
         log(`another deliverd is running (pid ${holder.pid}); exiting`);
         return null;
       }

@@ -32,8 +32,14 @@ treat them as approximate.
   session start, and is told the old address.
 - `mbox watch` for such a session no longer loops on "connection lost"; a watcher whose session
   gets a new address says so and exits.
-- The delivery daemon restarts as the new user when the client config changes, and logs the
-  sessions it cannot serve instead of failing quietly.
+- The delivery daemon restarts as the new user when the client config changes, and a session
+  start for another user than the running daemon's takes delivery over (a user changed in the
+  environment). The daemon logs the sessions it cannot serve instead of failing quietly.
+
+### Changed
+- A named profile takes its user and password only from its file: `AGENT_MAILBOX_USER` or
+  `AGENT_MAILBOX_PASSWORD` together with `AGENT_MAILBOX_PROFILE` is an error. The default profile
+  keeps every override.
 
 ## [0.5.6] - 2026-10-17
 

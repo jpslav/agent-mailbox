@@ -273,6 +273,10 @@ export async function ensureSession({
     });
   } else if (!cursorFits(cur, st)) {
     writeCursor(sid, { cursor: await transport.now(), seen: {}, address: st.address }, env);
+    // A new address whose fresh cursor was never written (the transport failed in between): the
+    // change was not announced either, so announce it now.
+    if (st.previousAddress && cur.address !== st.address)
+      onReaddress(st.previousAddress, st.address);
   }
   if (hostPid) {
     try {

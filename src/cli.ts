@@ -25,6 +25,7 @@ import {
   deregister,
   ensureDeliverd,
   listRegistrations,
+  readdressRegistration,
   register,
   versionName,
 } from './core/registrations.js';
@@ -83,6 +84,7 @@ const startDeliverd = (): number | null =>
   ensureDeliverd(deliverdArgv(), process.env, {
     dropEnv: sessionEnvVars(),
     version: ownVersion(),
+    user: configuredUser(),
     log: fileLog(deliverdLogPath()),
   });
 /** Bring the daemon back if sessions are registered but it is not running (it may have crashed). */
@@ -217,7 +219,10 @@ async function context({ needSession = true }: { needSession?: boolean } = {}): 
     transport,
     cwd: process.cwd(),
     hostPid,
-    onReaddress: noteReaddress,
+    onReaddress(from, to) {
+      noteReaddress(from, to);
+      readdressRegistration(sid, to);
+    },
   });
   return { cfg, transport, sid, st, agent: agent.id, hostPid };
 }
@@ -504,7 +509,11 @@ program
       version: ownVersion(),
       exe: bundlePath,
       log,
-      restart: startDeliverd,
+      restart() {
+        // After a plugin update this bundle may be gone: a spawn of it would only crash.
+        if (!fs.existsSync(bundlePath)) throw new Error(`${bundlePath} no longer exists`);
+        startDeliverd();
+      },
     });
     process.exit(code);
   });
@@ -924,7 +933,7 @@ function localChecks(user: string): Array<{ ok: boolean; name: string; hint?: st
     out.push({
       ok: false,
       name: `delivery daemon runs as user ${d.user} (pid ${d.pid})`,
-      hint: `this profile is configured as ${user}; the daemon restarts itself within a minute of noticing the change`,
+      hint: `this profile is configured as ${user}. After a change to the config file the daemon restarts itself within 30 s; the next session start with this configuration takes delivery over`,
     });
   const foreign = listRegistrations()
     .map((r) => readState(r.sid)?.address ?? r.address)
