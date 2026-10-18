@@ -32,15 +32,22 @@ async function stripPermissions(b: Broker, user: string): Promise<void> {
   b.reload();
   await sleep(300);
   b.reload();
-  for (let i = 0; i < 100; i++) {
-    const nc = await b.conn(user);
-    const free = await new Promise<boolean>((resolve) => {
-      const sub = nc.subscribe('>');
-      void sub.closed.then(() => resolve(false));
-      void nc.flush().then(() => sleep(200).then(() => resolve(!sub.isClosed())));
-    });
-    await nc.close();
-    if (free) return;
+  // While the server applies the reloads, a login can be refused: retry until the user may
+  // subscribe to everything (only possible without the block).
+  for (let i = 0; i < 150; i++) {
+    const nc = await b.conn(user).catch(() => null);
+    if (nc) {
+      const free = await new Promise<boolean>((resolve) => {
+        const sub = nc.subscribe('>');
+        void sub.closed.then(() => resolve(false));
+        nc.flush().then(
+          () => sleep(200).then(() => resolve(!sub.isClosed())),
+          () => resolve(false),
+        );
+      });
+      await nc.close().catch(() => {});
+      if (free) return;
+    }
     await sleep(100);
   }
   throw new Error(`${user} still has a permission block after the reload`);
@@ -53,7 +60,10 @@ async function positions(jsm: JetStreamManager): Promise<Record<string, number>>
   return out;
 }
 
-/** The subjects stored since `since` whose writer (sender token, or presence key user) is not `user`. */
+/**
+ * The subjects stored since `since` whose writer is not `user`: the presence key's user for a
+ * presence subject, else the sender token (the last one), whichever stream holds it.
+ */
 async function foreignWrites(
   jsm: JetStreamManager,
   since: Record<string, number>,
@@ -67,7 +77,7 @@ async function foreignWrites(
       const m = await jsm.streams.getMessage(s, { seq }).catch(() => null);
       if (!m) continue; // replaced (presence keeps one entry per key)
       const t = m.subject.split('.');
-      const writer = s === 'KV_presence' ? t[2] : t[t.length - 1];
+      const writer = m.subject.startsWith('$KV.presence.') ? t[2] : t[t.length - 1];
       if (writer === user) own++;
       else foreign.push(`${s}#${seq} ${m.subject}`);
     }
@@ -209,10 +219,27 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         /Permissions Violation/,
       );
     });
+    it("purge everyone's presence entries with a rollup on her own key", async () => {
+      const bob = await b.conn('bob');
+      await jetstream(bob, { checkAPI: false }).publish('$KV.presence.bob.desk.keep', '{}');
+      await bob.close();
+      const h = headers();
+      h.set('Nats-Rollup', 'all');
+      await assert.rejects(
+        ajs.publish('$KV.presence.alice.laptop.roll', '{}', { headers: h }),
+        /rollup/i,
+      );
+      const m = await jsm.streams.getMessage('KV_presence', {
+        last_by_subj: '$KV.presence.bob.desk.keep',
+      });
+      assert.ok(m, "bob's entry is gone");
+    });
     it('forge into another stream, the JetStream API or the wake-ups through a push consumer', async () => {
-      // A push consumer lives in the stream account, so its deliveries are published there: they
-      // must not land in bob's stream, the broadcast stream or the presence bucket with a fake
-      // sender token, act as JetStream API calls, or reach users as broadcast wake-ups.
+      // A push consumer lives in the stream account, so its deliveries are published there. It
+      // delivers only while something there listens on its deliver subject, which nothing does in
+      // production; here the admin listens on each target, so the deliveries really happen. A
+      // delivery keeps the stored message's own subject (the deliver subject only routes it), so
+      // a stream that captures it stores it under alice's own name; API subjects ignore it.
       await ajs.publish(
         'mbx.alice.laptop.x.alice',
         JSON.stringify({ v: 1, id: 'f1', from: 'carol.h.x', body: 'forged' }),
@@ -221,17 +248,12 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'mbx.alice.laptop.x.alice',
         JSON.stringify({ name: 'MBX_EVIL', subjects: ['mbx.evil.>'] }),
       );
-      const counts = async () => [
-        await count('MBX_BOB'),
-        await count('MBX_ALL'),
-        await count('KV_presence'),
-      ];
       const streamNames = async () => {
         const names: string[] = [];
         for await (const n of jsm.streams.names()) names.push(n);
         return names.sort();
       };
-      const before = await counts();
+      const since = await positions(jsm);
       const namesBefore = await streamNames();
       const bob = await b.conn('bob');
       const woken: string[] = [];
@@ -247,6 +269,10 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         '$JS.API.STREAM.PURGE.MBX_ALL',
         '$JS.API.CONSUMER.DELETE.MBX_BOB.bobsess',
       ];
+      const listening = targets
+        .filter((t) => t !== 'mbxwake.all.carol') // see below: no interest from the admin there
+        .map((t) => admin.subscribe(t));
+      await admin.flush();
       let n = 0;
       for (const target of targets) {
         const r = await alice.request(
@@ -292,9 +318,17 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       await sleep(1500);
       assert.equal(own.getReceived(), 0, 'a push delivery reached alice in her own account');
       own.unsubscribe();
-      assert.deepEqual(await counts(), before);
+      assert.ok(
+        listening.some((sub) => sub.getReceived() > 0),
+        'no push consumer delivered: the test proves nothing',
+      );
+      for (const sub of listening) sub.unsubscribe();
+      assert.deepEqual((await foreignWrites(jsm, since, 'alice')).foreign, []);
       assert.deepEqual(await streamNames(), namesBefore);
       assert.ok((await jsm.consumers.info('MBX_BOB', 'bobsess')).name === 'bobsess');
+      // Without interest in the stream account, a consumer aimed at the wake-up export delivers
+      // nothing (an import's interest does not count). Were that to change, a user could send
+      // everyone extra wake-ups under any name: clients ignore a wake-up's content and only poll.
       assert.deepEqual(woken, [], 'a push delivery reached bob as a broadcast wake-up');
       await bob.close();
     });
@@ -654,7 +688,7 @@ describe('admin script', { skip: SERVER.skip }, () => {
     const allBefore = (await jsm.streams.info('MBX_ALL')).config;
     const out = b.admin(['init']).out;
     assert.match(out, /users\.conf unchanged: no server reload needed/);
-    assert.doesNotMatch(out, /reloaded nats-server|upgrading|republishes/);
+    assert.doesNotMatch(out, /reloaded nats-server|upgrading|republishes|refuses/);
     assert.match(out, /stream MBX_ALL already exists \(kept\)/);
     assert.match(out, /kv bucket presence already exists \(kept\)/);
     assert.equal(fs.readFileSync(conf, 'utf8'), before);

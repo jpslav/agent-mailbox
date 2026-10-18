@@ -128,9 +128,12 @@ describe('nats-server reload behaviour', { skip: SERVER.skip }, () => {
     brokers.push(b);
     await b.init(['alice']);
     writeUser(b, 'dave', 'dave-password-123456');
-    // regenerate users.conf without reloading: the script finds no running server at this pid file
-    const out = b.admin(['init'], { env: { MBOX_PID_FILE: path.join(b.dir, 'no.pid') } }).out;
-    assert.match(out, /not running/);
+    // regenerate users.conf without reloading: a nats-server wrapper that swallows the signals
+    const shim = path.join(b.dir, 'no-reload.sh');
+    fs.writeFileSync(shim, '#!/bin/sh\n[ "$1" = --signal ] && exit 0\nexec "$REAL" "$@"\n', {
+      mode: 0o755,
+    });
+    b.admin(['init'], { env: { NATS_SERVER_BIN: shim, REAL: SERVER.serverBin } });
     assert.match(fs.readFileSync(path.join(b.confDir, 'users.conf'), 'utf8'), /"USER_dave"/);
     assert.equal(await reachesStreams(b, 'dave'), 'auth');
 
@@ -211,6 +214,7 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
       /upgrading to per-user accounts; saved the previous users\.conf and users\.d\//,
     );
     assert.match(out, /stream MBX_ALL now republishes broadcast headers/);
+    assert.match(out, /kv bucket presence now refuses rollups/);
     assert.match(out, /reloaded nats-server/);
 
     // the old files are saved for a rollback; the new ones hold the same hashes, no permissions
@@ -224,9 +228,11 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
       hash(path.join(b.confDir, 'users.d', 'alice.conf')),
       hash(path.join(backup, 'users.d', 'alice.conf')),
     );
-    assert.doesNotMatch(
-      fs.readFileSync(path.join(b.confDir, 'users.d', 'alice.conf'), 'utf8'),
-      /permissions:/,
+    const aliceFile = fs.readFileSync(path.join(b.confDir, 'users.d', 'alice.conf'), 'utf8');
+    assert.doesNotMatch(aliceFile, /allow:/);
+    assert.match(
+      aliceFile,
+      /permissions: \{ publish: \{ deny: ">" \}, subscribe: \{ deny: ">" \} \}/,
     );
     assert.match(usersConf(b), /^# layout: per-user accounts/m);
     assert.ok(!fs.existsSync(path.join(b.confDir, 'users.conf.pending')));
@@ -258,7 +264,7 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
     const confBefore = usersConf(b);
     const again = b.admin(['init']).out;
     assert.match(again, /users\.conf unchanged: no server reload needed/);
-    assert.doesNotMatch(again, /reloaded|upgrading|republishes/);
+    assert.doesNotMatch(again, /reloaded|upgrading|republishes|refuses/);
     assert.equal(usersConf(b), confBefore);
     await admin.close();
   });
@@ -317,8 +323,9 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
     });
 
   it('an interrupted upgrade can be re-run', async () => {
-    // Three interruptions: the config check fails after users.d/ was migrated; the reload signal
-    // fails after users.conf was written; the second reload signal fails.
+    // The config check fails after users.d/ was migrated; the reload signal fails after users.conf
+    // was written; then, with that change still unapplied, the config check fails again and the
+    // pid file is missing (both must keep the pending marker); the second reload signal fails.
     const b = await oldServer();
     b.adminScript = ADMIN;
     const shim = path.join(b.dir, 'nats-server-shim.sh');
@@ -354,6 +361,19 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
     assert.ok(fs.existsSync(pending), 'users.conf.pending marks the unapplied change');
     assert.equal(await injectAsAlice(b, 'interrupted-1'), true, 'not reloaded yet');
 
+    writeUser(b, 'eve', 'eve-password-123456'); // users.conf changes again, and fails the check
+    const r2b = b.admin(['init'], { check: false, env: env('check') });
+    assert.notEqual(r2b.code, 0);
+    assert.ok(fs.existsSync(pending), 'a failed check dropped the marker of an unapplied change');
+    fs.rmSync(path.join(b.confDir, 'users.d', 'eve.conf'));
+    const r2c = b.admin(['init'], {
+      check: false,
+      env: { MBOX_PID_FILE: path.join(b.dir, 'no.pid') },
+    });
+    assert.notEqual(r2c.code, 0);
+    assert.match(r2c.out, /answers at .* but there is no live pid/);
+    assert.ok(fs.existsSync(pending), 'a running server without a pid dropped the marker');
+
     const r3 = b.admin(['init'], { check: false, env: env('second') });
     assert.notEqual(r3.code, 0);
     assert.ok(fs.existsSync(pending));
@@ -372,6 +392,40 @@ describe('upgrade from v0.5.7 to per-user accounts', { skip }, () => {
     );
     assert.equal(await reachesStreams(b, 'bob'), 'ok');
     assert.equal(await injectAsAlice(b, 'interrupted-2'), false);
+  });
+
+  it('an older mbox-admin.sh run after the upgrade locks users out, never opens the stream account', async () => {
+    // 0.5.7's script copies users.d files verbatim into the stream account; the deny-all block
+    // in them must then lock the users out instead of granting them the whole account.
+    const b = await oldServer();
+    b.adminScript = ADMIN;
+    b.admin(['init']);
+    b.adminScript = OLD_ADMIN.path;
+    b.addUser('carol');
+    assert.doesNotMatch(usersConf(b), /per-user accounts/);
+    await until('alice is locked out of the stream account', async () => {
+      const nc = await b.conn('alice').catch(() => null);
+      if (!nc) return false;
+      try {
+        await nc.request('$JS.API.STREAM.NAMES', '', { timeout: 2000 });
+        return false;
+      } catch (e) {
+        return /Permissions Violation/.test(String(e));
+      } finally {
+        await nc.close().catch(() => {});
+      }
+    });
+    const nc = await b.conn('alice');
+    const sub = nc.subscribe('mbx.bob.>');
+    const res = await Promise.race([sub.closed, sleep(3000).then(() => 'still open')]);
+    assert.ok(res instanceof Error && /Permissions Violation/.test(res.message), String(res));
+    await nc.close().catch(() => {});
+    // the current script's init upgrades again, the user the old one added included
+    b.adminScript = ADMIN;
+    assert.match(b.admin(['init']).out, /reloaded nats-server/);
+    await until('alice is back', async () => (await reachesStreams(b, 'alice')) === 'ok');
+    assert.equal(await reachesStreams(b, 'carol'), 'ok');
+    assert.equal(await injectAsAlice(b, 'reupgraded'), false);
   });
 
   it('rolls back by restoring the saved files and reloading', async () => {

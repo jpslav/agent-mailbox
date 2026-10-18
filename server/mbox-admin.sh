@@ -63,7 +63,6 @@ MAX_AGE=${MBOX_MAX_AGE:-180d}
 MAX_BYTES=${MBOX_MAX_BYTES:-1GiB}
 PRESENCE_TTL=${MBOX_PRESENCE_TTL:-30m}
 SETTLE=${MBOX_RELOAD_SETTLE:-1}
-USERS_CHANGED=1  # set by rebuild_users_conf: did users.conf's content change?
 
 die() { echo "mbox-admin: $*" >&2; exit 1; }
 usage() {
@@ -86,7 +85,7 @@ stream_of() { printf 'MBX_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
 account_of() { printf 'USER_%s' "$1"; }
 
 # The bcrypt hash in a users.d file (either layout), checked so that nothing else can reach the
-# generated config.
+# generated config. The file's `user:` line is not read: the file name is the user name.
 hash_of() {
   h=$(sed -n 's/^[[:space:]]*password:[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$1" | head -n 1)
   case $h in
@@ -198,10 +197,18 @@ user_exports() {
   user_services "$1" | while read -r subj rt; do export_line "$subj" "$rt" "\"$(account_of "$1")\""; done
 }
 
-# A users.d file: $1 name, $2 bcrypt hash.
+# A users.d file: $1 name, $2 bcrypt hash, $3 "deny-all" for a mailbox user. This script reads only
+# the name (the file name) and the hash; the deny-all block is for an mbox-admin.sh from before
+# 0.5.8, which copies these files verbatim into the stream account: there they must lock the user
+# out instead of granting them the whole account.
 user_block() {
-  printf '  # %s (written by mbox-admin.sh %s)\n  {\n    user: "%s"\n    password: "%s"\n  }\n' \
+  printf '  # %s (written by mbox-admin.sh %s)\n  {\n    user: "%s"\n    password: "%s"\n' \
     "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
+  if [ "${3:-}" = deny-all ]; then
+    printf '    # deny-all: the real permissions are in the generated users.conf (mbox-admin.sh 0.5.8+)\n'
+    printf '    permissions: { publish: { deny: ">" }, subscribe: { deny: ">" } }\n'
+  fi
+  printf '  }\n'
 }
 
 rebuild_users_conf() {
@@ -238,17 +245,16 @@ rebuild_users_conf() {
   chmod 600 "$tmp"
   if [ -f "$USERS_CONF" ] && cmp -s "$tmp" "$USERS_CONF"; then
     rm -f "$tmp"
-    USERS_CHANGED=0
     return 0
   fi
   [ ! -f "$USERS_CONF" ] || cp -p "$USERS_CONF" "$USERS_CONF.prev"
   touch "$PENDING"
   mv "$tmp" "$USERS_CONF"
-  USERS_CHANGED=1
   # Never reload a server into a config it cannot parse.
   if [ -f "$SERVER_CONF" ] && ! err=$("$NATS_SERVER" -t -c "$SERVER_CONF" 2>&1); then
+    # users.conf.pending stays: the restored file may itself not be loaded yet (an earlier run
+    # was interrupted), and a needless reload costs nothing.
     if [ -f "$USERS_CONF.prev" ]; then mv "$USERS_CONF.prev" "$USERS_CONF"; else rm -f "$USERS_CONF"; fi
-    rm -f "$PENDING"
     die "the generated users.conf is invalid, kept the previous one: $err"
   fi
   rm -f "$USERS_CONF.prev"
@@ -258,14 +264,14 @@ rebuild_users_conf() {
 needs_upgrade() {
   if [ -f "$USERS_CONF" ] && ! grep -q "^$LAYOUT_MARK" "$USERS_CONF"; then return 0; fi
   for f in "$USERS_DIR"/*.conf; do
-    if [ -f "$f" ] && grep -q 'permissions:' "$f"; then return 0; fi
+    if [ -f "$f" ] && grep -q 'allow:' "$f"; then return 0; fi
   done
   return 1
 }
 
-# Before 0.5.8 each users.d file held the user's permission block; it now lives in the generated
-# account. Rewrite those files to the plain user block (the hash is kept), after saving users.conf
-# and users.d/ once, as they were, for a rollback.
+# Before 0.5.8 each users.d file held the user's permission block (an allow list); it now lives in
+# the generated account. Rewrite those files to the user block with the deny-all block (the hash is
+# kept), after saving users.conf and users.d/ once, as they were, for a rollback.
 migrate_users_d() {
   needs_upgrade || return 0
   if [ ! -d "$BACKUP_DIR" ]; then
@@ -276,11 +282,11 @@ migrate_users_d() {
     echo "upgrading to per-user accounts; saved the previous users.conf and users.d/ in $BACKUP_DIR (for a rollback)"
   fi
   for f in "$USERS_DIR"/*.conf; do
-    [ -f "$f" ] && grep -q 'permissions:' "$f" || continue
+    [ -f "$f" ] && grep -q 'allow:' "$f" || continue
     n=$(basename "$f" .conf)
     valid_name "$n"
     h=$(hash_of "$f")
-    user_block "$n" "$h" >"$f.tmp.$$"
+    user_block "$n" "$h" deny-all >"$f.tmp.$$"
     chmod 600 "$f.tmp.$$"
     mv "$f.tmp.$$" "$f"
   done
@@ -312,6 +318,10 @@ reload_server() {
     rm -f "$PENDING"
     echo "reloaded nats-server (pid $pid; twice, so that new accounts get their imports)"
     return 0
+  fi
+  # Answering without a pid we can signal: the change would silently not apply.
+  if server_up; then
+    die "nats-server answers at $NATS_URL, but there is no live pid in '$(pid_file || true)' to send the reload to; set MBOX_PID_FILE (or pid_file in nats-server.conf) and re-run '$0 init'"
   fi
   rm -f "$PENDING"  # the server reads users.conf when it starts
   echo "nats-server is not running (no live pid in '$(pid_file || true)'); the change applies when it starts."
@@ -404,8 +414,14 @@ has_wake() {
   "$NATS" stream info MBX_ALL --json 2>/dev/null | tr -d ' \n\t' |
     grep -qF '"republish":{"src":"mbx.all.*","dest":"mbxwake.all.{{wildcard(1)}}","headers_only":true}'
 }
+# Does the presence bucket accept rollups? `nats kv add` allows them, and a rollup on any key, even
+# a user's own, purges every entry in the bucket. The client only puts and deletes.
+presence_rollup() {
+  "$NATS" stream info KV_presence --json 2>/dev/null | tr -d ' \n\t' | grep -qF '"allow_rollup_hdrs":true'
+}
 check_base() {
-  "$NATS" stream info MBX_ALL >/dev/null 2>&1 && has_wake && "$NATS" kv info presence >/dev/null 2>&1
+  "$NATS" stream info MBX_ALL >/dev/null 2>&1 && has_wake && "$NATS" kv info presence >/dev/null 2>&1 &&
+    ! presence_rollup
 }
 ensure_base() {
   add_stream MBX_ALL 'mbx.all.*' --republish-source 'mbx.all.*' --republish-destination "$WAKE_DEST" --republish-headers
@@ -420,6 +436,21 @@ ensure_base() {
     "$NATS" kv add presence --history 1 --ttl "$PRESENCE_TTL" --storage file --replicas 1 >/dev/null
     echo "created kv bucket presence (history 1, ttl $PRESENCE_TTL)"
   fi
+  if presence_rollup; then
+    refuse_presence_rollup || die "could not make the presence bucket refuse rollups; check the server log and re-run"
+    echo "kv bucket presence now refuses rollups (one would purge every user's entries)"
+  fi
+}
+# `nats stream edit` insists on a terminal to confirm editing a KV bucket's stream, so update the
+# stream through the JetStream API: its current config with allow_rollup_hdrs turned off.
+refuse_presence_rollup() {
+  info=$("$NATS" request '$JS.API.STREAM.INFO.KV_presence' '' --raw 2>/dev/null) || return 1
+  cfg=$(printf '%s' "$info" | sed -n 's/.*"config":\({.*}\),"created":.*/\1/p' |
+    sed 's/"allow_rollup_hdrs":true/"allow_rollup_hdrs":false/')
+  [ -n "$cfg" ] || return 1
+  out=$("$NATS" request '$JS.API.STREAM.UPDATE.KV_presence' "$cfg" --raw 2>&1) || return 1
+  case $out in *'"error"'*) echo "$out" >&2; return 1 ;; esac
+  ! presence_rollup
 }
 
 # add-user's stream, named by $USER_NAME.
@@ -484,7 +515,7 @@ cmd_add_user() {
   [ ! -f "$USERS_DIR/$name.conf" ] || die "user $name already exists (remove-user first to reset the password)"
   pw=$(gen_password)
   h=$(bcrypt "$pw")
-  user_block "$name" "$h" >"$USERS_DIR/$name.conf"
+  user_block "$name" "$h" deny-all >"$USERS_DIR/$name.conf"
   chmod 600 "$USERS_DIR/$name.conf"
   rebuild_users_conf
   reload_server || die "user written to $USERS_DIR/$name.conf, but the server must be running to create the stream; start it and re-run add-user after remove-user"
