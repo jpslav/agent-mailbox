@@ -6,7 +6,7 @@ import { headers, connect, type NatsConnection } from '@nats-io/transport-node';
 import { jetstream, jetstreamManager, type JetStreamClient } from '@nats-io/jetstream';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Broker, findServer, sleep } from './helpers.js';
+import { Broker, at, findServer, sleep } from './helpers.js';
 import { describe, it } from './suite.js';
 
 const SERVER = findServer();
@@ -152,6 +152,8 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
         await count('MBX_BOB'),
         await count('MBX_ALL'),
         await count('KV_presence'),
+        await count('EVT_BOB'),
+        await count('KV_sharing'),
       ];
       const before = await counts();
       const bob = await b.conn('bob');
@@ -162,6 +164,9 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
         ['p1', 'mbx.bob.h.l.carol'],
         ['p2', 'mbx.all.carol'],
         ['p3', '$KV.presence.carol.h.x'],
+        ['p4', 'evt.bob.h'],
+        ['p6', 'evt.bob.box'],
+        ['p5', '$KV.sharing.team'],
       ];
       for (const [n, target] of targets) {
         const r = await alice.request(
@@ -352,6 +357,277 @@ describe('permission isolation', { skip: SERVER.skip }, () => {
       } finally {
         await b2.stop();
       }
+    });
+  });
+});
+
+// Events feeds: EVT_<USER>, written only by <user>, readable by others only while the admin shares
+// it with the team (set-sharing). bob shares (the default); carol is private.
+describe('events feed isolation', { skip: SERVER.skip }, () => {
+  let b: Broker;
+  let alice: NatsConnection;
+  let admin: NatsConnection;
+  let ajs: JetStreamClient;
+  const ev = (user: string, n: number): string =>
+    JSON.stringify({ event: 'started', address: `${user}.box.s-${n}`, user, at: '' });
+  before(async () => {
+    b = new Broker(SERVER);
+    await b.init(['alice', 'bob', 'carol']);
+    b.admin(['set-sharing', 'carol', 'private']);
+    for (const u of ['bob', 'carol']) {
+      const nc = await b.conn(u);
+      await jetstream(nc, { checkAPI: false }).publish(`evt.${u}.box`, ev(u, 1));
+      await nc.close();
+    }
+    alice = await b.conn('alice');
+    admin = await b.conn('admin');
+    ajs = jetstream(alice, { checkAPI: false, timeout: 15000 });
+  });
+  after(async () => {
+    await alice?.close();
+    await admin?.close();
+    await b?.stop();
+  });
+
+  async function denied(subject: string, body: unknown = ''): Promise<void> {
+    await assert.rejects(
+      alice.request(subject, enc(body), { timeout: 15000 }),
+      /Permissions Violation for Publish to/,
+      subject,
+    );
+  }
+  async function subDenied(subject: string): Promise<void> {
+    const sub = alice.subscribe(subject);
+    const res = await Promise.race([sub.closed, sleep(2000).then(() => 'still open')]);
+    assert.ok(
+      res instanceof Error && /Permissions Violation for Subscription/.test(res.message),
+      `${subject}: ${String(res)}`,
+    );
+  }
+  async function count(stream: string): Promise<number> {
+    return (await (await jetstreamManager(admin)).streams.info(stream)).state.messages;
+  }
+  /** Every event in a feed, read the way the client reads it (batch direct get). */
+  async function readFeed(nc: NatsConnection, user: string): Promise<string[]> {
+    const jsm = await jetstreamManager(nc, { checkAPI: false });
+    const it = await jsm.direct.getBatch(`EVT_${user.toUpperCase()}`, {
+      seq: 1,
+      batch: 100,
+      next_by_subj: `evt.${user}.*`,
+    });
+    const out: string[] = [];
+    for await (const m of it) out.push(m.string());
+    return out;
+  }
+  /**
+   * Whether the server lets `nc` read `user`'s feed. A refused batch get is never answered (a
+   * timeout), so this asks with a single get, which the server refuses at once.
+   */
+  async function canRead(nc: NatsConnection, user: string): Promise<boolean> {
+    const jsm = await jetstreamManager(nc, { checkAPI: false });
+    return jsm.direct.getMessage(`EVT_${user.toUpperCase()}`, { seq: 1 }).then(
+      () => true,
+      (e: unknown) => {
+        if (/Permissions Violation/.test(String(e))) return false;
+        throw e;
+      },
+    );
+  }
+  async function sharingList(nc: NatsConnection): Promise<unknown> {
+    const jsm = await jetstreamManager(nc, { checkAPI: false });
+    const m = await jsm.direct.getMessage('KV_sharing', { last_by_subj: '$KV.sharing.team' });
+    return m ? (JSON.parse(m.string()) as unknown) : null;
+  }
+
+  describe('negative: alice cannot', () => {
+    it("read carol's private feed (any API form)", async () => {
+      await denied('$JS.API.DIRECT.GET.EVT_CAROL', { seq: 1 });
+      await denied('$JS.API.DIRECT.GET.EVT_CAROL', {
+        seq: 1,
+        batch: 10,
+        next_by_subj: 'evt.carol.*',
+      });
+      await denied('$JS.API.DIRECT.GET.EVT_CAROL.evt.carol.box');
+      await denied('$JS.API.STREAM.MSG.GET.EVT_CAROL', { seq: 1 });
+      await denied('$JS.API.STREAM.INFO.EVT_CAROL');
+      assert.equal(await canRead(alice, 'carol'), false);
+    });
+    it("core-subscribe to anyone's events, her own included", async () => {
+      await subDenied('evt.carol.*');
+      await subDenied('evt.bob.box');
+      await subDenied('evt.alice.*');
+      await subDenied('evt.>');
+    });
+    it("write another user's feed", async () => {
+      const before = [await count('EVT_BOB'), await count('EVT_CAROL')];
+      for (const subj of [
+        'evt.bob.box',
+        'evt.carol.box',
+        'evt.bob',
+        'evt.bob.box.x',
+        'evt.alice',
+        'evt.alice.box.x',
+        'evt.all.box',
+      ])
+        await assert.rejects(ajs.publish(subj, ev('bob', 9)), /Permissions Violation/, subj);
+      assert.deepEqual([await count('EVT_BOB'), await count('EVT_CAROL')], before);
+    });
+    it('create, read or delete consumers on any feed, her own and shared ones included', async () => {
+      for (const s of ['EVT_ALICE', 'EVT_BOB', 'EVT_CAROL']) {
+        const cfg = { stream_name: s, config: { durable_name: 'x', ack_policy: 'none' } };
+        await denied(`$JS.API.CONSUMER.DURABLE.CREATE.${s}.x`, cfg);
+        await denied(`$JS.API.CONSUMER.CREATE.${s}.x`, cfg);
+        await denied(`$JS.API.CONSUMER.CREATE.${s}`, cfg);
+        await denied(`$JS.API.CONSUMER.MSG.NEXT.${s}.x`, { batch: 1 });
+        await denied(`$JS.API.CONSUMER.INFO.${s}.x`);
+        await denied(`$JS.API.CONSUMER.DELETE.${s}.x`);
+        await denied(`$JS.API.CONSUMER.NAMES.${s}`);
+      }
+    });
+    it('purge, delete or update any feed, or delete events in one', async () => {
+      for (const s of ['EVT_ALICE', 'EVT_BOB', 'EVT_CAROL']) {
+        await denied(`$JS.API.STREAM.PURGE.${s}`, {});
+        await denied(`$JS.API.STREAM.DELETE.${s}`);
+        await denied(`$JS.API.STREAM.UPDATE.${s}`, { name: s, subjects: ['evt.>'] });
+        await denied(`$JS.API.STREAM.MSG.DELETE.${s}`, { seq: 1 });
+        await denied(`$JS.API.STREAM.INFO.${s}`); // not needed: feeds are read by direct get
+      }
+      await denied('$JS.API.STREAM.CREATE.EVT_EVIL', { name: 'EVT_EVIL', subjects: ['evt.bob.*'] });
+    });
+    it('write the sharing list, or read any of it but the team key', async () => {
+      const before = await count('KV_sharing');
+      for (const subj of ['$KV.sharing.team', '$KV.sharing.alice', '$KV.sharing.x.y'])
+        await assert.rejects(ajs.publish(subj, '["alice","carol"]'), /Permissions Violation/, subj);
+      assert.equal(await count('KV_sharing'), before);
+      await denied('$JS.API.DIRECT.GET.KV_sharing', { seq: 1 });
+      await denied('$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.carol');
+      await denied('$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.>');
+      await denied('$JS.API.CONSUMER.CREATE.KV_sharing', {
+        stream_name: 'KV_sharing',
+        config: { ack_policy: 'none' },
+      });
+      await denied('$JS.API.STREAM.PURGE.KV_sharing', {});
+      await subDenied('$KV.sharing.>');
+    });
+    it("read a feed once its owner's sharing is set to private (live reload), and again after team", async () => {
+      assert.equal(await canRead(alice, 'bob'), true);
+      try {
+        assert.match(b.admin(['set-sharing', 'bob', 'private']).out, /reloaded nats-server/);
+        // The reload signal is asynchronous: wait for it to take effect.
+        for (let i = 0; i < 300 && (await canRead(alice, 'bob')); i++) await sleep(100);
+        assert.equal(await canRead(alice, 'bob'), false);
+        await denied('$JS.API.DIRECT.GET.EVT_BOB', {
+          seq: 1,
+          batch: 10,
+          next_by_subj: 'evt.bob.*',
+        });
+        assert.deepEqual(await sharingList(alice), ['alice']);
+      } finally {
+        b.admin(['set-sharing', 'bob', 'team']);
+      }
+      for (let i = 0; i < 300 && !(await canRead(alice, 'bob')); i++) await sleep(100);
+      assert.equal((await readFeed(alice, 'bob')).length, 1);
+    });
+  });
+
+  describe('positive', () => {
+    it("alice reads her own feed and bob's shared one, and the sharing list (without carol)", async () => {
+      await ajs.publish('evt.alice.box', ev('alice', 1));
+      assert.equal((await readFeed(alice, 'alice')).length, 1);
+      assert.match(at(await readFeed(alice, 'bob'), 0), /bob\.box\.s-1/);
+      assert.deepEqual(await sharingList(alice), ['alice', 'bob']);
+    });
+    it('carol reads her own private feed, and the shared ones', async () => {
+      const carol = await b.conn('carol');
+      try {
+        assert.equal((await readFeed(carol, 'carol')).length, 1);
+        assert.equal((await readFeed(carol, 'bob')).length, 1);
+      } finally {
+        await carol.close();
+      }
+    });
+  });
+
+  describe('admin script', () => {
+    it('set-sharing rejects bad input; list-users --sharing and permissions show the settings', () => {
+      assert.notEqual(b.admin(['set-sharing', 'bob', 'public'], { check: false }).code, 0);
+      assert.notEqual(b.admin(['set-sharing', 'nobody', 'team'], { check: false }).code, 0);
+      assert.notEqual(b.admin(['set-sharing', 'bob'], { check: false }).code, 0);
+      assert.deepEqual(b.admin(['list-users', '--sharing']).out.trim().split('\n'), [
+        'alice team',
+        'bob team',
+        'carol private',
+      ]);
+      const perms = b.admin(['permissions', 'alice']).out;
+      assert.match(perms, /"\$JS\.API\.DIRECT\.GET\.EVT_BOB"/);
+      assert.doesNotMatch(perms, /EVT_CAROL/);
+      assert.match(perms, /"evt\.alice\.\*",/);
+      assert.match(b.admin(['permissions', 'carol']).out, /EVT_ALICE[\s\S]*EVT_BOB/);
+    });
+    it('set-sharing to the current value does not reload the server', () => {
+      const out = b.admin(['set-sharing', 'alice', 'team']).out;
+      assert.match(out, /users\.conf unchanged: no server reload needed/);
+      assert.doesNotMatch(out, /reloaded nats-server/);
+    });
+    it('init upgrades a server provisioned before events feeds (streams, list, permissions)', async () => {
+      // A second server, provisioned and then stripped back to what an older mbox-admin.sh left:
+      // no events streams, no sharing bucket, no events lines in the users' blocks.
+      const b2 = new Broker(SERVER);
+      try {
+        await b2.init(['alice', 'bob']);
+        const nc = await b2.conn('admin');
+        const jsm = await jetstreamManager(nc);
+        for (const st of ['EVT_ALICE', 'EVT_BOB', 'KV_sharing']) await jsm.streams.delete(st);
+        await nc.close();
+        const strip = (f: string): void =>
+          fs.writeFileSync(
+            f,
+            fs
+              .readFileSync(f, 'utf8')
+              .split('\n')
+              .filter((l) => !/evt\.|EVT_|KV_sharing/.test(l))
+              .join('\n'),
+          );
+        for (const u of ['alice', 'bob']) {
+          strip(path.join(b2.confDir, 'users.d', `${u}.conf`));
+          fs.rmSync(path.join(b2.confDir, 'users.d', `${u}.sharing`));
+        }
+        strip(path.join(b2.confDir, 'users.conf'));
+        await b2.kill(); // restarted on the old permissions
+        await b2.start();
+        const out = b2.admin(['init']).out;
+        assert.match(out, /reloaded nats-server/); // the blocks gained the events lines
+        const up = b2.admin(['init']).out;
+        assert.match(up, /users\.conf unchanged/);
+        assert.match(up, /stream EVT_ALICE already exists \(kept\)/);
+        assert.match(up, /kv bucket sharing already exists \(kept\)/);
+        assert.match(out, /created stream EVT_ALICE/);
+        assert.match(out, /created stream EVT_BOB/);
+        assert.match(out, /created kv bucket sharing/);
+        assert.match(out, /sharing list updated: feeds shared with the team: \["alice","bob"\]/);
+        // Users without a sharing file are team: alice can now read bob's feed.
+        const a = await b2.conn('alice');
+        try {
+          for (let i = 0; i < 300 && !(await canRead(a, 'bob')); i++) await sleep(100);
+          assert.equal(await canRead(a, 'bob'), true);
+          assert.deepEqual(await sharingList(a), ['alice', 'bob']);
+        } finally {
+          await a.close();
+        }
+      } finally {
+        await b2.stop();
+      }
+    });
+    it('add-user and remove-user keep every block and the sharing list in step', async () => {
+      b.addUser('dave');
+      assert.match(b.admin(['permissions', 'alice']).out, /EVT_DAVE/);
+      assert.deepEqual(await sharingList(alice), ['alice', 'bob', 'dave']);
+      assert.match(
+        b.admin(['remove-user', 'dave', '--delete-stream']).out,
+        /deleted stream EVT_DAVE/,
+      );
+      assert.doesNotMatch(b.admin(['permissions', 'alice']).out, /EVT_DAVE/);
+      assert.deepEqual(await sharingList(alice), ['alice', 'bob']);
     });
   });
 });
