@@ -504,6 +504,7 @@ cmd_add_user() {
 
 cmd_remove_user() {
   name=$1; valid_name "$name"
+  umask 077
   load_admin
   require_layout
   [ -f "$USERS_DIR/$name.conf" ] || die "no such user: $name"
