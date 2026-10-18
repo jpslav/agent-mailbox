@@ -1,6 +1,6 @@
 // The receiving side of a session, shared by `mbox watch` (a stream of blocks on stdout),
 // `mbox wait` (one batch, then exit) and `mbox deliverd` (one receiver per registered session): the saved cursor and the ring of recently delivered ids,
-// presence (announce, heartbeat, depart), alias changes, the orphan guard, and the connection loop
+// presence (announce, heartbeat, depart), alias and metadata changes, the orphan guard, and the connection loop
 // with reconnect/backoff. What happens to each message is up to the caller (onMessage).
 import fs from 'node:fs';
 import { BROADCAST } from './addr.js';
@@ -95,7 +95,7 @@ export interface CommitItem {
 }
 
 export interface Receiver {
-  /** The session's current state (aliases can change while it runs). */
+  /** The session's current state (aliases and metadata can change while it runs). */
   state(): SessionState;
   commit(items: CommitItem[]): void;
   stop(opts?: { depart?: boolean }): Promise<void>;
@@ -210,10 +210,19 @@ export async function openReceiver({
         if (m !== lastMtime) {
           lastMtime = m;
           const next = readState(sid, env);
-          if (next && JSON.stringify(next.aliases) !== JSON.stringify(st.aliases)) {
+          const aliasesChanged =
+            !!next && JSON.stringify(next.aliases) !== JSON.stringify(st.aliases);
+          // Role, parent and status (`mbox whoami`, `mbox status`): adopt them, or the next
+          // heartbeat would put the old values back.
+          const metaChanged =
+            !!next &&
+            (next.role !== st.role || next.parent !== st.parent || next.status !== st.status);
+          if (next && (aliasesChanged || metaChanged)) {
             st = next;
-            reconnectRequested = true;
-            streamAc?.abort();
+            if (aliasesChanged) {
+              reconnectRequested = true;
+              streamAc?.abort();
+            }
             void post('heartbeat', 5000);
           }
         }

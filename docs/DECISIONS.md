@@ -197,3 +197,23 @@ context, decision, why.
 - **Limit:** a message that does not come back within the hold (a server redelivering late) is
   shown after newer mail. A previous reader that acknowledges a message after the next one started
   only makes the hold run to its end.
+
+## Session metadata in presence: read from git's files, display only
+
+- **Date:** 2026-10
+- **Context:** People and manager sessions need to see who each session is and what it is doing
+  across machines: its repository and branch, whether it is a manager or a worker, which session
+  spawned it, and a status line (#15).
+- **Decision:** Presence entries carry `repo`, `branch`, `role`, `parent` and `status`. Repo and
+  branch are read from git's own files (`.git`, `HEAD`, `commondir`, `config`) on every
+  heartbeat, never by running `git`. Role and parent come from `AGENT_MAILBOX_ROLE` /
+  `AGENT_MAILBOX_PARENT` (applied at each session start) or `mbox whoami --role/--parent`; status
+  from `mbox status`. They live in the session's state file, and a receiver adopts a change to
+  them as it does an alias change, so its heartbeats keep the new values. All five are
+  self-asserted and display only; readers keep only well-formed values.
+- **Why:** The delivery daemon refreshes every session it serves every 10 minutes; spawning `git`
+  there would cost a process per session per heartbeat and would run whatever the repository
+  configures (an fsmonitor hook, for example) inside the daemon. A parent claim proves nothing
+  (any session can name any address), so it must never become a reason to trust mail: the guide
+  and the skill say so explicitly. Unknown or malformed values become `null` rather than errors,
+  so an odd entry cannot break `mbox peers` for everyone.

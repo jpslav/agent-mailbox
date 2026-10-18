@@ -151,6 +151,45 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
 - Presence: KV bucket `presence`, history 1, TTL 30 minutes, refreshed every 10 minutes and
   deleted when the session ends.
 
+### Presence entry
+
+The value under `U.H.<session hash>` is JSON, written by user `U` only (publish permission
+`$KV.presence.U.>`), so every field is self-asserted except the user itself (the key's first
+token):
+
+```json
+{
+  "address": "alice.laptop.web-1a2b",
+  "aliases": ["alice.laptop.front"],
+  "session": "sess-1",
+  "agent": "claude-code",
+  "user": "alice",
+  "host": "laptop",
+  "cwd": "/work/web",
+  "pid": 4242,
+  "repo": "acme/web",
+  "branch": "feat/login",
+  "role": "worker",
+  "parent": "alice.laptop.mgr-9c8d",
+  "status": "running the tests",
+  "at": "2026-10-17T12:00:00.000Z"
+}
+```
+
+| field    | meaning                                                                                  |
+| -------- | ---------------------------------------------------------------------------------------- |
+| `repo`   | `owner/name` from the git remote (`origin`, else the first) of `cwd`; `null` outside git |
+| `branch` | the checked-out branch of `cwd`; `null` outside git or on a detached HEAD                |
+| `role`   | `manager`, `worker` or `null`                                                            |
+| `parent` | the address of the session that spawned this one, or `null`; need not be live            |
+| `status` | one line, at most 120 characters, or `null`                                              |
+
+The last five were added in 0.5.6, after `pid`; readers before that ignore them, and readers
+since then treat a missing one as `null`. Readers keep a field only when it has that shape
+(`src/core/session-meta.ts`), and only addresses and aliases that belong to `U`. All five are
+display only: nothing in the mailbox grants a `parent` or a `manager` anything. The exact bytes
+are pinned by `test/golden-presence.test.ts`.
+
 ### Delivery order
 
 What a session is guaranteed (DECISIONS.md, "Delivery order across readers"):

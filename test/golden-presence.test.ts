@@ -20,6 +20,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
   });
   after(() => b?.stop());
 
+  // 0.5.6 added repo, branch, role, parent and status after pid (#15); older readers ignore them.
   it('the stored value is the presence record plus "at", under key <user>.<host>.<12 hex of sha256(session)>', async () => {
     const t = createTransport({ servers: [b.url], user: 'alice', password: b.password('alice') });
     const nc = await b.conn('admin'); // a user may not read raw KV entries; the test inspects them as the admin
@@ -30,8 +31,17 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
           aliases: ['alice.laptop.front'],
           cwd: '/work/web',
           createdAt: '2026-01-02T03:04:05.678Z',
+          role: 'worker',
+          parent: 'alice.laptop.mgr-9c8d',
+          status: 'running the tests',
         },
-        { sid: 'sess-1', cfg: { user: 'alice' }, agent: 'claude-code', pid: 4242 },
+        {
+          sid: 'sess-1',
+          cfg: { user: 'alice' },
+          agent: 'claude-code',
+          pid: 4242,
+          git: { repo: 'acme/web', branch: 'feat/login' },
+        },
       );
       await t.presence.announce(rec);
       const kv = await new Kvm(jetstream(nc)).open('presence');
@@ -43,7 +53,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
       assert.ok(at, raw);
       assert.equal(
         raw,
-        `{"address":"alice.laptop.web-1a2b","aliases":["alice.laptop.front"],"session":"sess-1","agent":"claude-code","user":"alice","host":"laptop","cwd":"/work/web","pid":4242,"at":"${at[1]}"}`,
+        `{"address":"alice.laptop.web-1a2b","aliases":["alice.laptop.front"],"session":"sess-1","agent":"claude-code","user":"alice","host":"laptop","cwd":"/work/web","pid":4242,"repo":"acme/web","branch":"feat/login","role":"worker","parent":"alice.laptop.mgr-9c8d","status":"running the tests","at":"${at[1]}"}`,
       );
       // ...and the listing built from it
       const [peer] = await t.presence.list();
@@ -57,6 +67,11 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
         'host',
         'cwd',
         'pid',
+        'repo',
+        'branch',
+        'role',
+        'parent',
+        'status',
         'lastSeen',
         'live',
       ]);
@@ -71,6 +86,11 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
           host: 'laptop',
           cwd: '/work/web',
           pid: 4242,
+          repo: 'acme/web',
+          branch: 'feat/login',
+          role: 'worker',
+          parent: 'alice.laptop.mgr-9c8d',
+          status: 'running the tests',
           lastSeen: 0,
           live: true,
         },

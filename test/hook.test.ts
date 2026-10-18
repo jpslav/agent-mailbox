@@ -82,6 +82,37 @@ describe('hook session-start', () => {
     );
   });
 
+  it("applies a spawner's AGENT_MAILBOX_ROLE / AGENT_MAILBOX_PARENT at each session start; invalid values are ignored", () => {
+    const env = {
+      ...baseEnv(),
+      AGENT_MAILBOX_SERVERS: 'nats://127.0.0.1:9',
+      AGENT_MAILBOX_USER: 'zed',
+      AGENT_MAILBOX_PASSWORD: 'pw-x',
+    };
+    const file = path.join(env.AGENT_MAILBOX_STATE_DIR, 'sessions', 'hooksess-1234.json');
+    const state = (): Record<string, unknown> =>
+      parseJson<Record<string, unknown>>(fs.readFileSync(file, 'utf8'));
+    const start = (extra: Record<string, string>): void =>
+      assert.equal(
+        mbox(['hook', 'claude-code', 'session-start'], { env: { ...env, ...extra }, input: stdin })
+          .code,
+        0,
+      );
+    start({ AGENT_MAILBOX_ROLE: 'worker', AGENT_MAILBOX_PARENT: 'zed.box.mgr-1' });
+    assert.equal(state().role, 'worker');
+    assert.equal(state().parent, 'zed.box.mgr-1');
+    // Changed in between (as `mbox whoami --role` would), then a resume with the same environment.
+    fs.writeFileSync(file, JSON.stringify({ ...state(), role: 'manager', parent: null }));
+    start({ AGENT_MAILBOX_ROLE: 'worker', AGENT_MAILBOX_PARENT: 'zed.box.mgr-1' });
+    assert.equal(state().role, 'worker');
+    assert.equal(state().parent, 'zed.box.mgr-1');
+    // Unset or invalid: what the session has stays.
+    start({ AGENT_MAILBOX_ROLE: 'boss', AGENT_MAILBOX_PARENT: 'not-an-address' });
+    start({});
+    assert.equal(state().role, 'worker');
+    assert.equal(state().parent, 'zed.box.mgr-1');
+  });
+
   it('never fails: garbage stdin, no session id, unknown agent or event all exit 0', () => {
     assert.equal(
       mbox(['hook', 'claude-code', 'session-start'], { env: baseEnv(), input: 'not json' }).code,
@@ -184,6 +215,7 @@ describe('mbox guide', () => {
     'send',
     'reply',
     'peers',
+    'workers',
     'names',
     'inbox',
     'security',
@@ -211,6 +243,13 @@ describe('mbox guide', () => {
       mbox(['guide', 'troubleshooting'], { env: baseEnv() }).stdout,
       /deliverd --status[\s\S]*deliverd\.log/,
     );
+    // Role and parent are display only: the guide must say so where it introduces them.
+    for (const s of ['peers', 'workers', 'security'])
+      assert.match(
+        mbox(['guide', s], { env: baseEnv() }).stdout,
+        /never authority|no authority|not a chain of command/,
+        s,
+      );
   });
   it('rejects an unknown section with the list', () => {
     const r = mbox(['guide', 'nope'], { env: baseEnv() });

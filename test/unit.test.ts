@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { defaultLabel, fitLabel, parseAddr, sanitizeSeg } from '../src/core/addr.js';
@@ -10,9 +11,19 @@ import {
   parseDelivery,
   sinceArg,
 } from '../src/core/envelope.js';
-import { ResolveError, resolveTarget } from '../src/core/registry.js';
+import { ResolveError, peerTree, resolveTarget } from '../src/core/registry.js';
+import {
+  checkBranch,
+  checkParent,
+  checkRepo,
+  checkRole,
+  checkStatus,
+  gitInfo,
+  remoteUrl,
+  repoFromUrl,
+} from '../src/core/session-meta.js';
 import { configPath } from '../src/core/config.js';
-import { stateDir } from '../src/core/state.js';
+import { envMeta, readState, statePath, stateDir } from '../src/core/state.js';
 import type { Delivery, PresenceEntry } from '../src/core/types.js';
 import { BUILD_VERSION, compareVersions, isVersion, ownVersion } from '../src/core/version.js';
 import { describe, it } from './suite.js';
@@ -284,6 +295,11 @@ describe('peer resolution', () => {
     cwd: '/x',
     agent: 'claude-code',
     pid: null,
+    repo: null,
+    branch: null,
+    role: null,
+    parent: null,
+    status: null,
     lastSeen: 0,
   }); // `live: false` is a deliberately non-live entry
   const peers = [
@@ -344,5 +360,171 @@ describe('versions (daemon takeover)', () => {
     assert.equal(ownVersion({ AGENT_MAILBOX_FAKE_VERSION: '9.9.9' }), '9.9.9');
     assert.equal(ownVersion({}), BUILD_VERSION);
     assert.equal(BUILD_VERSION, '0.0.0-dev', 'run from source, nothing is injected');
+  });
+});
+
+describe('session metadata', () => {
+  const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'amb-meta-'));
+  const write = (file: string, text: string): void => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  };
+
+  it('repoFromUrl: owner/name from https, ssh and scp-like remotes; never credentials or local paths', () => {
+    assert.equal(repoFromUrl('https://github.com/acme/widgets.git'), 'acme/widgets');
+    assert.equal(repoFromUrl('https://github.com/acme/widgets/'), 'acme/widgets');
+    assert.equal(repoFromUrl('https://user:s3cret@github.com/acme/widgets.git'), 'acme/widgets');
+    assert.equal(repoFromUrl('ssh://git@github.com:22/acme/widgets.git'), 'acme/widgets');
+    assert.equal(repoFromUrl('git@github.com:acme/widgets.git'), 'acme/widgets');
+    assert.equal(repoFromUrl('github.com:acme/widgets'), 'acme/widgets');
+    assert.equal(repoFromUrl('https://gitlab.example/group/sub/widgets.git'), 'sub/widgets');
+    assert.equal(repoFromUrl('/srv/git/widgets.git'), null);
+    assert.equal(repoFromUrl('../widgets'), null);
+    assert.equal(repoFromUrl('file:///srv/git/acme/widgets.git'), null);
+    assert.equal(repoFromUrl('https://github.com/widgets'), null);
+  });
+
+  it('remoteUrl: origin wins, else the first remote with a url', () => {
+    const cfg = (remotes: string): string =>
+      `[core]\n\tbare = false\n${remotes}[branch "main"]\n\tremote = origin\n\turl = nope\n`;
+    assert.equal(
+      remoteUrl(
+        cfg('[remote "up"]\n\turl = git@h:up/x.git\n[remote "origin"]\n\turl = git@h:me/x.git\n'),
+      ),
+      'git@h:me/x.git',
+    );
+    assert.equal(remoteUrl(cfg('[remote "up"]\n\turl = git@h:up/x.git\n')), 'git@h:up/x.git');
+    assert.equal(remoteUrl(cfg('')), null);
+  });
+
+  it('gitInfo reads repo and branch from a checkout, a linked worktree and a subdirectory; null outside git', () => {
+    const root = tmp();
+    const repo = path.join(root, 'widgets');
+    write(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/feat/thing\n');
+    write(
+      path.join(repo, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/widgets.git\n',
+    );
+    fs.mkdirSync(path.join(repo, 'src', 'deep'), { recursive: true });
+    assert.deepEqual(gitInfo(repo), { repo: 'acme/widgets', branch: 'feat/thing' });
+    assert.deepEqual(gitInfo(path.join(repo, 'src', 'deep')), {
+      repo: 'acme/widgets',
+      branch: 'feat/thing',
+    });
+    // A linked worktree: ".git" is a file; HEAD is per worktree, config is in the common dir.
+    const wt = path.join(root, 'wt');
+    const wtGit = path.join(repo, '.git', 'worktrees', 'wt');
+    write(path.join(wt, '.git'), `gitdir: ${wtGit}\n`);
+    write(path.join(wtGit, 'HEAD'), 'ref: refs/heads/other\n');
+    write(path.join(wtGit, 'commondir'), '../..\n');
+    assert.deepEqual(gitInfo(wt), { repo: 'acme/widgets', branch: 'other' });
+    // Detached HEAD: no branch.
+    write(path.join(wtGit, 'HEAD'), '0123456789abcdef0123456789abcdef01234567\n');
+    assert.deepEqual(gitInfo(wt), { repo: 'acme/widgets', branch: null });
+    // No remote: no repo.
+    write(path.join(repo, '.git', 'config'), '[core]\n\tbare = false\n');
+    assert.deepEqual(gitInfo(repo), { repo: null, branch: 'feat/thing' });
+    const plain = tmp();
+    assert.deepEqual(gitInfo(plain), { repo: null, branch: null });
+    assert.deepEqual(gitInfo(null), { repo: null, branch: null });
+  });
+
+  it('checks keep only well-shaped values (what peers write is untrusted)', () => {
+    assert.equal(checkRole('worker'), 'worker');
+    assert.equal(checkRole('admin'), null);
+    assert.equal(checkParent('alice.h.mgr-1'), 'alice.h.mgr-1');
+    assert.equal(checkParent('not an address'), null);
+    assert.equal(checkStatus('  two\nlines\u0007 here '), 'two lines here');
+    assert.equal(checkStatus('x'.repeat(200))?.length, 120);
+    assert.equal(checkStatus(''), null);
+    assert.equal(checkStatus(42), null);
+    assert.equal(checkRepo('acme/widgets'), 'acme/widgets');
+    assert.equal(checkRepo('acme/wid gets'), null);
+    assert.equal(checkRepo('a/b/c'), null);
+    assert.equal(checkBranch('feat/x-1'), 'feat/x-1');
+    assert.equal(checkBranch('bad\u001b[31m'), null);
+  });
+
+  it('envMeta and readState accept only valid roles and parents', () => {
+    assert.deepEqual(envMeta({ AGENT_MAILBOX_ROLE: 'worker', AGENT_MAILBOX_PARENT: 'alice.h.m' }), {
+      role: 'worker',
+      parent: 'alice.h.m',
+    });
+    assert.deepEqual(envMeta({ AGENT_MAILBOX_ROLE: 'boss', AGENT_MAILBOX_PARENT: 'x' }), {});
+    const env = { AGENT_MAILBOX_STATE_DIR: tmp() };
+    write(
+      statePath('s1', env),
+      JSON.stringify({
+        address: 'alice.h.l',
+        aliases: [],
+        cwd: '/x',
+        createdAt: 'now',
+        role: 'root',
+        parent: 'nope',
+        status: 'ok\nfine',
+      }),
+    );
+    const st = readState('s1', env);
+    assert.equal(st?.role, null);
+    assert.equal(st?.parent, null);
+    assert.equal(st?.status, 'ok fine');
+  });
+
+  describe('peers tree', () => {
+    const peer = (
+      address: string,
+      parent: string | null = null,
+      aliases: string[] = [],
+    ): PresenceEntry => ({
+      session: address,
+      address,
+      aliases,
+      agent: null,
+      user: 'alice',
+      host: 'h',
+      cwd: null,
+      pid: null,
+      repo: null,
+      branch: null,
+      role: null,
+      parent,
+      status: null,
+      lastSeen: 0,
+      live: true,
+    });
+    const show = (peers: PresenceEntry[]): string[] =>
+      peerTree(peers).map((r) => `${r.prefix}${r.peer.address}${r.note ? ` (${r.note})` : ''}`);
+
+    it('nests children under parents (by address or alias), keeping the listing order', () => {
+      assert.deepEqual(
+        show(
+          [
+            peer('alice.h.w1', 'alice.h.mgr'),
+            peer('alice.h.mgr'),
+            peer('alice.h.w2', 'alice.h.boss'),
+            peer('alice.h.w1a', 'alice.h.w1'),
+            peer('alice.h.solo'),
+          ].map((p) => (p.address === 'alice.h.mgr' ? { ...p, aliases: ['alice.h.boss'] } : p)),
+        ),
+        ['alice.h.mgr', '├─ alice.h.w1', '│  └─ alice.h.w1a', '└─ alice.h.w2', 'alice.h.solo'],
+      );
+    });
+
+    it('a peer whose parent is not live is a marked root; cycles are cut and marked', () => {
+      assert.deepEqual(show([peer('alice.h.w', 'alice.h.gone')]), ['alice.h.w (parent not live)']);
+      assert.deepEqual(show([peer('alice.h.me', 'alice.h.me')]), ['alice.h.me (parent cycle)']);
+      assert.deepEqual(
+        show([
+          peer('alice.h.c', 'alice.h.b'),
+          peer('alice.h.tail', 'alice.h.c'),
+          peer('alice.h.b', 'alice.h.c'),
+        ]),
+        ['alice.h.b (parent cycle)', '└─ alice.h.c', '   └─ alice.h.tail'],
+      );
+    });
+
+    it('skips entries that are not live', () => {
+      assert.deepEqual(show([{ ...peer('alice.h.x'), live: false as true }]), []);
+    });
   });
 });

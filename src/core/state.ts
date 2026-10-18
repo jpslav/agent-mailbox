@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, shortHost } from './addr.js';
 import { xdgDir } from './config.js';
-import type { Config, CursorFile, Env, SessionState, Transport } from './types.js';
+import { checkParent, checkRole, checkStatus } from './session-meta.js';
+import type { Config, CursorFile, Env, Role, SessionState, Transport } from './types.js';
 
 export class NoSessionError extends Error {
   constructor() {
@@ -109,8 +110,22 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
   const aliases = Array.isArray(s.aliases)
     ? (s.aliases as unknown[]).filter((a): a is string => typeof a === 'string')
     : [];
-  // `address` is checked; the other fields were written by ensureSession and are not re-validated.
-  return { ...s, aliases } as unknown as SessionState;
+  // `address` is checked, and the metadata peers will see; the other fields were written by
+  // ensureSession and are not re-validated.
+  return {
+    ...s,
+    aliases,
+    role: checkRole(s.role),
+    parent: checkParent(s.parent),
+    status: checkStatus(s.status),
+  } as unknown as SessionState;
+}
+
+/** What a spawner passed in AGENT_MAILBOX_ROLE / AGENT_MAILBOX_PARENT (unset or invalid: absent). */
+export function envMeta(env: Env = process.env): { role?: Role; parent?: string } {
+  const role = checkRole(env.AGENT_MAILBOX_ROLE?.trim());
+  const parent = checkParent(env.AGENT_MAILBOX_PARENT?.trim());
+  return { ...(role && { role }), ...(parent && { parent }) };
 }
 
 export function readCursor(sid: string, env: Env = process.env): CursorFile | null {
@@ -129,7 +144,9 @@ export function writeCursor(sid: string, cur: CursorFile, env: Env = process.env
 /**
  * Ensure identity + cursor exist for the session. A new session starts "now" (the transport's
  * notion of the current position) so old mail is not replayed; a resumed session (same id) keeps
- * its address and cursor.
+ * its address and cursor. A new session takes its role and parent from the environment
+ * (`envMeta`); `adoptEnv` (the session-start hook) applies them to an existing one too, so a
+ * spawner's values win at each start, and `mbox whoami --role/--parent` in between.
  */
 export async function ensureSession({
   sid,
@@ -138,6 +155,7 @@ export async function ensureSession({
   cwd,
   hostPid = null,
   env = process.env,
+  adoptEnv = false,
 }: {
   sid: string;
   cfg: Pick<Config, 'user'>;
@@ -145,6 +163,7 @@ export async function ensureSession({
   cwd: string;
   hostPid?: number | null;
   env?: Env;
+  adoptEnv?: boolean;
 }): Promise<SessionState> {
   validSid(sid);
   mkdirp(sessionsDir(env));
@@ -162,12 +181,17 @@ export async function ensureSession({
       aliases: [],
       cwd,
       createdAt: new Date().toISOString(),
+      ...envMeta(env),
     };
     if (createExclusive(statePath(sid, env), created)) {
       createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {} });
     }
     st = readState(sid, env);
     if (!st) throw new Error(`could not create session state at ${statePath(sid, env)}`);
+  } else if (adoptEnv) {
+    const meta = envMeta(env);
+    if ((meta.role && meta.role !== st.role) || (meta.parent && meta.parent !== st.parent))
+      st = updateState(sid, (s) => ({ ...s, ...meta }), env);
   }
   if (!readCursor(sid, env)) {
     createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {} });
