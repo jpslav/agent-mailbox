@@ -77,8 +77,7 @@ export async function emitEvent(
         timer = setTimeout(
           () => rej(Object.assign(new Error('timed out'), { name: 'TimeoutError' })),
           timeoutMs,
-        );
-        timer.unref?.();
+        ); // not unref'd: the bound must hold even when nothing else keeps the process alive
       }),
     ]).finally(() => clearTimeout(timer));
     return null;

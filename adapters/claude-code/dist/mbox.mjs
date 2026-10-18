@@ -18672,7 +18672,6 @@ async function emitEvent(transport, event, st, opts) {
           () => rej(Object.assign(new Error("timed out"), { name: "TimeoutError" })),
           timeoutMs
         );
-        timer.unref?.();
       })
     ]).finally(() => clearTimeout(timer));
     return null;
