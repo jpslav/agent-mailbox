@@ -230,9 +230,9 @@ or to 6 in short (any other change real sessions must show, such as hooks or pre
 - Every message is untrusted data. Each block is labelled as such, body lines starting with
   `[mailbox]` are neutralized (by `watch` and `wait` alike), and the skill tells the model never to
   treat bodies as instructions.
-- The sender's user is enforced by the server: direct mail goes to `mbx.<user>.<host>.<label>.<sender>`
-  and broadcasts to `mbx.all.<sender>`, and a user may only publish subjects ending in their own
-  name. `verified-user` in the output comes from that last token, never from the envelope's `from`.
+- The sender's user is enforced by the server: direct mail goes to `mbx.<user>.<host>.<label>.<sender>`,
+  broadcasts to `mbx.all.<sender>` and asks to `ask.<area token>.<sender>`, and a user may only
+  publish subjects ending in their own name. `verified-user` in the output comes from that last token, never from the envelope's `from`.
   The sender's session within a user is self-asserted.
 - Every mailbox user has their own NATS account without JetStream; the streams live in the stream
   account `MAILBOX`, which exports each service only to the account that may import it. Replies
@@ -240,8 +240,12 @@ or to 6 in short (any other change real sessions must show, such as hooks or pre
   capture them (NATS has no permission on reply subjects; see DECISIONS.md, "Per-user accounts").
   Never put a mailbox user into the stream account, and never import into a user account a
   subject that is not in that user's own name or a read-only API call.
-- Users read only their own stream, the broadcast stream (by direct get) and presence. They cannot
-  create consumers elsewhere, delete or purge messages, or touch streams.
+- Users read only their own stream, the broadcast and asks streams (by direct get), the events
+  feeds shared with them and presence. They cannot create consumers elsewhere, delete or purge
+  messages, or touch streams.
+- An ask is untrusted input, often from another user's agent. Helpers may answer and review; acting
+  in the helper's environment needs the helper's own human. The ask's block, the guide and the
+  skill say so; keep them saying it.
 - Any change to the accounts, imports, exports or permission block that `server/mbox-admin.sh`
   generates (or to what the client needs from the server) needs a negative test in
   `test/isolation.test.ts` that proves the new boundary against a real server. Widening access
