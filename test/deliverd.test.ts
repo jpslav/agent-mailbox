@@ -18,6 +18,7 @@ import {
   Watcher,
   at,
   findServer,
+  fromRelease,
   makeEnv,
   mbox,
   sessionAddr as sessionAddrOf,
@@ -47,6 +48,8 @@ const as = <E extends Env>(env: E, version: string): E => ({
   AGENT_MAILBOX_FAKE_VERSION: version,
 });
 const re = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** An admin script from before asks, for a server that has none (0.6.0, the last one without). */
+const ADMIN_060 = fromRelease('v0.6.0', 'server/mbox-admin.sh');
 
 describe('mbox deliverd', { skip: SERVER.skip }, () => {
   let b: Broker;
@@ -1606,5 +1609,86 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       ),
     );
     assert.equal(cur.address, next);
+  });
+
+  it('asks in an area the session offers are pushed into it, with the rules for helpers', async () => {
+    const env = bobMachine();
+    const sid = 'd-asks-0001';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const dir = projectDir('asks');
+    const { address } = sessionStart(env, sid, dir, { socket: fake.path, hostPid: host.pid });
+    await until(() => peers().includes(address), 'announced');
+    const offered = mbox(['offer', 'repo:github.com/acme/api'], {
+      env: { ...env, AGENT_MAILBOX_SESSION: sid },
+      cwd: dir,
+    });
+    assert.equal(offered.code, 0, offered.stderr);
+    await until(() => peers().includes('repo:github.com/acme/api'), 'the offer is in presence');
+    const r = mbox(['ask', 'repo:github.com/acme/api', 'where is the rate limiter configured?'], {
+      env: { ...aliceEnv, AGENT_MAILBOX_SESSION: 'alice-ask' },
+    });
+    assert.equal(r.code, 0, r.stderr);
+    const id = r.stdout.trim();
+    await fake.waitFor((f) => f.messages().some((m) => m.id === id), 30000);
+    const m = fake.messages().find((x) => x.id === id);
+    assert.equal(m?.to, 'area:repo:github.com/acme/api');
+    assert.equal(m?.verified, 'alice');
+    assert.match(
+      fake.contents().join('\n'),
+      /A request for help in area repo:github\.com\/acme\/api/,
+    );
+    assert.match(fake.contents().join('\n'), /needs your own user's approval first/);
+  });
+
+  it('a server without asks: a session that offers an area still gets its mail, and the daemon keeps serving every session', async () => {
+    if (ADMIN_060.skip) return; // a clone without the v0.6.0 tag
+    const old = new Broker(SERVER, { adminScript: ADMIN_060.path });
+    cleanup.push(() => old.stop());
+    await old.init(['alice', 'bob']);
+    const env = makeEnv(old, 'bob', {
+      AGENT_MAILBOX_PID_CHECK_MS: '300',
+      AGENT_MAILBOX_DELIVERD_RESCAN_MS: '500',
+      AGENT_MAILBOX_DELIVER_RETRY_MS: '200',
+      AGENT_MAILBOX_REDELIVER_MS: '2000',
+    });
+    cleanup.push(() => stopDaemon(env));
+    const oldAlice = makeEnv(old, 'alice');
+    const host = fakeHost();
+    const one = await inbox('n1-noask');
+    const two = await inbox('n2-noask');
+    const dir = projectDir('noask');
+    const a1 = sessionStart(env, 'n1-noask', dir, { socket: one.path, hostPid: host.pid });
+    const a2 = sessionStart(env, 'n2-noask', dir, { socket: two.path, hostPid: host.pid });
+    const offered = mbox(['offer', 'lang:go'], {
+      env: { ...env, AGENT_MAILBOX_SESSION: 'n1-noask' },
+      cwd: dir,
+    });
+    assert.equal(offered.code, 0, offered.stderr);
+    assert.match(offered.stderr, /no stream for asks yet/);
+    const asked = mbox(['ask', 'lang:go', 'q'], {
+      env: { ...oldAlice, AGENT_MAILBOX_SESSION: 'alice-old' },
+    });
+    assert.equal(asked.code, 1);
+    assert.match(asked.stderr, /no stream for asks yet .* run mbox-admin\.sh init/);
+    assert.notEqual(a1.address, a2.address);
+    await until(() => logOf(env).includes(`serving ${a2.address}`), 'serving both sessions');
+    // The daemon takes the offer in within its poll interval (300 ms here) and re-subscribes the
+    // session; without the fix that at once logs "connection lost". This wait only bounds how long
+    // it gets: on a slower machine the check below gets weaker, never flaky.
+    await sleep(3000);
+    for (const [to, text] of [
+      [a1.address, 'to the offering session'],
+      [a2.address, 'to the other session'],
+    ] as const) {
+      const r = mbox(['send', to, text], {
+        env: { ...oldAlice, AGENT_MAILBOX_SESSION: 'alice-old' },
+      });
+      assert.equal(r.code, 0, r.stderr);
+    }
+    await one.waitFor((f) => f.messages().some((m) => m.body === 'to the offering session'), 30000);
+    await two.waitFor((f) => f.messages().some((m) => m.body === 'to the other session'), 30000);
+    // The refused ask read did not end the subscriptions on the shared connection.
+    assert.doesNotMatch(logOf(env), /connection lost/);
   });
 });

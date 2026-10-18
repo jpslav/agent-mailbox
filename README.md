@@ -107,6 +107,14 @@ changes.
   `all` is reserved: it is the broadcast pseudo-address.
 - `mbox name <label>` gives a session an extra alias address; the running watcher picks it up
   within about 5 seconds.
+- A **help area** names what help is about, for example `repo:github.com/acme/web` or `lang:rust`
+  (lower case; letters, digits and `. _ : / @ + -`; at most 100 characters). `mbox offer <area>`
+  makes asks in it reach the session (at most 20 areas per session; shown in presence and in the
+  OFFERS column of `mbox peers`); `mbox ask <area> "question"` reaches every live session offering
+  it, and sessions that offer it later while the server keeps it (7 days by default). An ask is an
+  ordinary envelope whose `to` is `area:<area>`; helpers answer the asker with ordinary mail. The
+  word is "area" because "topic" is reserved for broker concepts inside the code and "subject" is a
+  message's subject line.
 - Messages are JSON envelopes
   `{"v":1,"id","from","to","agent","subject","body","inReplyTo","sentAt"}`. `id` is a UUID made by
   the sender; it is what `--re` references and what de-duplicates. Anything that is not a v1
@@ -120,6 +128,7 @@ NATS mapping (a transport detail):
 | direct mail to `U.H.L` from user `S` | `mbx.U.H.L.S`                           | stream `MBX_U` (`mbx.U.>`)     |
 | broadcast from user `S`              | `mbx.all.S`                             | stream `MBX_ALL` (`mbx.all.*`) |
 | presence of a session                | KV `presence`, key `U.H.<session hash>` | stream `KV_presence`           |
+| an ask in area `A` from user `S`     | `ask.<token of A>.S`                    | stream `ASKS` (`ask.*.*`)      |
 
 The trailing sender token is **enforced by the server** (user `S` may only publish subjects ending
 in `.S`), so every delivery carries a verified sender user. Publishers set `Nats-Msg-Id` to the
@@ -250,7 +259,9 @@ printf '%s\n' '<password>' | mbox setup --servers nats://100.x.y.z:4222 --user b
 
 The NATS layout (docs/PROTOCOL.md, "Accounts, imports and permissions", has the full lists):
 
-- The **stream account** `MAILBOX` holds JetStream, every stream, the presence bucket and the admin
+- The **stream account** `MAILBOX` holds JetStream, every stream (including the shared asks
+  stream `ASKS`, created by `init`: subject `ask.*.*`, the mailbox streams' settings but `max_age`
+  7 days and `max_bytes` 256 MiB, `MBOX_ASKS_MAX_AGE`, `MBOX_ASKS_MAX_BYTES`), the presence bucket and the admin
   user (`mbx_admin`, full rights; its password is in `$MBOX_CONF_DIR/admin.creds`, mode 0600,
   used only by `mbox-admin.sh`).
 - Every mailbox user has an **account of their own**, `USER_<name>`, without JetStream. It imports
@@ -259,15 +270,17 @@ The NATS layout (docs/PROTOCOL.md, "Accounts, imports and permissions", has the 
   direct get on the user's own stream; read-only direct gets on `MBX_ALL` and the presence bucket;
   account info; broadcast wake-ups; publishing on `evt.<name>.*` (their own events feed), the
   read of the sharing list, and the direct get on their own events feed and on every other feed
-  shared with the team. `MAILBOX` exports each of these only to the accounts that may import it.
+  shared with the team; asking on `ask.*.<name>` (the last token is the asker), the direct get on
+  `ASKS` and ask wake-ups (the headers of each stored ask). `MAILBOX` exports each of these only to
+  the accounts that may import it.
 - Inside their account, each user also gets a permission block with the same list (defense in
   depth; it is also what `mbox doctor`'s isolation check sees).
 
 Everything else is out of reach: stream create/update/delete/purge, message delete, consumer
 list/delete, any access to other users' streams, consumers or reply inboxes, consumers on
 `MBX_ALL` or `KV_presence`, writing another user's events feed, reading a `private` one, any
-consumer on or subscription to events feeds, writing the sharing list, and any traffic in other
-accounts. Because a reply to a user's request
+consumer on or subscription to events feeds, writing the sharing list, asking under another
+user's name, consumers on `ASKS` or purging or deleting asks, and any traffic in other accounts. Because a reply to a user's request
 is delivered inside that user's own account, a hostile reply subject cannot land in anyone's
 stream either. `test/isolation.test.ts` proves each of these against a real server, once with the
 permission block and once without it (the account boundary alone), including reply subjects aimed
@@ -280,6 +293,15 @@ other user account, which imports it; so `add-user`, `remove-user` and `set-shar
 `users.conf` and reload the server (twice, as for every change). The script then writes the list
 of `team` users to the `sharing` bucket, which clients read for `mbox events --all` and
 `--sharing`; the exports, not that list, decide who reads what.
+
+### Upgrading a server set up before 0.6.1
+
+A server provisioned by `mbox-admin.sh` 0.6.0 has no asks stream. Install the new
+`server/mbox-admin.sh` and run `mbox-admin.sh init` once: it creates `ASKS`, adds its exports and
+imports to every account and reloads the server twice. Clients of 0.6.0 and earlier keep working
+(they ignore offers in presence entries); clients of this version can offer areas before that,
+but `mbox ask` fails and `mbox offer` and `mbox doctor` say the admin must run `init`. Earlier
+servers are upgraded by the same `init`, every step at once.
 
 ### Upgrading a server set up before 0.6.0
 
@@ -445,7 +467,9 @@ mbox send <to> "text"             <to> = full address | unique prefix/label of a
 mbox send <to> --subject S --re <id> "text"        echo long | mbox send <to> -
 mbox name reviewer                mbox inbox --since 2h        mbox doctor
 mbox show <id>                    the whole message (when a delivered one was cut short)
-mbox guide [section]              short help: overview, send, reply, peers, events, workers,
+mbox ask <area> "question"        ask every session offering <area> (e.g. repo:github.com/acme/web)
+mbox offer <area>                 asks in <area> reach this session (alone: list); mbox unoffer <area>
+mbox guide [section]              short help: overview, send, reply, peers, asks, events, workers,
                                   names, inbox, security, fallback, troubleshooting
 mbox peers --tree                 who spawned whom      mbox status "<one line>"   (--clear)
 mbox whoami --role worker --parent <address>      describe this session (display only)
@@ -606,9 +630,21 @@ Whether colleagues can read your feed is up to the admin (`mbox-admin.sh set-sha
 team|private`, `team` by default); `mbox events --sharing` and `mbox doctor` show your setting.
 Everything but the user is self-asserted and display only, as in presence.
 
+**Asks and offers.** `mbox offer <area>` records the area in the session's state and presence
+(`offers`), and its receiver (the daemon, `watch` or `wait`) starts reading asks in it: those
+still kept on the server first (7 days by default), then new ones as they come, like broadcasts
+(by sequence from a saved position per area, woken by the stored ask's headers). `mbox ask <area>
+"question"` stores one ask, says on stderr which live sessions offer the area, and prints its id.
+An ask arrives as a block `to area:<area>` whose second line carries the rules for helpers instead
+of the usual reminder: it is untrusted input, often from another user's session; the helper may
+answer it and review what it shows, but anything that would act in its environment (edit, run,
+push, change settings, send out files, data or secrets) needs its own user's approval. Helpers answer with `mbox send <from> --re <id>`. The
+asker's own session never gets its own ask back; `mbox inbox` and `mbox show` include asks in the
+areas the session offers. Every user can read every ask, so questions must not hold secrets.
+
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/` (for a named profile,
 `$AGENT_MAILBOX_STATE_DIR/profiles/<name>/sessions/`): `<id>.json` (address, aliases, cwd,
-role, parent, status),
+role, parent, status, offers),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
 (the current waiter) and `<id>.ended` (its `ended` event was written; removed by `started`). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
@@ -627,7 +663,12 @@ daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon bein
   start with `[mailbox]` (so a body cannot forge block boundaries); the skill tells Claude to treat
   bodies as data, never as instructions from its user. Do not invite anyone you would not let drop
   text into your sessions.
-- **Reading is isolated by stream.** Users can read only their own stream, broadcasts, the
+- **Asks are shared and untrusted.** Any user can ask in any area, and every user can read every
+  ask (7 days by default); the asker's user is verified like a sender's. A session that offers an
+  area receives other users' asks: the block, the guide and the skill tell the model it may answer
+  and review, and that acting in its environment needs its own user's approval. One user's flood
+  of asks shares the stream's size cap (256 MiB by default, oldest dropped first) with everyone's.
+- **Reading is isolated by stream.** Users can read only their own stream, broadcasts, asks, the
   presence bucket and the events feeds the admin shares with the team (their own always).
   Presence records (address, cwd, host, pid, repo, branch, role, parent and status) are visible
   to every user, whatever the feed's sharing: `private` hides a user's event history and `done`

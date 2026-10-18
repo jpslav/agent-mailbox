@@ -1,6 +1,7 @@
 // Presence records and peer resolution. Storing/expiring presence is the transport's job
 // (transport.presence); this file only builds the record and resolves "who did the user mean".
 import { isAddr, parseAddr } from './addr.js';
+import { checkOffers } from './areas.js';
 import { gitInfo, type GitInfo } from './session-meta.js';
 import type { Config, PresenceEntry, PresenceRecord, SessionState } from './types.js';
 
@@ -35,6 +36,7 @@ export function presenceRecord(
     role: st.role ?? null,
     parent: st.parent ?? null,
     status: st.status ?? null,
+    offers: checkOffers(st.offers),
   };
 }
 

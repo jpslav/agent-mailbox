@@ -1,8 +1,8 @@
 #!/bin/sh
 # Administer agent-mailbox users on the NATS server. Run on the mailbox host.
 #
-#   mbox-admin.sh init                       admin user + MBX_ALL stream + presence and sharing KV buckets
-#                                            (+ each user's events stream); upgrades older layouts
+#   mbox-admin.sh init                       admin user + MBX_ALL and ASKS streams + presence and sharing KV
+#                                            buckets (+ each user's events stream); upgrades older layouts
 #   mbox-admin.sh add-user <name>            user + own account + MBX_<NAME> and EVT_<NAME> streams;
 #                                            prints the `mbox setup` line
 #   mbox-admin.sh remove-user <name> [--delete-stream]
@@ -21,6 +21,7 @@
 #   MBOX_MAX_AGE       retention per mailbox stream [180d]     MBOX_MAX_BYTES  size cap per stream [1GiB]
 #   MBOX_PRESENCE_TTL  presence entry lifetime [30m]
 #   MBOX_EVENTS_MAX_AGE retention per events stream [30d]  MBOX_EVENTS_MAX_BYTES  its size cap [64MiB]
+#   MBOX_ASKS_MAX_AGE  retention of the asks stream [7d]   MBOX_ASKS_MAX_BYTES  its size cap [256MiB]
 #   MBOX_DEFAULT_SHARING  events feed sharing for users add-user creates [team]
 #   MBOX_RELOAD_SETTLE seconds to let a server reload finish before the next step (the second
 #                      reload, re-checking that the streams just created still exist) [1]
@@ -39,6 +40,11 @@
 # user account, which imports it; so every change to a user or a sharing setting regenerates the
 # whole users.conf. The sharing bucket's key `team` lists the shared feeds for clients
 # (`mbox events --all`); the exports, not that list, decide who reads what.
+#
+# Asks (docs/DECISIONS.md, "Asks and offers"): one shared stream ASKS on ask.<area token>.<sender>.
+# Each user's account imports the publish on ask.*.<name> only, so the last token is the verified
+# sender, as for mail; every account imports the direct get on ASKS (asks are read like broadcasts)
+# and, as wake-ups, the headers of each stored ask, which ASKS republishes to mbxwake.ask.*.*.
 #
 # Users live in users.d/<name>.conf (name and bcrypt hash); users.conf is regenerated from them on
 # every change and pulled into the server config with `include "users.conf"`. The server is then
@@ -69,6 +75,9 @@ ADMIN_USER=mbx_admin  # '_' cannot appear in mailbox user names, so this never c
 STREAM_ACCOUNT=MAILBOX  # the account holding JetStream; its name predates the per-user accounts
 WAKE='mbxwake.all.*'  # where MBX_ALL republishes the headers of each broadcast (wake-ups)
 WAKE_DEST='mbxwake.all.{{wildcard(1)}}'
+ASKS=ASKS  # not MBX_ASK: "ask" is a valid user name, whose mailbox stream that would be
+ASK_WAKE='mbxwake.ask.*.*'  # where ASKS republishes the headers of each ask (wake-ups)
+ASK_WAKE_DEST='mbxwake.ask.{{wildcard(1)}}.{{wildcard(2)}}'
 NATS=${NATS_BIN:-nats}
 NATS_SERVER=${NATS_SERVER_BIN:-nats-server}
 MAX_AGE=${MBOX_MAX_AGE:-180d}
@@ -77,6 +86,8 @@ PRESENCE_TTL=${MBOX_PRESENCE_TTL:-30m}
 EVENTS_MAX_AGE=${MBOX_EVENTS_MAX_AGE:-30d}
 EVENTS_MAX_BYTES=${MBOX_EVENTS_MAX_BYTES:-64MiB}
 DEFAULT_SHARING=${MBOX_DEFAULT_SHARING:-team}
+ASKS_MAX_AGE=${MBOX_ASKS_MAX_AGE:-7d}
+ASKS_MAX_BYTES=${MBOX_ASKS_MAX_BYTES:-256MiB}
 STREAM_AGE=  # add_stream's retention and size cap when set (events streams), else the mailbox's
 STREAM_BYTES=
 SETTLE=${MBOX_RELOAD_SETTLE:-1}
@@ -184,6 +195,7 @@ $JS.API.DIRECT.GET.MBX_ALL stream
 $JS.API.DIRECT.GET.KV_presence stream
 $JS.API.DIRECT.GET.KV_presence.$KV.presence.> stream
 $JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team single
+$JS.API.DIRECT.GET.ASKS stream
 EOF
 }
 # Only for user $1: publishing in their own name, and the calls on their own stream.
@@ -192,6 +204,7 @@ user_services() {
   cat <<EOF
 mbx.*.*.*.$u single
 mbx.all.$u single
+ask.*.$u single
 evt.$u.* single
 \$KV.presence.$u.> single
 \$JS.API.STREAM.INFO.$s single
@@ -219,6 +232,7 @@ permissions() {
       publish: { allow: [
         "mbx.*.*.*.$u",  # send direct mail; the last token must be the sender
         "mbx.all.$u",  # broadcast, also stamped with the sender
+        "ask.*.$u",  # ask for help in an area (ask.<area token>.<user>), stamped with the sender
         "\$JS.API.INFO",  # account info (mbox doctor)
         "\$JS.API.STREAM.INFO.$s",  # own mailbox stream
         "\$JS.API.STREAM.INFO.MBX_ALL",  # broadcast stream position for new sessions
@@ -228,6 +242,7 @@ permissions() {
         "\$JS.ACK.$s.>",  # ack own mail
         "\$JS.API.DIRECT.GET.$s",  # mbox inbox / doctor read-back (own stream only)
         "\$JS.API.DIRECT.GET.MBX_ALL",  # read broadcasts without a shared consumer
+        "\$JS.API.DIRECT.GET.$ASKS",  # read asks without a shared consumer
         "\$JS.API.DIRECT.GET.KV_presence",  # list the presence bucket
         "\$JS.API.DIRECT.GET.KV_presence.\$KV.presence.>",
         "evt.$u.*",  # write own events feed only (evt.<user>.<host>)
@@ -237,6 +252,7 @@ $pm_team        "\$JS.API.DIRECT.GET.KV_sharing.\$KV.sharing.team",  # the list 
       ] }
       subscribe: { allow: [
         "mbx.all.*",  # broadcast wake-ups
+        "ask.*.*",  # ask wake-ups (headers only)
         "_INBOX_$u.>"  # private reply inbox (client inboxPrefix)
       ] }
     }
@@ -268,6 +284,8 @@ account_block() {
   done
   printf '      { stream: { account: "%s", subject: "%s" }, to: "mbx.all.*" }  # broadcast wake-ups\n' \
     "$STREAM_ACCOUNT" "$WAKE"
+  printf '      { stream: { account: "%s", subject: "%s" }, to: "ask.*.*" }  # ask wake-ups\n' \
+    "$STREAM_ACCOUNT" "$ASK_WAKE"
   printf '    ]\n  }\n'
 }
 
@@ -316,6 +334,7 @@ rebuild_users_conf() {
     if [ -n "$accts" ]; then
       shared_services | while read -r subj rt; do export_line "$subj" "$rt" "$accts"; done
       printf '      { stream: "%s", accounts: [%s] }  # broadcast wake-ups\n' "$WAKE" "$accts"
+      printf '      { stream: "%s", accounts: [%s] }  # ask wake-ups\n' "$ASK_WAKE" "$accts"
       for u in $names; do user_exports "$u"; done
       for u in $names; do feed_export "$u"; done
     fi
@@ -537,6 +556,11 @@ has_wake() {
   "$NATS" stream info MBX_ALL --json 2>/dev/null | tr -d ' \n\t' |
     grep -qF '"republish":{"src":"mbx.all.*","dest":"mbxwake.all.{{wildcard(1)}}","headers_only":true}'
 }
+# Does ASKS republish the headers of each ask to the ask wake-up subjects (imported as ask.*.*)?
+has_ask_wake() {
+  "$NATS" stream info "$ASKS" --json 2>/dev/null | tr -d ' \n\t' |
+    grep -qF '"republish":{"src":"ask.*.*","dest":"mbxwake.ask.{{wildcard(1)}}.{{wildcard(2)}}","headers_only":true}'
+}
 # Does the presence bucket accept rollups? `nats kv add` allows them, and a rollup on any key, even
 # a user's own, purges every entry in the bucket. The client only puts and deletes.
 presence_rollup() { bucket_rollup KV_presence; }
@@ -546,7 +570,8 @@ bucket_rollup() {
   "$NATS" stream info "$1" --json 2>/dev/null | tr -d ' \n\t' | grep -qF '"allow_rollup_hdrs":true'
 }
 check_base() {
-  "$NATS" stream info MBX_ALL >/dev/null 2>&1 && has_wake && "$NATS" kv info presence >/dev/null 2>&1 &&
+  "$NATS" stream info MBX_ALL >/dev/null 2>&1 && has_wake && has_ask_wake &&
+    "$NATS" kv info presence >/dev/null 2>&1 &&
     ! presence_rollup && "$NATS" kv info sharing >/dev/null 2>&1 && ! bucket_rollup KV_sharing ||
     return 1
   for cb_n in $(user_names); do
@@ -559,6 +584,15 @@ ensure_base() {
     "$NATS" stream edit MBX_ALL --republish-source 'mbx.all.*' --republish-destination "$WAKE_DEST" \
       --republish-headers -f >/dev/null
     echo "stream MBX_ALL now republishes broadcast headers to $WAKE (wake-ups)"
+  fi
+  # Asks (shared, like MBX_ALL): a wildcard subject, as every stream here needs (docs/PROTOCOL.md).
+  STREAM_AGE=$ASKS_MAX_AGE; STREAM_BYTES=$ASKS_MAX_BYTES
+  add_stream "$ASKS" 'ask.*.*' --republish-source 'ask.*.*' --republish-destination "$ASK_WAKE_DEST" --republish-headers
+  STREAM_AGE=; STREAM_BYTES=
+  if "$NATS" stream info "$ASKS" >/dev/null 2>&1 && ! has_ask_wake; then
+    "$NATS" stream edit "$ASKS" --republish-source 'ask.*.*' --republish-destination "$ASK_WAKE_DEST" \
+      --republish-headers -f >/dev/null
+    echo "stream $ASKS now republishes ask headers to $ASK_WAKE (wake-ups)"
   fi
   if "$NATS" kv info presence >/dev/null 2>&1; then
     echo "kv bucket presence already exists (kept)"
@@ -748,6 +782,7 @@ cmd_permissions() {
   echo "# and these to every user account:"
   shared_services | while read -r subj rt; do export_line "$subj" "$rt" '<every USER_ account>'; done
   printf '      { stream: "%s", accounts: [<every USER_ account>] }  # broadcast wake-ups\n' "$WAKE"
+  printf '      { stream: "%s", accounts: [<every USER_ account>] }  # ask wake-ups\n' "$ASK_WAKE"
   echo "# $name's events feed ($(sharing_of "$name")), to these accounts, as users.d says now:"
   feed_export "$name"
   echo "# $name's own account, which holds no streams:"

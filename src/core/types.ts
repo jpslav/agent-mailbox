@@ -54,7 +54,7 @@ export interface Delivery {
   id: string;
   /** Unix seconds. */
   time: number;
-  /** 'all' or the recipient address. */
+  /** 'all', the recipient address, or an area's pseudo-address `area:<area>` (an ask). */
   to: string;
   sender: string | null;
   payload: string;
@@ -91,6 +91,8 @@ export interface SessionState {
   parent?: string | null;
   /** One line about what the session is doing (`mbox status`). */
   status?: string | null;
+  /** The help areas this session offers (`mbox offer`), sorted; absent until set. */
+  offers?: string[];
   /**
    * The address the session had before it was given this one because the mailbox user changed
    * (see ensureSession). A cursor written without an address predates that change.
@@ -193,6 +195,8 @@ export interface PresenceRecord {
   role: Role | null;
   parent: string | null;
   status: string | null;
+  /** The help areas the session offers (`mbox offer`), sorted. */
+  offers: string[];
 }
 
 /** A live session as `presence.list()` reports it. */
@@ -214,6 +218,8 @@ export interface PresenceEntry {
   /** A valid address, but not necessarily a live one. */
   parent: string | null;
   status: string | null;
+  /** Well-formed areas only, sorted, at most MAX_OFFERS (areas.ts). */
+  offers: string[];
   /** When the entry was last refreshed (ms since the epoch). */
   lastSeen: number;
   live: true;
@@ -274,7 +280,11 @@ export type DeliveryResult = void | undefined | { ackAfter: Promise<unknown> };
 export interface SubscribeOptions {
   /** Names the durable position, so mail that arrives while nobody is listening is queued. */
   session: string;
-  /** This session's addresses (and aliases), plus 'all' for broadcasts. */
+  /**
+   * This session's addresses (and aliases), plus 'all' for broadcasts and `area:<area>` for each
+   * help area it offers (asks in it are read like broadcasts: no server-side acknowledgement, the
+   * saved cursor is the position; an area new to the cursor is read from the oldest stored ask).
+   */
   addresses: string[];
   /** Only used when the durable position has to be rebuilt. */
   cursor?: Cursor;
@@ -337,7 +347,10 @@ export interface DiagnoseCheck {
  * the one implementation.
  */
 export interface Transport {
-  /** Store `envelope` durably for one address or 'all'; a retry with the same id is deduped. */
+  /**
+   * Store `envelope` durably for one address, 'all' or an area (`area:<area>`, an ask); a retry
+   * with the same id is deduped.
+   */
   publish(to: string, envelope: Envelope, opts?: { timeoutMs?: number }): Promise<{ id: string }>;
   /** Deliver mail for the addresses plus broadcasts. Never resolves: it rejects when the connection ends, or with an AbortError when `signal` aborts. */
   subscribe(opts: SubscribeOptions): Promise<never>;
@@ -347,6 +360,8 @@ export interface Transport {
   now(): Promise<Cursor>;
   presence: Presence;
   events: Events;
+  /** Whether this user can read asks: false on a server set up before help areas. */
+  asksReadable(): Promise<boolean>;
   limits: {
     /** The longest label that still forms a routable address. */
     maxLabelLen(user: string, host: string): number;

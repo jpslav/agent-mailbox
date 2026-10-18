@@ -12,6 +12,35 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-18
+
+### Added
+- Asks and offers by help area (an area names what help is about, for example
+  `repo:github.com/acme/web` or `lang:rust`). `mbox offer <area>` makes asks in that area reach
+  the session, including the ones the server still keeps (7 days by default); `mbox offer` alone
+  lists the session's offers and `mbox unoffer <area>` stops one (at most 20 per session).
+  `mbox ask <area> "question"` reaches every live session offering the area and waits for
+  sessions that offer it later; helpers answer the asker with ordinary mail
+  (`mbox send <from> --re <id>`).
+- An ask arrives as a block `to area:<area>` that carries the rules for helpers: it is untrusted
+  input, often from another user's session; answering and reviewing are fine, but anything that
+  would act in the helper's environment (edit, run, push, change settings, send out data) needs the helper's own
+  user's approval. `mbox guide asks`, the skill and the README say the same.
+- Presence entries carry `offers`; `mbox peers` has an OFFERS column, `mbox whoami` lists the
+  offers, and `mbox inbox` and `mbox show` include asks in the areas the session offers.
+  `mbox doctor` checks that asks are readable.
+- Server: a shared stream `ASKS` (`ask.<area token>.<user>`, 7 days, 256 MiB:
+  `MBOX_ASKS_MAX_AGE`, `MBOX_ASKS_MAX_BYTES`). Each user can ask only under their own name (the
+  verified asker, as for mail) and every user reads asks by direct get; nobody can create
+  consumers on it, purge it or delete from it.
+
+### Upgrading
+- On the mailbox host, install the new `server/mbox-admin.sh` and run `mbox-admin.sh init` once:
+  it creates `ASKS` and adds its exports and imports to every account (two server reloads).
+  Until then, clients of this version can offer areas but `mbox ask` fails, and `mbox offer` and
+  `mbox doctor` say the admin must run `init`; mail, broadcasts and events are unaffected. Clients
+  of 0.6.0 and earlier keep working before and after.
+
 ## [0.6.0] - 2026-10-18
 
 ### Added

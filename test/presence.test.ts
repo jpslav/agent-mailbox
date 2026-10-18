@@ -50,7 +50,7 @@ describe('presence', { skip: SERVER.skip }, () => {
       const list = peers();
       assert.match(
         list,
-        /ADDRESS\s+ALIASES\s+AGENT\s+USER@HOST\s+ROLE\s+REPO\s+BRANCH\s+STATUS\s+CWD\s+LAST SEEN/,
+        /ADDRESS\s+ALIASES\s+AGENT\s+USER@HOST\s+ROLE\s+REPO\s+BRANCH\s+STATUS\s+OFFERS\s+CWD\s+LAST SEEN/,
       );
       assert.ok(list.includes(a1) && list.includes(a2), list);
       assert.match(list, /claude-code\s+bob@/);

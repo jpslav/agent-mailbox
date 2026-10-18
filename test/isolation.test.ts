@@ -13,6 +13,7 @@ import {
 } from '@nats-io/jetstream';
 import fs from 'node:fs';
 import path from 'node:path';
+import { areaToken } from '../src/core/transport/nats.js';
 import { Broker, findServer, sleep } from './helpers.js';
 import { describe, it } from './suite.js';
 
@@ -28,7 +29,10 @@ const STREAMS = [
   'EVT_BOB',
   'EVT_MALLORY',
   'KV_sharing',
+  'ASKS',
 ];
+/** The subject token of an area, as the client computes it. */
+const T = areaToken('repo:github.com/acme/web');
 
 /** Remove `user`'s permission block from the generated users.conf and reload (twice: a reload wires new imports only on the next one; here nothing is new, but it does no harm). */
 async function stripPermissions(b: Broker, user: string): Promise<void> {
@@ -223,11 +227,52 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
     });
     it('publish with a spoofed sender token', async () => {
       const before = await count('MBX_BOB');
+      const asks = await count('ASKS');
       await assert.rejects(ajs.publish('mbx.bob.h.l.bob', 'spoof'), /Permissions Violation/);
       await assert.rejects(ajs.publish('mbx.bob.h.l.carol', 'spoof'), /Permissions Violation/);
       await assert.rejects(ajs.publish('mbx.all.bob', 'spoof'), /Permissions Violation/);
       await assert.rejects(ajs.publish('mbx.bob.h.l', 'short'), /Permissions Violation/);
+      for (const subject of [`ask.${T}.bob`, `ask.${T}.carol`, `ask.${T}`, `ask.${T}.alice.x`])
+        await assert.rejects(ajs.publish(subject, 'spoof'), /Permissions Violation/, subject);
       assert.equal(await count('MBX_BOB'), before);
+      assert.equal(await count('ASKS'), asks);
+    });
+    it('create, read or delete consumers on the asks stream, or purge, delete, update or query it', async () => {
+      const cfg = { stream_name: 'ASKS', config: { durable_name: 'x', ack_policy: 'none' } };
+      for (const [subject, body] of [
+        ['$JS.API.CONSUMER.DURABLE.CREATE.ASKS.x', cfg],
+        ['$JS.API.CONSUMER.CREATE.ASKS.x', cfg],
+        ['$JS.API.CONSUMER.CREATE.ASKS', cfg],
+        ['$JS.API.CONSUMER.MSG.NEXT.ASKS.x', { batch: 1 }],
+        ['$JS.API.CONSUMER.INFO.ASKS.x', ''],
+        ['$JS.API.CONSUMER.DELETE.ASKS.x', ''],
+        ['$JS.API.CONSUMER.NAMES.ASKS', ''],
+        ['$JS.API.STREAM.PURGE.ASKS', {}],
+        ['$JS.API.STREAM.DELETE.ASKS', ''],
+        ['$JS.API.STREAM.UPDATE.ASKS', { name: 'ASKS', subjects: ['ask.>'] }],
+        ['$JS.API.STREAM.MSG.DELETE.ASKS', { seq: 1 }],
+        ['$JS.API.STREAM.MSG.GET.ASKS', { seq: 1 }],
+        ['$JS.API.STREAM.INFO.ASKS', ''], // not needed: asks are read by direct get
+        [`$JS.API.DIRECT.GET.ASKS.ask.${T}.bob`, ''], // only the batch form is granted
+        ['$JS.API.STREAM.CREATE.ASKS_EVIL', { name: 'ASKS_EVIL', subjects: ['ask.*.bob'] }],
+      ] as Array<[string, unknown]>)
+        await denied(subject, body);
+      await subDenied('mbxwake.ask.>');
+      assert.equal((await jsm.streams.info('ASKS')).config.name, 'ASKS');
+    });
+    it('rely on the asks stream accepting deletes, purges, rollups or literal subjects', async () => {
+      const cfg = (await jsm.streams.info('ASKS')).config;
+      assert.equal(cfg.deny_delete, true);
+      assert.equal(cfg.deny_purge, true);
+      assert.equal(cfg.allow_rollup_hdrs, false);
+      assert.deepEqual(cfg.subjects, ['ask.*.*']); // a wildcard: no push-consumer deliveries
+      assert.equal(cfg.allow_direct, true);
+      assert.equal(cfg.max_age, 7 * 86400 * 1_000_000_000);
+      assert.deepEqual(cfg.republish, {
+        src: 'ask.*.*',
+        dest: 'mbxwake.ask.{{wildcard(1)}}.{{wildcard(2)}}',
+        headers_only: true,
+      });
     });
     it("write bob's presence entries", async () => {
       const h = headers();
@@ -279,7 +324,8 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       const namesBefore = await streamNames();
       const bob = await b.conn('bob');
       const woken: string[] = [];
-      bob.subscribe('mbx.all.*', { callback: (_e, m) => void woken.push(m.subject) });
+      for (const wake of ['mbx.all.*', 'ask.*.*'])
+        bob.subscribe(wake, { callback: (_e, m) => void woken.push(m.subject) });
       await bob.flush();
       const targets = [
         'mbx.bob.h.l.carol',
@@ -288,13 +334,15 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'evt.bob.h',
         '$KV.sharing.team',
         'mbxwake.all.carol',
+        `ask.${T}.carol`,
+        `mbxwake.ask.${T}.carol`,
         '$JS.API.STREAM.CREATE.MBX_EVIL',
         '$JS.API.STREAM.DELETE.MBX_BOB',
         '$JS.API.STREAM.PURGE.MBX_ALL',
         '$JS.API.CONSUMER.DELETE.MBX_BOB.bobsess',
       ];
       const listening = targets
-        .filter((t) => t !== 'mbxwake.all.carol') // see below: no interest from the admin there
+        .filter((t) => !t.startsWith('mbxwake.')) // see below: no interest from the admin there
         .map((t) => admin.subscribe(t));
       await admin.flush();
       let n = 0;
@@ -347,10 +395,12 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'no push consumer delivered: the test proves nothing',
       );
       for (const sub of listening) sub.unsubscribe();
-      // With the admin listening, a feed or the sharing bucket captures the deliveries aimed at it;
-      // they keep alice's own mail subject, which their readers ignore (feeds are read as
-      // evt.<owner>.*, the list as its one key). In production nothing listens, so nothing is
-      // delivered at all ("events feed isolation" proves that).
+      // With the admin listening, a feed, the sharing bucket or the asks stream captures the
+      // deliveries aimed at it; they keep alice's own mail subject, which their readers ignore
+      // (feeds are read as evt.<owner>.*, the list as its one key, asks as ask.<token>.*). In
+      // production nothing listens, so nothing is delivered at all ("events feed isolation"
+      // proves that). In ASKS such a capture counts as alice's own write: its subject ends in her
+      // name.
       const tolerated = /^(EVT_BOB|KV_sharing)#\d+ mbx\.alice\.laptop\.x\.alice$/;
       const { foreign } = await foreignWrites(jsm, since, 'alice');
       assert.deepEqual(
@@ -359,10 +409,10 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       );
       assert.deepEqual(await streamNames(), namesBefore);
       assert.ok((await jsm.consumers.info('MBX_BOB', 'bobsess')).name === 'bobsess');
-      // Without interest in the stream account, a consumer aimed at the wake-up export delivers
+      // Without interest in the stream account, a consumer aimed at a wake-up export delivers
       // nothing (an import's interest does not count). Were that to change, a user could send
       // everyone extra wake-ups under any name: clients ignore a wake-up's content and only poll.
-      assert.deepEqual(woken, [], 'a push delivery reached bob as a broadcast wake-up');
+      assert.deepEqual(woken, [], 'a push delivery reached bob as a broadcast or ask wake-up');
       await bob.close();
     });
     it('authenticate with a wrong password or anonymously', async () => {
@@ -398,6 +448,7 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       const forgedEvent = enc({ event: 'done', address: 'bob.h.forged', status: 'forged' });
       const pe = await js.publish(`evt.${user}.h`, forgedEvent);
       await js.publish(`$KV.presence.${user}.h.s1`, forged);
+      const pk = await js.publish(`ask.${T}.${user}`, forged);
       const consumer = enc({
         stream_name: S,
         config: {
@@ -429,6 +480,9 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         ['$JS.API.DIRECT.GET.EVT_BOB', enc({ seq: 1 })], // bob's feed is shared with the team
         ['$JS.API.DIRECT.GET.KV_sharing.$KV.sharing.team', ''],
         [`evt.${user}.h`, forgedEvent],
+        ['$JS.API.DIRECT.GET.ASKS', enc({ seq: pk.seq })],
+        ['$JS.API.DIRECT.GET.ASKS', enc({ seq: 1, batch: 5, next_by_subj: `ask.${T}.*` })],
+        [`ask.${T}.${user}`, forged],
       ];
       const replies = [
         'mbx.bob.h.l.carol',
@@ -443,6 +497,10 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'evt.bob.h',
         '$KV.sharing.team',
         '$JS.API.DIRECT.GET.EVT_BOB',
+        `ask.${T}.carol`,
+        `ask.${T}.bob`,
+        `mbxwake.ask.${T}.carol`,
+        '$JS.API.DIRECT.GET.ASKS',
       ];
       // a real delivery, acknowledged below with hostile replies (the ack's own response). Not
       // multiplexed: a pulled message keeps its own subject, which the shared inbox cannot route.
@@ -518,6 +576,19 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         ['$JS.API.STREAM.PURGE.KV_sharing', {}],
         ['$KV.sharing.team', '["mallory"]'],
         ['evt.bob.h', '{}'],
+        ['$JS.API.STREAM.INFO.ASKS', ''],
+        ['$JS.API.STREAM.MSG.GET.ASKS', { seq: 1 }],
+        ['$JS.API.CONSUMER.CREATE.ASKS', { stream_name: 'ASKS', config: {} }],
+        [
+          '$JS.API.CONSUMER.DURABLE.CREATE.ASKS.evil',
+          { stream_name: 'ASKS', config: { durable_name: 'evil', ack_policy: 'none' } },
+        ],
+        ['$JS.API.STREAM.PURGE.ASKS', {}],
+        ['$JS.API.STREAM.DELETE.ASKS', ''],
+        ['$JS.API.STREAM.MSG.DELETE.ASKS', { seq: 1 }],
+        ['$JS.API.STREAM.UPDATE.ASKS', { name: 'ASKS', subjects: ['ask.>'] }],
+        [`$JS.API.DIRECT.GET.ASKS.ask.${T}.bob`, ''],
+        [`ask.${T}.bob`, '{}'],
       ];
       const answers = await Promise.all(
         probes.map(([subject, body]) =>
@@ -554,6 +625,11 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
         'evt.mallory',
         'evt.mallory.h.x',
         '$KV.sharing.team',
+        `ask.${T}.carol`,
+        `ask.${T}.bob`,
+        `ask.${T}`,
+        `ask.${T}.mallory.x`,
+        `mbxwake.ask.${T}.bob`,
       ])
         await assert.rejects(mjs.publish(subject, 'spoof'), subject);
       assert.deepEqual((await foreignWrites(jsm, since, 'mallory')).foreign, []);
@@ -590,9 +666,14 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       assert.ok(m);
       await m.ackAck();
       await ajs.publish('mbx.all.alice', 'hello everyone');
+      await bjs.publish(`ask.${T}.bob`, 'a question for the team');
       await sleep(1000);
       await bob.close();
-      assert.deepEqual(heard, ['> <- mbx.all.alice (0 bytes)']); // the wake-up: headers only
+      // the wake-ups, headers only (two streams: no order between them)
+      assert.deepEqual(heard.sort(), [
+        `> <- ask.${T}.bob (0 bytes)`,
+        '> <- mbx.all.alice (0 bytes)',
+      ]);
     });
   });
 
@@ -640,6 +721,32 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       assert.ok(d);
       assert.equal(d.string(), 'note to self');
       await assert.rejects(ajsm.consumers.delete('MBX_ALICE', 'mine'), /Permissions Violation/); // not needed, not granted
+    });
+    it('ask in an area (stamped with her user, deduped), wake bob with headers only, and read asks by direct get', async () => {
+      const bob = await b.conn('bob');
+      const sub = bob.subscribe(`ask.${T}.*`, { max: 1 });
+      await bob.flush();
+      const pa = await ajs.publish(`ask.${T}.alice`, 'how do I run the tests?', { msgID: 'ask-1' });
+      assert.equal(pa.stream, 'ASKS');
+      const dup = await ajs.publish(`ask.${T}.alice`, 'how do I run the tests?', {
+        msgID: 'ask-1',
+      });
+      assert.equal(dup.duplicate, true);
+      for await (const m of sub) {
+        assert.equal(m.subject, `ask.${T}.alice`);
+        assert.equal(m.data.length, 0);
+        assert.equal(m.headers?.get('Nats-Stream'), 'ASKS');
+      }
+      const bjsm = await jetstreamManager(bob, { checkAPI: false });
+      const it2 = await bjsm.direct.getBatch('ASKS', {
+        seq: pa.seq, // earlier tests stored asks in this area too
+        batch: 10,
+        next_by_subj: `ask.${T}.*`,
+      });
+      const got: string[] = [];
+      for await (const m of it2) got.push(`${m.subject} ${m.string()}`);
+      assert.ok(got.includes(`ask.${T}.alice how do I run the tests?`), got.join('\n'));
+      await bob.close();
     });
     it('read broadcasts by direct get, write her own presence entry and read the whole bucket', async () => {
       const ajsm = await jetstreamManager(alice, { checkAPI: false });
@@ -1048,14 +1155,20 @@ describe('events feed isolation', { skip: SERVER.skip }, () => {
       await unanswered(probes);
       await subDenied('$KV.sharing.>');
     });
-    it('deliver into a feed or the sharing list through a push consumer, with nothing listening', async () => {
-      // Production: nothing in the stream account subscribes to a feed's or the list's subjects,
+    it('deliver into a feed, the sharing list or the asks stream through a push consumer, with nothing listening', async () => {
+      // Production: nothing in the stream account subscribes to a feed's, the list's or the asks' subjects,
       // and a stream with a wildcard subject does not count as a listener. The control, a stream on
       // a literal subject, does capture: the check could see a delivery.
       await jsm.streams.add({ name: 'TST_LIT', subjects: ['tst.lit'] });
       try {
-        const targets = ['evt.bob.box', 'evt.carol.box', 'evt.alice.box', '$KV.sharing.team'];
-        const before = await Promise.all([...FEEDS, 'KV_sharing'].map(count));
+        const targets = [
+          'evt.bob.box',
+          'evt.carol.box',
+          'evt.alice.box',
+          '$KV.sharing.team',
+          `ask.${T}.bob`,
+        ];
+        const before = await Promise.all([...FEEDS, 'KV_sharing', 'ASKS'].map(count));
         for (const [nc, user] of [
           [alice, 'alice'],
           [mallory, 'mallory'],
@@ -1082,7 +1195,7 @@ describe('events feed isolation', { skip: SERVER.skip }, () => {
         for (let i = 0; i < 300 && (await count('TST_LIT')) < 2; i++) await sleep(100);
         assert.equal(await count('TST_LIT'), 2, 'the control stream captured nothing');
         await sleep(1500);
-        assert.deepEqual(await Promise.all([...FEEDS, 'KV_sharing'].map(count)), before);
+        assert.deepEqual(await Promise.all([...FEEDS, 'KV_sharing', 'ASKS'].map(count)), before);
       } finally {
         await jsm.streams.delete('TST_LIT');
       }

@@ -5,6 +5,7 @@ import { Command } from 'commander';
 import { adapters, getAdapter, resolveAgent, resolveSession } from './agents/index.js';
 import type { HookContext, HookInput, ResolvedSession } from './agents/index.js';
 import { BROADCAST, fitLabel, isAddr, parseAddr, shortHost } from './core/addr.js';
+import { AREA_MAX, MAX_OFFERS, areaAddress, normalizeArea } from './core/areas.js';
 import {
   ConfigError,
   PROFILE_RE,
@@ -274,7 +275,7 @@ async function recordEvent(
 program
   .command('whoami')
   .description(
-    "print this session's mailbox address (and aliases, role, parent, status); --role/--parent set them",
+    "print this session's mailbox address (and aliases, role, parent, status, offers); --role/--parent set them",
   )
   .option('--role <role>', `this session's role: ${ROLES.join(', ')} or none (display only)`)
   .option('--parent <address>', 'the address of the session that spawned this one, or none')
@@ -310,6 +311,7 @@ program
       if (st.role) console.log(`role: ${st.role}`);
       if (st.parent) console.log(`parent: ${st.parent}`);
       if (st.status) console.log(`status: ${st.status}`);
+      if (st.offers?.length) console.log(`offers: ${st.offers.join(', ')}`);
     }),
   );
 
@@ -777,6 +779,7 @@ program
           'REPO',
           'BRANCH',
           'STATUS',
+          'OFFERS',
           'CWD',
           'LAST SEEN',
         ],
@@ -791,6 +794,7 @@ program
           p.repo ?? '-',
           oneLine(p.branch ?? '-', 40),
           oneLine(p.status ?? '-', 60),
+          p.offers.length ? oneLine(p.offers.join(','), 80) : '-',
           oneLine(p.cwd ?? '-', 60),
           ago(p.lastSeen),
         ]);
@@ -863,6 +867,125 @@ program
     }),
   );
 
+// ---------------------------------------------------------------- offer / unoffer / ask
+/** An area from the command line, or a usage error saying what is wrong with it. */
+function checkedArea(input: string): string {
+  const area = normalizeArea(input);
+  if (!area)
+    throw new UsageError(
+      `invalid area "${oneLine(input, 60)}" (lower case a-z 0-9 and . _ : / @ + -, starting with a letter or digit, at most ${AREA_MAX} characters; e.g. repo:github.com/acme/web)`,
+    );
+  return area;
+}
+
+/** Warn when the server has no asks yet: offering or asking would do nothing there. */
+async function warnWithoutAsks(transport: Transport): Promise<void> {
+  const ok = await transport.asksReadable().catch(() => true); // unreachable: other commands say so
+  if (!ok)
+    process.stderr.write(
+      'warning: the server has no stream for asks yet (it was set up before help areas); ask the admin to run mbox-admin.sh init\n',
+    );
+}
+
+program
+  .command('offer')
+  .description(
+    'offer help in an area (e.g. repo:github.com/acme/web): asks there reach this session, including the ones still kept (7 days by default); without an area, list your offers',
+  )
+  .argument('[area]', 'the area: lower case a-z 0-9 . _ : / @ + -')
+  .action(
+    action(async (input: string | undefined) => {
+      const ctx = await context();
+      if (input === undefined) {
+        const offers = ctx.st.offers ?? [];
+        console.log(offers.length ? offers.join('\n') : '(no offers)');
+        return;
+      }
+      const area = checkedArea(input);
+      const have = ctx.st.offers ?? [];
+      if (!have.includes(area) && have.length >= MAX_OFFERS)
+        throw new UsageError(
+          `this session already offers ${MAX_OFFERS} areas, the most it may; mbox unoffer one first`,
+        );
+      await saveAndAnnounce(ctx, (s) => ({
+        ...s,
+        offers: [...new Set([...(s.offers ?? []), area])].sort(),
+      }));
+      await warnWithoutAsks(ctx.transport);
+      console.log(area);
+    }),
+  );
+
+program
+  .command('unoffer')
+  .description('stop offering help in an area')
+  .argument('<area>', 'the area, as mbox offer lists it')
+  .action(
+    action(async (input: string) => {
+      const ctx = await context();
+      const area = checkedArea(input);
+      if (!(ctx.st.offers ?? []).includes(area)) {
+        process.stderr.write(`mbox: this session does not offer ${area}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      await saveAndAnnounce(ctx, (s) => ({
+        ...s,
+        offers: (s.offers ?? []).filter((a) => a !== area),
+      }));
+      console.log(area);
+    }),
+  );
+
+const QUEUED =
+  "the ask stays queued for sessions that offer the area later (the server's retention for asks, 7 days by default). Replies come to you as mail.";
+
+program
+  .command('ask')
+  .description(
+    'ask for help in an area: delivered to every live session offering it, and kept (7 days by default) for sessions that offer it later; helpers reply to you directly',
+  )
+  .argument('<area>', 'the area, e.g. repo:github.com/acme/web')
+  .argument('[question]', 'the question; "-" or omitted reads stdin')
+  .option('--subject <s>', 'subject line')
+  .action(
+    action(async (input: string, text: string | undefined, opts: { subject?: string }) => {
+      const area = checkedArea(input);
+      const { cfg, transport, sid, st, agent } = await context();
+      let body = text;
+      if (body === '-' || (body === undefined && !process.stdin.isTTY))
+        body = await readStdin(body === undefined ? 3000 : 0);
+      if (body === undefined || body === '')
+        throw new UsageError('empty question: pass text as an argument or on stdin');
+      const envelope = buildEnvelope({
+        from: st.address,
+        to: areaAddress(area),
+        agent,
+        subject: opts.subject,
+        body,
+      });
+      const size = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+      if (cfg.maxBytes && size > cfg.maxBytes)
+        throw new UsageError(
+          `question is ${size} bytes as an envelope but your configured limit (AGENT_MAILBOX_MAX_BYTES / "maxMessageBytes") is ${cfg.maxBytes}. Shorten it or raise the limit.`,
+        );
+      const res = await transport.publish(areaAddress(area), envelope);
+      try {
+        const helpers = (await transport.presence.list()).filter(
+          (p) => p.live && p.offers.includes(area) && p.session !== sid,
+        );
+        process.stderr.write(
+          helpers.length
+            ? `asked ${helpers.length} live session${helpers.length === 1 ? '' : 's'} offering ${area} (${helpers.map((p) => p.address).join(', ')}); ${QUEUED}\n`
+            : `no live session offers ${area} right now; ${QUEUED}\n`,
+        );
+      } catch {
+        /* the count is a courtesy */
+      }
+      console.log(res.id);
+    }),
+  );
+
 // ---------------------------------------------------------------- inbox
 const UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
 /** The milliseconds in a --since value; the caller has checked it matches /^\d+[smhd]$/. */
@@ -872,7 +995,7 @@ const sinceMs = (since: string): number =>
 program
   .command('inbox')
   .description(
-    'print recent messages (your addresses + broadcast) without moving the watcher cursor',
+    'print recent messages (your addresses, broadcasts and asks in the areas you offer) without moving the watcher cursor',
   )
   .option('--since <dur>', 'how far back (e.g. 30m, 2h, 1d)', '2h')
   .action(
@@ -881,13 +1004,15 @@ program
         throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
       const { cfg, transport, st } = await context();
       const names = [st.address, ...st.aliases];
-      const deliveries = await transport.poll([...names, BROADCAST], {
+      const areas = (st.offers ?? []).map(areaAddress);
+      const deliveries = await transport.poll([...names, BROADCAST, ...areas], {
         lookbackMs: sinceMs(opts.since),
       });
       let n = 0;
       for (const d of deliveries) {
         const m = parseDelivery(d);
-        if (d.to === BROADCAST && m.sender === cfg.user && names.includes(m.from)) continue;
+        const shared = d.to === BROADCAST || areas.includes(d.to); // own broadcasts and asks: skipped
+        if (shared && m.sender === cfg.user && names.includes(m.from)) continue;
         process.stdout.write(formatBlock(m));
         n++;
       }
@@ -1011,7 +1136,9 @@ program
 // ---------------------------------------------------------------- show
 program
   .command('show')
-  .description('print one message (to this session or a broadcast) in full, by its id')
+  .description(
+    'print one message (to this session, a broadcast or an ask in an area you offer) in full, by its id',
+  )
   .argument('<id>', 'message id, as in "[mailbox] message <id>"')
   .option('--since <dur>', 'how far back to look (e.g. 2h, 7d)', '30d')
   .action(
@@ -1019,19 +1146,21 @@ program
       if (!/^\d+[smhd]$/.test(opts.since))
         throw new UsageError(`--since must look like 30m, 2h or 7d (got "${opts.since}")`);
       const { transport, st } = await context();
-      const deliveries = await transport.poll([st.address, ...st.aliases, BROADCAST], {
+      const areas = (st.offers ?? []).map(areaAddress);
+      const deliveries = await transport.poll([st.address, ...st.aliases, BROADCAST, ...areas], {
         lookbackMs: sinceMs(opts.since),
         max: Infinity,
       });
-      const hit = deliveries.map(parseDelivery).find((m) => m.id === id);
-      if (!hit) {
+      // Ids are chosen by senders, so several messages can share one: show each of them.
+      const hits = deliveries.map(parseDelivery).filter((m) => m.id === id);
+      if (!hits.length) {
         process.stderr.write(
           `mbox: no message ${oneLine(id, 140)} to this session in the last ${opts.since} (try --since 180d)\n`,
         );
         process.exitCode = 1;
         return;
       }
-      process.stdout.write(formatBlock(hit));
+      for (const hit of hits) process.stdout.write(formatBlock(hit));
     }),
   );
 
