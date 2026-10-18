@@ -1412,9 +1412,16 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
       fa.messages().map((m) => [m.from, m.verified, m.body]),
       [[bs.address, 'bob', 'hi alice']],
     );
-    assert.match(log('p-alice'), new RegExp(`delivered 1 message to ${re(a.address)}`));
+    // The daemon logs a delivery once the inbox has closed the connection, after the inbox has it.
+    await until(
+      () => new RegExp(`delivered 1 message to ${re(a.address)}`).test(log('p-alice')),
+      "alice's daemon logs the delivery",
+    );
     assert.ok(!log('p-alice').includes(bs.address), "alice's daemon never touches bob's session");
-    assert.match(log('p-bob'), new RegExp(`delivered 1 message to ${re(bs.address)}`));
+    await until(
+      () => new RegExp(`delivered 1 message to ${re(bs.address)}`).test(log('p-bob')),
+      "bob's daemon logs the delivery",
+    );
     assert.ok(!log('p-bob').includes(a.address), "bob's daemon never touches alice's session");
     assert.match(log('p-bob'), /mailbox user bob, profile p-bob/);
 
