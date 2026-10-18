@@ -254,6 +254,8 @@ export async function runWait({
     signal: opening.signal,
     onMessage,
     onHostGone: () => yieldNow({ depart: true }),
+    // The mailbox user changed under us: the next `mbox wait` runs under the new address.
+    onReaddressed: () => yieldNow({ depart: true }),
   });
   try {
     rx = await opened;

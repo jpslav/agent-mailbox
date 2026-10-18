@@ -4,7 +4,7 @@
 //
 //   <state>/registrations/<sid>.json   {sid, address, endpoint, hostPid, cwd, agent, registeredAt}
 //                                      mode 0600 (the endpoint may hold a secret, e.g. a token)
-//   <state>/deliverd.lock              the running daemon (pidfile lock: {pid, startedAt, version, exe})
+//   <state>/deliverd.lock              the running daemon (pidfile lock: {pid, startedAt, version, exe, user})
 //   <state>/deliverd.starting          a daemon is being started: {pid, version, at} (see ensureDeliverd)
 //   <state>/deliverd.log               its concise, rotating log (never endpoints or tokens)
 //   <state>/deliverd.out               its stdout/stderr (crash traces only)
@@ -143,6 +143,8 @@ export interface DaemonInfo {
   version: string | null;
   /** The bundle it runs from (the file may since have been deleted); null before 0.5.3. */
   exe: string | null;
+  /** The mailbox user it serves; null before 0.5.7. */
+  user: string | null;
 }
 
 /** The running delivery daemon, else null. */
@@ -153,6 +155,7 @@ export function deliverdInfo(env: Env = process.env): DaemonInfo | null {
     pid: info.pid,
     version: typeof info.version === 'string' ? info.version : null,
     exe: typeof info.exe === 'string' ? info.exe : null,
+    user: typeof info.user === 'string' ? info.user : null,
   };
 }
 

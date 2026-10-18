@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { defaultLabel, fitLabel, parseAddr, sanitizeSeg } from '../src/core/addr.js';
+import { defaultLabel, fitLabel, parseAddr, sanitizeSeg, shortHost } from '../src/core/addr.js';
 import {
   RAW_FROM,
   buildEnvelope,
@@ -22,8 +22,17 @@ import {
   remoteUrl,
   repoFromUrl,
 } from '../src/core/session-meta.js';
-import { configPath } from '../src/core/config.js';
-import { envMeta, readState, statePath, stateDir } from '../src/core/state.js';
+import { ConfigError, configPath, profileName } from '../src/core/config.js';
+import {
+  cursorFits,
+  ensureSession,
+  envMeta,
+  readCursor,
+  readState,
+  statePath,
+  stateDir,
+  writeCursor,
+} from '../src/core/state.js';
 import type { Delivery, PresenceEntry } from '../src/core/types.js';
 import { BUILD_VERSION, compareVersions, isVersion, ownVersion } from '../src/core/version.js';
 import { describe, it } from './suite.js';
@@ -531,5 +540,134 @@ describe('session metadata', () => {
     it('skips entries that are not live', () => {
       assert.deepEqual(show([{ ...peer('alice.h.x'), live: false as true }]), []);
     });
+  });
+});
+
+describe('profiles', () => {
+  const home = os.homedir();
+  const cfgDir = path.join('/x/cfg', 'agent-mailbox');
+  it('unset, empty and "default" select the default profile; a name selects profiles/<name>', () => {
+    for (const p of [undefined, '', ' ', 'default']) {
+      const env = { XDG_CONFIG_HOME: '/x/cfg', AGENT_MAILBOX_PROFILE: p };
+      assert.equal(profileName(env), null);
+      assert.equal(configPath(env), path.join(cfgDir, 'config.json'));
+      assert.equal(stateDir(env), path.join(home, '.local', 'state', 'agent-mailbox'));
+    }
+    const env = {
+      XDG_CONFIG_HOME: '/x/cfg',
+      XDG_STATE_HOME: '/x/st',
+      AGENT_MAILBOX_PROFILE: 'bob',
+    };
+    assert.equal(profileName(env), 'bob');
+    assert.equal(configPath(env), path.join(cfgDir, 'profiles', 'bob.json'));
+    assert.equal(stateDir(env), path.join('/x/st', 'agent-mailbox', 'profiles', 'bob'));
+  });
+  it('a profile gets its own state below AGENT_MAILBOX_STATE_DIR too', () => {
+    assert.equal(stateDir({ AGENT_MAILBOX_STATE_DIR: '/y/s' }), '/y/s');
+    assert.equal(
+      stateDir({ AGENT_MAILBOX_STATE_DIR: '/y/s', AGENT_MAILBOX_PROFILE: 'bob' }),
+      path.join('/y/s', 'profiles', 'bob'),
+    );
+  });
+  it('AGENT_MAILBOX_CONFIG keeps working without a profile; with one it is an error', () => {
+    assert.equal(configPath({ AGENT_MAILBOX_CONFIG: '/y/c.json' }), '/y/c.json');
+    assert.equal(
+      configPath({ AGENT_MAILBOX_CONFIG: '/y/c.json', AGENT_MAILBOX_PROFILE: 'default' }),
+      '/y/c.json',
+    );
+    assert.throws(
+      () => configPath({ AGENT_MAILBOX_CONFIG: '/y/c.json', AGENT_MAILBOX_PROFILE: 'bob' }),
+      (e: unknown) => e instanceof ConfigError && /both a profile \(bob\)/.test(e.message),
+    );
+  });
+  it('an invalid name is an error, never the default profile', () => {
+    for (const p of ['Bob', 'b.o', '../x', '-x', 'x'.repeat(33), 'a b'])
+      for (const f of [profileName, configPath, stateDir])
+        assert.throws(() => f({ AGENT_MAILBOX_PROFILE: p }), ConfigError, `${f.name}(${p})`);
+    assert.equal(profileName({ AGENT_MAILBOX_PROFILE: 'x'.repeat(32) }), 'x'.repeat(32));
+  });
+});
+
+describe('ensureSession when the mailbox user changed', () => {
+  const host = shortHost();
+  const transport = { limits: { maxLabelLen: () => 40 }, now: () => Promise.resolve('NOW') };
+  const setup = () => {
+    const env = { AGENT_MAILBOX_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'amb-readdr-')) };
+    return env;
+  };
+  const ensure = (env: { AGENT_MAILBOX_STATE_DIR: string }, user: string, seen: string[] = []) =>
+    ensureSession({
+      sid: 's-1',
+      cfg: { user },
+      transport,
+      cwd: '/nonexistent/proj',
+      env,
+      onReaddress: (from, to) => seen.push(`${from} -> ${to}`),
+    });
+
+  it('gives the session a new address under the current user, a fresh cursor and no aliases', async () => {
+    const env = setup();
+    const first = await ensure(env, 'alice');
+    assert.equal(first.address, `alice.${host}.proj-s-1`);
+    assert.deepEqual(readCursor('s-1', env), { cursor: 'NOW', seen: {}, address: first.address });
+    // Mail was received, an alias added and metadata set, all as alice.
+    writeCursor('s-1', { cursor: 'ALICE-POS', seen: { m1: 1 }, address: first.address }, env);
+    fs.writeFileSync(
+      statePath('s-1', env),
+      JSON.stringify({
+        ...first,
+        aliases: [`alice.${host}.other`],
+        role: 'worker',
+        status: 'busy',
+      }),
+    );
+    const same: string[] = [];
+    assert.equal((await ensure(env, 'alice', same)).address, first.address, 'same user: kept');
+    assert.deepEqual(same, []);
+    assert.equal(readCursor('s-1', env)?.cursor, 'ALICE-POS');
+
+    const seen: string[] = [];
+    const st = await ensure(env, 'bob', seen);
+    assert.equal(st.address, `bob.${host}.proj-s-1`, 'same label, new user');
+    assert.deepEqual(st.aliases, [], 'aliases belong to the old user');
+    assert.equal(st.previousAddress, first.address);
+    assert.equal(st.role, 'worker', 'metadata stays');
+    assert.equal(st.status, 'busy');
+    assert.deepEqual(seen, [`${first.address} -> ${st.address}`], 'told once');
+    assert.deepEqual(readCursor('s-1', env), { cursor: 'NOW', seen: {}, address: st.address });
+    assert.deepEqual(readState('s-1', env), st, 'persisted');
+
+    // Resumed again as bob: nothing changes, nobody is told.
+    writeCursor('s-1', { cursor: 'BOB-POS', seen: {}, address: st.address }, env);
+    const again: string[] = [];
+    assert.equal((await ensure(env, 'bob', again)).address, st.address);
+    assert.deepEqual(again, []);
+    assert.equal(readCursor('s-1', env)?.cursor, 'BOB-POS');
+  });
+
+  it('a cursor for another user, or one without an address after a change, is replaced', async () => {
+    const env = setup();
+    const st = await ensure(env, 'alice');
+    // A cursor from before 0.5.7 (no address) is kept while the session keeps its address.
+    writeCursor('s-1', { cursor: 'OLD', seen: {} }, env);
+    await ensure(env, 'alice');
+    assert.equal(readCursor('s-1', env)?.cursor, 'OLD');
+    // A crash after the new address was written but before the fresh cursor: the old one is
+    // rejected on the next start.
+    fs.writeFileSync(
+      statePath('s-1', env),
+      JSON.stringify({ ...st, address: `bob.${host}.proj-s-1`, previousAddress: st.address }),
+    );
+    await ensure(env, 'bob');
+    assert.deepEqual(readCursor('s-1', env), {
+      cursor: 'NOW',
+      seen: {},
+      address: `bob.${host}.proj-s-1`,
+    });
+    const bob = readState('s-1', env)!;
+    assert.equal(cursorFits({ cursor: 1, seen: {}, address: `alice.${host}.x` }, bob), false);
+    assert.equal(cursorFits({ cursor: 1, seen: {}, address: `bob.${host}.y` }, bob), true);
+    assert.equal(cursorFits({ cursor: 1, seen: {} }, bob), false);
+    assert.equal(cursorFits({ cursor: 1, seen: {} }, { ...bob, previousAddress: undefined }), true);
   });
 });

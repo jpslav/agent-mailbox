@@ -5,7 +5,15 @@ import { Command } from 'commander';
 import { adapters, getAdapter, resolveAgent, resolveSession } from './agents/index.js';
 import type { HookContext, HookInput, ResolvedSession } from './agents/index.js';
 import { BROADCAST, fitLabel, isAddr, parseAddr, shortHost } from './core/addr.js';
-import { ConfigError, configPath, loadConfig, splitServers, writeConfig } from './core/config.js';
+import {
+  ConfigError,
+  PROFILE_RE,
+  configPath,
+  loadConfig,
+  profileName,
+  splitServers,
+  writeConfig,
+} from './core/config.js';
 import { buildEnvelope, formatBlock, oneLine, parseDelivery } from './core/envelope.js';
 import { fileLog, runDeliverd } from './core/deliverd.js';
 import { GUIDE_SECTIONS, guideText } from './core/guide.js';
@@ -29,7 +37,16 @@ import {
   statusLength,
   statusLine,
 } from './core/session-meta.js';
-import { NoSessionError, ensureSession, pidAlive, readState, updateState } from './core/state.js';
+import {
+  ForeignAddressError,
+  NoSessionError,
+  addressUser,
+  ensureSession,
+  pidAlive,
+  readState,
+  stateDir,
+  updateState,
+} from './core/state.js';
 import { createTransport, explainError, validateServer } from './core/transport/nats.js'; // composition root: the only place that picks the broker
 import type {
   Config,
@@ -62,7 +79,7 @@ const sessionEnvVars = (): string[] => [
   ...adapters.flatMap((a) => a.delivery?.sessionEnv || []),
 ];
 /** Start the daemon unless one of this version or a newer one runs; an older one hands over. */
-const startDeliverd = () =>
+const startDeliverd = (): number | null =>
   ensureDeliverd(deliverdArgv(), process.env, {
     dropEnv: sessionEnvVars(),
     version: ownVersion(),
@@ -109,7 +126,8 @@ async function fail(e: unknown): Promise<never> {
     e instanceof ConfigError ||
     e instanceof NoSessionError ||
     e instanceof UsageError ||
-    e instanceof ResolveError
+    e instanceof ResolveError ||
+    e instanceof ForeignAddressError
       ? e.message
       : explainError(e);
   process.stderr.write(`mbox: ${msg}\n`);
@@ -121,6 +139,7 @@ async function fail(e: unknown): Promise<never> {
 interface GlobalOptions {
   session?: string;
   agent?: string;
+  profile?: string;
 }
 
 const program = new Command();
@@ -136,7 +155,35 @@ program
   .option(
     '--agent <id>',
     'agent adapter id (default: $AGENT_MAILBOX_AGENT, then auto-detected, else "unknown")',
+  )
+  .option(
+    '--profile <name>',
+    'mailbox profile: whose identity to use (default: $AGENT_MAILBOX_PROFILE, else "default")',
+  )
+  // --profile works by setting AGENT_MAILBOX_PROFILE, so everything that reads the environment,
+  // and the delivery daemon a command starts, uses the same profile.
+  .hook('preAction', () => {
+    const { profile } = globalOpts();
+    if (profile === undefined) return;
+    if (profile !== 'default' && !PROFILE_RE.test(profile))
+      throw new UsageError(
+        `invalid profile "${profile.slice(0, 40)}" (allowed: a-z 0-9 -, starting with a letter or digit, at most 32 characters)`,
+      );
+    process.env.AGENT_MAILBOX_PROFILE = profile;
+  });
+
+/** " (profile <name>)" when a named profile is selected, else "". */
+const profileNote = (): string => {
+  const p = profileName();
+  return p ? ` (profile ${p})` : '';
+};
+
+/** Tell the user, on stderr, that the session was given a new address (ensureSession). */
+const noteReaddress = (from: string, to: string): void => {
+  process.stderr.write(
+    `mbox: this session's address was ${from}, which belongs to another user than this mailbox is configured as (${addressUser(to)}); it is now ${to}. Mail to the old address no longer reaches this session.\n`,
   );
+};
 
 /** What most commands start from. */
 interface BaseContext {
@@ -164,7 +211,14 @@ async function context({ needSession = true }: { needSession?: boolean } = {}): 
   const agent = resolveAgent({ agent: globalOpts().agent });
   if (!needSession) return { cfg, transport, agent: agent.id };
   const { sid, hostPid } = resolveSession({ session: globalOpts().session, agent });
-  const st = await ensureSession({ sid, cfg, transport, cwd: process.cwd(), hostPid });
+  const st = await ensureSession({
+    sid,
+    cfg,
+    transport,
+    cwd: process.cwd(),
+    hostPid,
+    onReaddress: noteReaddress,
+  });
   return { cfg, transport, sid, st, agent: agent.id, hostPid };
 }
 
@@ -225,6 +279,8 @@ program
         }));
       }
       console.log(st.address);
+      const profile = profileName();
+      if (profile) console.log(`profile: ${profile}`);
       if (st.aliases.length) console.log(`aliases: ${st.aliases.join(', ')}`);
       if (st.role) console.log(`role: ${st.role}`);
       if (st.parent) console.log(`parent: ${st.parent}`);
@@ -394,6 +450,7 @@ program
       if (!d) console.log('deliverd not running');
       else {
         console.log(`deliverd running (pid ${d.pid}, version ${versionName(d.version)})`);
+        if (d.user) console.log(`user: ${d.user}${profileNote()}`);
         if (d.exe)
           console.log(
             `executable: ${oneLine(d.exe, 300)}${fs.existsSync(d.exe) ? '' : ' (no longer exists; it runs from memory)'}`,
@@ -405,12 +462,19 @@ program
       }
       const regs = listRegistrations();
       if (!regs.length) console.log('no registered sessions');
+      const servedAs = d?.user ?? configuredUser();
       for (const r of regs) {
         const host = r.hostPid
           ? `pid ${r.hostPid}${pidAlive(r.hostPid) ? '' : ' (gone)'}`
           : 'pid ?';
+        const address = readState(r.sid)?.address ?? r.address;
+        const owner = addressUser(address);
+        const foreign =
+          servedAs && owner !== servedAs
+            ? `  (user ${owner ?? '?'}, not ${servedAs}: not served)`
+            : '';
         console.log(
-          `${oneLine(r.address, 140)}  ${oneLine(r.agent, 30)}  ${oneLine(r.endpoint.kind, 40)}  ${host}`,
+          `${oneLine(address, 140)}  ${oneLine(r.agent, 30)}  ${oneLine(r.endpoint.kind, 40)}  ${host}${foreign}`,
         );
       }
       const p = readPause();
@@ -440,6 +504,7 @@ program
       version: ownVersion(),
       exe: bundlePath,
       log,
+      restart: startDeliverd,
     });
     process.exit(code);
   });
@@ -472,7 +537,11 @@ function thisAddress(): string {
   return st.address;
 }
 const pauseSummary = (p: PauseState): string =>
-  p.all ? 'all sessions on this machine' : p.addresses.length ? p.addresses.join(', ') : 'nothing';
+  p.all
+    ? `all sessions on this machine${profileNote()}`
+    : p.addresses.length
+      ? p.addresses.join(', ')
+      : 'nothing';
 
 program
   .command('pause')
@@ -489,7 +558,7 @@ program
       const target = opts.all ? null : address ? localAddress(address) : thisAddress();
       const p = pause({ all: !!opts.all, address: target });
       console.log(
-        `delivery paused for ${opts.all ? 'all sessions on this machine' : target}; mail waits on the server. Paused now: ${pauseSummary(p)}. Undo with: mbox resume${opts.all ? '' : ` ${target}`}`,
+        `delivery paused for ${opts.all ? `all sessions on this machine${profileNote()}` : target}; mail waits on the server. Paused now: ${pauseSummary(p)}. Undo with: mbox resume${opts.all ? '' : ` ${target}`}`,
       );
     }),
   );
@@ -799,7 +868,9 @@ program
 // ---------------------------------------------------------------- setup
 program
   .command('setup')
-  .description('write the client config (~/.config/agent-mailbox/config.json, mode 0600)')
+  .description(
+    'write the client config (~/.config/agent-mailbox/config.json, or profiles/<name>.json with --profile; mode 0600)',
+  )
   .requiredOption('--servers <urls>', 'mailbox server URL(s), comma-separated')
   .requiredOption('--user <name>', 'your mailbox user name ([a-z0-9-]+)')
   .option(
@@ -825,11 +896,49 @@ program
       const password = (await readStdin(process.stdin.isTTY ? 0 : 3000)).split(/\r?\n/)[0];
       if (!password) throw new UsageError('no password arrived on stdin');
       const p = writeConfig({ servers, user: opts.user, password });
-      console.log(`wrote ${p} (mode 0600). Verify with: mbox doctor`);
+      const profile = profileName();
+      console.log(
+        `wrote ${p} (mode 0600). Verify with: mbox doctor${profile ? ` --profile ${profile}` : ''}`,
+      );
     }),
   );
 
 // ---------------------------------------------------------------- doctor
+/** The configured mailbox user, or null when the config is incomplete. */
+function configuredUser(): string | null {
+  try {
+    return loadConfig().user;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Checks of this machine's state for `mbox doctor`: does the delivery daemon run as the configured
+ * user, and does every registered session have an address under it?
+ */
+function localChecks(user: string): Array<{ ok: boolean; name: string; hint?: string }> {
+  const out: Array<{ ok: boolean; name: string; hint?: string }> = [];
+  const d = deliverdInfo();
+  if (d?.user && d.user !== user)
+    out.push({
+      ok: false,
+      name: `delivery daemon runs as user ${d.user} (pid ${d.pid})`,
+      hint: `this profile is configured as ${user}; the daemon restarts itself within a minute of noticing the change`,
+    });
+  const foreign = listRegistrations()
+    .map((r) => readState(r.sid)?.address ?? r.address)
+    .filter((a) => addressUser(a) !== user);
+  if (foreign.length)
+    out.push({
+      ok: false,
+      name: `${foreign.length} registered session(s) under another user: ${foreign.map((a) => oneLine(a, 80)).join(', ')}`,
+      hint: `their mail is not delivered (they were registered before the mailbox user changed to ${user}); restart those sessions, or run an mbox command in each, to give them addresses under ${user}`,
+    });
+  else out.push({ ok: true, name: `registered sessions belong to user ${user} (${stateDir()})` });
+  return out;
+}
+
 program
   .command('doctor')
   .description('check configuration, connectivity, auth and permissions')
@@ -840,7 +949,7 @@ program
       cfg = loadConfig();
       transport = openTransport(cfg);
       console.log(
-        `ok    config present (${configPath()}; servers ${cfg.servers.join(',')}, user ${cfg.user})`,
+        `ok    config present (${configPath()}; servers ${cfg.servers.join(',')}, user ${cfg.user}${profileName() ? `, profile ${profileName()}` : ''})`,
       );
     } catch (e) {
       console.log(`FAIL  config\n      -> ${errMessage(e)}`);
@@ -848,6 +957,12 @@ program
     }
     let bad = 0;
     for (const c of await transport.diagnose({ user: cfg.user, host: shortHost() })) {
+      if (!c.ok) bad++;
+      console.log(
+        `${c.ok ? 'ok  ' : 'FAIL'}  ${c.name}${!c.ok && c.hint ? `\n      -> ${c.hint}` : ''}`,
+      );
+    }
+    for (const c of localChecks(cfg.user)) {
       if (!c.ok) bad++;
       console.log(
         `${c.ok ? 'ok  ' : 'FAIL'}  ${c.name}${!c.ok && c.hint ? `\n      -> ${c.hint}` : ''}`,
@@ -902,8 +1017,18 @@ program
         sessionOverride: globalOpts().session || process.env.AGENT_MAILBOX_SESSION || null,
         launcher: launcherPath(),
         configError,
-        ensure: (sid, cwd) =>
-          ensureSession({ sid, ...configured(), cwd, hostPid: adapter.hostPid(process.env) }),
+        profile: configError ? null : profileName(), // loadConfig checked the name
+        ensure: async (sid, cwd) => {
+          let replaced: string | null = null;
+          const state = await ensureSession({
+            sid,
+            ...configured(),
+            cwd,
+            hostPid: adapter.hostPid(process.env),
+            onReaddress: (from) => (replaced = from),
+          });
+          return { state, replaced };
+        },
         endSession: (sid) => endSession({ sid, ...configured(), agent: adapter.id }),
         register: (reg) => register(reg),
         deregister: (sid) => deregister(sid),

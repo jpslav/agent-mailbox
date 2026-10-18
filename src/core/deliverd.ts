@@ -29,6 +29,7 @@
 //
 // Agent-neutral: everything agent-specific comes in through `deliveryFor(agentId)`.
 import fs from 'node:fs';
+import { loadConfig, profileName } from './config.js';
 import { formatBatch } from './envelope.js';
 import { isPaused, pausePath, readPause } from './pause.js';
 import { openReceiver } from './receiver.js';
@@ -48,6 +49,7 @@ import type { DaemonInfo } from './registrations.js';
 import {
   acquireFileLock,
   acquireLock,
+  addressUser,
   awaitExit,
   ensureSession,
   mkdirp,
@@ -165,7 +167,18 @@ export interface RunDeliverdInput {
   env?: Env;
   /** One concise line per event; never given endpoints or other secrets. */
   log?: (line: string) => void;
+  /**
+   * Start a daemon for this profile again (the client config changed while this one ran, see
+   * below); called once this one has released its lock.
+   */
+  restart?: () => void;
 }
+
+/** Do two configs name the same identity on the same servers? */
+const sameIdentity = (a: Config, b: Config): boolean =>
+  a.user === b.user &&
+  a.password === b.password &&
+  JSON.stringify(a.servers) === JSON.stringify(b.servers);
 
 /**
  * @param deliveryFor (agentId) -> {kind, deliver(endpoint, text, meta)} | null
@@ -180,10 +193,18 @@ export async function runDeliverd({
   exe,
   env = process.env,
   log = () => {},
+  restart = () => {},
 }: RunDeliverdInput): Promise<number> {
   const opt = deliverdOptions(env);
   mkdirp(stateDir(env));
-  const acquired = await acquireDaemonLock({ version, exe, env, log, handoverMs: opt.handoverMs });
+  const acquired = await acquireDaemonLock({
+    version,
+    exe,
+    user: cfg.user,
+    env,
+    log,
+    handoverMs: opt.handoverMs,
+  });
   if (!acquired) {
     await transport.close?.().catch(() => {});
     return 0;
@@ -191,6 +212,8 @@ export async function runDeliverd({
   const lock = acquired; // narrowed to the held lock, which function declarations below rely on
   settleStartClaim(version, env);
   log(`started (pid ${process.pid}, version ${version})`);
+  const profile = profileName(env);
+  log(`mailbox user ${cfg.user}${profile ? `, profile ${profile}` : ''}`);
   mkdirp(registrationsDir(env));
 
   const workers = new Map<string, Worker>();
@@ -521,6 +544,11 @@ export async function runDeliverd({
           },
           onTick: () => sessLock?.touch(),
           onHostGone: hostGone,
+          onReaddressed(address) {
+            // Under another user now: this daemon's credentials cannot read it (scan says so).
+            log(`${current.address}: this session's address is now ${address}; stopped serving it`);
+            void stop({ depart: false });
+          },
         });
       } catch (e) {
         log(`${current.address}: could not start (${errCode(e)}); will retry`);
@@ -544,6 +572,7 @@ export async function runDeliverd({
 
   function scan() {
     if (stopping) return;
+    if (configChanged()) return;
     const regs = listRegistrations(env);
     const present = new Set();
     for (const reg of regs) {
@@ -567,6 +596,20 @@ export async function runDeliverd({
         present.delete(reg.sid);
         continue;
       }
+      // A session whose address belongs to another user (registered before this profile's mailbox
+      // user was changed): these credentials cannot read its mail. Its next mbox command or a
+      // restart gives it an address under this user (ensureSession); until then it is not served,
+      // and it does not keep this daemon from going idle.
+      const own = readState(reg.sid, env)?.address ?? reg.address;
+      const owner = addressUser(own);
+      if (owner !== cfg.user) {
+        note(
+          `foreign:${reg.sid}:${own}`,
+          `${own}: belongs to user ${owner ?? '?'}, but this deliverd runs as user ${cfg.user}; not serving it (restart that session, or run an mbox command in it, to give it an address under ${cfg.user})`,
+        );
+        present.delete(reg.sid);
+        continue;
+      }
       createWorker(reg, cap);
     }
     for (const [sid, w] of workers) {
@@ -577,6 +620,27 @@ export async function runDeliverd({
     }
     if (present.size || workers.size) idleSince = null;
     else idleSince ??= Date.now();
+  }
+
+  /**
+   * Has the client config been changed to another identity (`mbox setup` while this daemon ran)?
+   * Then this daemon stops and starts a new one, which reads the new config: one daemon serves one
+   * profile, and this one's credentials no longer match what the profile's sessions use.
+   */
+  let restartAfterStop = false;
+  function configChanged(): boolean {
+    let now: Config;
+    try {
+      now = loadConfig(env);
+    } catch {
+      return false; // unreadable for a moment, or removed: keep serving with what we have
+    }
+    if (sameIdentity(now, cfg)) return false;
+    restartAfterStop = true;
+    void shutdown(
+      `the client config changed (${now.user === cfg.user ? 'servers or password' : `user ${cfg.user} -> ${now.user}`}); restarting`,
+    );
+    return true;
   }
 
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -604,6 +668,13 @@ export async function runDeliverd({
     lock.release();
     await transport.close?.().catch(() => {});
     log(`stopped (pid ${process.pid}, version ${version})`);
+    if (restartAfterStop) {
+      try {
+        restart();
+      } catch (e) {
+        log(`could not start a new deliverd (${errCode(e)})`);
+      }
+    }
     doneResolve(0);
   }
 
@@ -681,6 +752,8 @@ function handoverTarget(version: string, env: Env): string | null {
 interface AcquireDaemonLockInput {
   version: string;
   exe: string;
+  /** The mailbox user it serves, recorded for `mbox deliverd --status` and `mbox doctor`. */
+  user: string;
   env: Env;
   log: (line: string) => void;
   handoverMs: number;
@@ -695,6 +768,7 @@ interface AcquireDaemonLockInput {
 async function acquireDaemonLock({
   version,
   exe,
+  user,
   env,
   log,
   handoverMs,
@@ -719,7 +793,7 @@ async function acquireDaemonLock({
         log(`not started (${interrupted} while waiting for the lock)`);
         return null;
       }
-      const got = acquireFileLock(file, { version, exe });
+      const got = acquireFileLock(file, { version, exe, user });
       if (got.ok) {
         const prev = waitingFor ?? askedFrom;
         if (prev)

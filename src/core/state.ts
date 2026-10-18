@@ -1,4 +1,5 @@
 // Per-session state under ${AGENT_MAILBOX_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/agent-mailbox}/sessions/
+// (for a named profile, under .../agent-mailbox/profiles/<name>/sessions/, see stateDir)
 //   <sid>.json         identity: {address, aliases[], cwd, createdAt}
 //   <sid>.cursor.json  watcher-owned: {cursor (opaque, from the transport), seen (recently printed
 //                      message ids)}   (kept apart so `mbox name` and the watcher never clobber
@@ -7,8 +8,8 @@
 //   <sid>.wait.lock    current hook waiter (`mbox wait`); the newest claim wins
 import fs from 'node:fs';
 import path from 'node:path';
-import { defaultLabel, fitLabel, shortHost } from './addr.js';
-import { xdgDir } from './config.js';
+import { defaultLabel, fitLabel, parseAddr, shortHost } from './addr.js';
+import { profileName, xdgDir } from './config.js';
 import { checkParent, checkRole, checkStatus } from './session-meta.js';
 import type { Config, CursorFile, Env, Role, SessionState, Transport } from './types.js';
 
@@ -23,11 +24,17 @@ export class NoSessionError extends Error {
 
 const SID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
+/**
+ * AGENT_MAILBOX_STATE_DIR, else `agent-mailbox` under the XDG state home. A named profile gets
+ * `profiles/<name>` below that, so each profile has its own sessions, registrations, pause file
+ * and delivery daemon.
+ */
 export function stateDir(env: Env = process.env): string {
-  return (
+  const base =
     env.AGENT_MAILBOX_STATE_DIR ||
-    path.join(xdgDir('XDG_STATE_HOME', path.join('.local', 'state'), env), 'agent-mailbox')
-  );
+    path.join(xdgDir('XDG_STATE_HOME', path.join('.local', 'state'), env), 'agent-mailbox');
+  const profile = profileName(env);
+  return profile ? path.join(base, 'profiles', profile) : base;
 }
 const sessionsDir = (env: Env): string => path.join(stateDir(env), 'sessions');
 const byPidDir = (env: Env): string => path.join(stateDir(env), 'by-pid');
@@ -112,12 +119,14 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     : [];
   // `address` is checked, and the metadata peers will see; the other fields were written by
   // ensureSession and are not re-validated.
+  const { previousAddress, ...rest } = s;
   return {
-    ...s,
+    ...rest,
     aliases,
     role: checkRole(s.role),
     parent: checkParent(s.parent),
     status: checkStatus(s.status),
+    ...(typeof previousAddress === 'string' && { previousAddress }),
   } as unknown as SessionState;
 }
 
@@ -134,11 +143,50 @@ export function readCursor(sid: string, env: Env = process.env): CursorFile | nu
   return {
     cursor: c.cursor,
     seen: c.seen && typeof c.seen === 'object' ? (c.seen as Record<string, number>) : {},
+    ...(typeof c.address === 'string' && { address: c.address }),
   };
 }
 
 export function writeCursor(sid: string, cur: CursorFile, env: Env = process.env): void {
   atomicWriteJson(cursorPath(sid, env), cur);
+}
+
+/** The user an address belongs to, or null when it is not a valid address. */
+export const addressUser = (address: unknown): string | null => parseAddr(address)?.user ?? null;
+
+/**
+ * Can a receiver for `st` start from cursor `c`? A cursor is a position in one user's mail, so one
+ * made for another user's address is not, nor is one written without an address (before 0.5.7, or
+ * by an older receiver) once the session has been given a new address under another user.
+ */
+export function cursorFits(c: CursorFile, st: SessionState): boolean {
+  return c.address !== undefined
+    ? addressUser(c.address) === addressUser(st.address)
+    : !st.previousAddress;
+}
+
+/** The session's address belongs to another user than the one this mailbox is configured as. */
+export class ForeignAddressError extends Error {
+  constructor(address: string, user: string) {
+    super(
+      `this session's address ${address} belongs to user ${addressUser(address) ?? '?'}, but this mailbox is configured as user ${user}. ` +
+        'Run any mbox command in the session (e.g. mbox whoami) to give it an address under the configured user, or restart the session.',
+    );
+  }
+}
+
+export interface EnsureSessionInput {
+  sid: string;
+  cfg: Pick<Config, 'user'>;
+  transport: Pick<Transport, 'limits' | 'now'>;
+  cwd: string;
+  hostPid?: number | null;
+  env?: Env;
+  /**
+   * The stored address belonged to another user, so the session got a new one: `from` -> `to`.
+   * The caller says so (a log line, the session's instructions).
+   */
+  onReaddress?: (from: string, to: string) => void;
 }
 
 /**
@@ -147,6 +195,11 @@ export function writeCursor(sid: string, cur: CursorFile, env: Env = process.env
  * its address and cursor. A new session takes its role and parent from the environment
  * (`envMeta`), as a spawner passes them; after that only `mbox whoami --role/--parent` changes
  * them, so a resume or a compaction (the same environment again) never undoes such a change.
+ *
+ * A stored address of another user than `cfg.user` (the machine's or profile's mailbox user was
+ * changed with `mbox setup`) cannot be read with these credentials, so the session gets a new
+ * address under `cfg.user` with the same label, a fresh cursor and no aliases (an alias must belong
+ * to the same user), and `onReaddress` is told. Mail to the old address stays on the server.
  */
 export async function ensureSession({
   sid,
@@ -155,17 +208,38 @@ export async function ensureSession({
   cwd,
   hostPid = null,
   env = process.env,
-}: {
-  sid: string;
-  cfg: Pick<Config, 'user'>;
-  transport: Pick<Transport, 'limits' | 'now'>;
-  cwd: string;
-  hostPid?: number | null;
-  env?: Env;
-}): Promise<SessionState> {
+  onReaddress = () => {},
+}: EnsureSessionInput): Promise<SessionState> {
   validSid(sid);
   mkdirp(sessionsDir(env));
   let st = readState(sid, env);
+  if (st && addressUser(st.address) !== cfg.user) {
+    const from = st.address;
+    const host = shortHost();
+    const label = fitLabel(
+      cfg.user,
+      host,
+      parseAddr(from)?.label || defaultLabel(cwd, sid),
+      transport.limits.maxLabelLen(cfg.user, host),
+    );
+    const address = `${cfg.user}.${host}.${label}`;
+    const { parent, ...rest } = st;
+    const next: SessionState = {
+      ...rest,
+      address,
+      aliases: [],
+      previousAddress: from,
+      ...(parent && parent !== address && { parent }),
+    };
+    // The state first, then the cursor: a receiver still running for the old address stops writing
+    // its cursor once the state names another address (receiver.ts), and a crash in between leaves
+    // an old cursor that cursorFits rejects.
+    atomicWriteJson(statePath(sid, env), next);
+    writeCursor(sid, { cursor: await transport.now(), seen: {}, address }, env);
+    st = readState(sid, env);
+    if (!st) throw new Error(`could not update session state at ${statePath(sid, env)}`);
+    onReaddress(from, st.address);
+  }
   if (!st) {
     const host = shortHost();
     const label = fitLabel(
@@ -185,13 +259,20 @@ export async function ensureSession({
       ...(parent && parent !== address && { parent }), // a session is not its own parent
     };
     if (createExclusive(statePath(sid, env), created)) {
-      createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {} });
+      createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {}, address });
     }
     st = readState(sid, env);
     if (!st) throw new Error(`could not create session state at ${statePath(sid, env)}`);
   }
-  if (!readCursor(sid, env)) {
-    createExclusive(cursorPath(sid, env), { cursor: await transport.now(), seen: {} });
+  const cur = readCursor(sid, env);
+  if (!cur) {
+    createExclusive(cursorPath(sid, env), {
+      cursor: await transport.now(),
+      seen: {},
+      address: st.address,
+    });
+  } else if (!cursorFits(cur, st)) {
+    writeCursor(sid, { cursor: await transport.now(), seen: {}, address: st.address }, env);
   }
   if (hostPid) {
     try {
