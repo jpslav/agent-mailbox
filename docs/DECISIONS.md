@@ -238,6 +238,55 @@ context, decision, why.
   only the full one tests the relay-loop cap and the rate limit, which only the first group of
   changes can affect.
 
+## Profiles: one identity per config file, with its own state and daemon
+
+- **Date:** 2026-10
+- **Context:** Several people may use one machine and one OS account, for example with a shared
+  Claude Code config, and each must appear as themselves (#17). The client had one config file
+  and one state directory, so one daemon served everyone as one user.
+- **Decision:** A profile is a config file `profiles/<name>.json` next to `config.json` (the
+  default profile), written by `mbox setup --profile <name>` and selected with
+  `AGENT_MAILBOX_PROFILE` or `--profile` (which sets the variable, so the hooks, the Bash tool and
+  the daemon a command starts all inherit it). A named profile's state lives in
+  `<state dir>/profiles/<name>/`: sessions, registrations, the pause file and the delivery daemon's
+  lock, so each profile runs its own daemon as its own user. `AGENT_MAILBOX_CONFIG` keeps working
+  with the default state directory; together with a named profile it is an error, and an invalid
+  profile name is an error, never a fall-back to the default profile.
+- **Why:** Identity stays where the server checks it, the password: a profile name grants nothing,
+  and `verified-user` still comes from the server. Per-profile state means nothing a session of one
+  profile writes (an address, a cursor, a registration) is read with another profile's
+  credentials. Keeping the variable as the one source lets processes the agent starts on its own
+  agree on the profile without passing flags.
+- **Limits:** profiles of one OS account are all readable by that account. They separate identities
+  of people who share a machine, not people who must be kept from acting as each other; those need
+  separate OS accounts. `mbox pause --all` holds one profile's sessions, not every profile's.
+
+## A session whose stored address belongs to another user gets a new one
+
+- **Date:** 2026-10
+- **Context:** `ensureSession` kept a session's address forever. After `mbox setup` changed the
+  machine's user, a resumed session kept `<old user>.<host>.<label>`, which the new credentials
+  cannot read: it silently received nothing, and `mbox watch` looped on "connection lost". The
+  running daemon also kept its old credentials and could not serve sessions of the new user.
+- **Decision:** `ensureSession` gives such a session `<current user>.<host>.<same label>`, a fresh
+  cursor (a cursor is a position in one user's stream; it now records the address it was made
+  for, and one for another user, or one without an address after such a change, is not used) and
+  no aliases (an alias must belong to the same user); the command says so on stderr and the
+  session-start hook in the session's instructions. A receiver whose session gets a new address
+  under it stops writing its cursor and stops (`mbox watch` says so and exits). A receiver never
+  starts for an address of another user (a clear error, not a reconnect loop). The daemon records
+  its user in its lock, does not serve sessions of another user (one log line each; `mbox deliverd
+--status` and `mbox doctor` name them), and when the client config names another identity it
+  stops and starts a daemon that reads the new config. A session start whose configuration names
+  another user than the running daemon of the same version takes delivery over from it (the usual
+  handover; never a downgrade), which covers a user changed in the environment. A named profile
+  refuses `AGENT_MAILBOX_USER` / `AGENT_MAILBOX_PASSWORD`, so its identity is its file's.
+- **Why:** The old address cannot work with the new credentials, so keeping it only hides the
+  failure. Re-addressing on the next command or session start is the least surprising repair; mail
+  to the old address stays on the server for the old user. The daemon restarting itself (rather
+  than waiting for a version takeover or its idle exit) is what lets a machine's sessions under the
+  new user get mail without anyone killing a process.
+
 ## Events feeds: one stream per user, shared by permissions the admin generates
 
 - **Date:** 2026-10
@@ -251,8 +300,8 @@ context, decision, why.
   feed through a push consumer on their own mailbox stream (the server delivers to a literal
   stream subject as if it were a subscriber; wildcard stream subjects get none of those
   deliveries). Every stream here must keep a wildcard subject. Events carry the presence
-  metadata, never message contents. The admin sets each user's sharing to `team` (the default) or `private` with
-  `mbox-admin.sh set-sharing`; every user's permission block grants a direct get on each `team`
+  metadata, never message contents. The admin sets each user's sharing to `team` (the default)
+  or `private` with `mbox-admin.sh set-sharing`; every user's permission block grants a direct get on each `team`
   feed, so the script regenerates every block (keeping each password hash) on any change to a user
   or a sharing setting. A KV key (`sharing`/`team`, written only by the admin, readable by all)
   lists the shared feeds so clients know what `--all` covers and users see their own setting.

@@ -20,6 +20,7 @@ import {
   findServer,
   makeEnv,
   mbox,
+  sessionAddr as sessionAddrOf,
   parseJson,
   projectDir,
   send,
@@ -667,8 +668,10 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
   });
 
   // ---------------------------------------------------------------- version takeover
-  /** The daemon's lock file: {pid, startedAt, version, exe}. */
-  const lockOf = (env: MachineEnv): { pid: number; version?: string; exe?: string } =>
+  /** The daemon's lock file: {pid, startedAt, version, exe, user}. */
+  const lockOf = (
+    env: MachineEnv,
+  ): { pid: number; version?: string; exe?: string; user?: string } =>
     parseJson(fs.readFileSync(statePath(env, 'deliverd.lock'), 'utf8'));
   /** Publish straight to the stream, one connection, in order (fast, whatever the machine). */
   const publish = async (address: string, ids: string[]): Promise<void> => {
@@ -1241,5 +1244,310 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     await publish(address, ['g1']);
     await fake.waitFor((f) => f.messages().length === 1);
     assert.equal(lockOf(env).exe, MBOX);
+  });
+
+  // ---------------------------------------------------------------- profiles and user changes
+  /** `env` without the credentials in the environment: the config file (or profile) decides. */
+  const fromConfigFile = <E extends MachineEnv>(env: E): E => {
+    const out = { ...env };
+    delete out.AGENT_MAILBOX_USER;
+    delete out.AGENT_MAILBOX_PASSWORD;
+    delete out.AGENT_MAILBOX_SERVERS;
+    return out;
+  };
+  const setup = (env: Env, user: string, extra: string[] = []): void => {
+    const r = mbox(['setup', ...extra, '--servers', b.url, '--user', user, '--password-stdin'], {
+      env,
+      input: `${b.password(user)}\n`,
+    });
+    assert.equal(r.code, 0, r.stderr);
+  };
+
+  it('profiles: two identities on one OS account, each with its own config, daemon, registrations and mail', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'amb-prof-'));
+    // One account (one HOME, one state dir), no credentials in the environment.
+    const base: MachineEnv = {
+      ...fromConfigFile(bobMachine()),
+      HOME: home,
+      AGENT_MAILBOX_CONFIG: '',
+      AGENT_MAILBOX_STATE_DIR: path.join(home, 'state'),
+    };
+    const prof = (name: string): MachineEnv => ({ ...base, AGENT_MAILBOX_PROFILE: name });
+    const profDir = (name: string, ...p: string[]): string =>
+      path.join(home, 'state', 'profiles', name, ...p);
+    const lock = (name: string): { pid: number; user?: string } | null => {
+      try {
+        return parseJson(fs.readFileSync(profDir(name, 'deliverd.lock'), 'utf8'));
+      } catch {
+        return null;
+      }
+    };
+    const log = (name: string): string => {
+      try {
+        return fs.readFileSync(profDir(name, 'deliverd.log'), 'utf8');
+      } catch {
+        return '';
+      }
+    };
+    cleanup.push(() => {
+      for (const n of ['p-alice', 'p-bob']) {
+        const l = lock(n);
+        if (l && alive(l.pid)) process.kill(l.pid, 'SIGTERM');
+      }
+      return Promise.resolve();
+    });
+
+    setup(base, 'alice', ['--profile', 'p-alice']);
+    setup(prof('p-bob'), 'bob'); // the variable works as well as the flag
+    for (const n of ['p-alice', 'p-bob']) {
+      const file = path.join(home, '.config', 'agent-mailbox', 'profiles', `${n}.json`);
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    }
+    assert.ok(
+      !fs.existsSync(path.join(home, '.config', 'agent-mailbox', 'config.json')),
+      'the default profile is untouched',
+    );
+
+    const fa = await inbox('p-alice-1');
+    const fb = await inbox('p-bob-1');
+    const [ha, hb] = [fakeHost(), fakeHost()];
+    const da = projectDir('pa');
+    const db = projectDir('pb');
+    const a = sessionStart(prof('p-alice'), 'p-alice-1', da, { socket: fa.path, hostPid: ha.pid });
+    const bs = sessionStart(prof('p-bob'), 'p-bob-1', db, { socket: fb.path, hostPid: hb.pid });
+    assert.match(a.address, /^alice\./);
+    assert.match(bs.address, /^bob\./);
+    assert.match(a.ctx, /^Agent mailbox \(mailbox profile p-alice\): this session's address is /);
+
+    // Two daemons, one per profile, each as its own user and with its own registrations.
+    await until(() => {
+      const [la, lb] = [lock('p-alice'), lock('p-bob')];
+      return la && lb && alive(la.pid) && alive(lb.pid);
+    }, 'a daemon per profile');
+    assert.notEqual(lock('p-alice')?.pid, lock('p-bob')?.pid);
+    assert.equal(lock('p-alice')?.user, 'alice');
+    assert.equal(lock('p-bob')?.user, 'bob');
+    assert.ok(fs.existsSync(profDir('p-alice', 'registrations', 'p-alice-1.json')));
+    assert.ok(!fs.existsSync(profDir('p-alice', 'registrations', 'p-bob-1.json')));
+    assert.ok(fs.existsSync(profDir('p-bob', 'registrations', 'p-bob-1.json')));
+    assert.ok(!fs.existsSync(path.join(home, 'state', 'deliverd.lock')), 'no default daemon');
+    assert.ok(!fs.existsSync(path.join(home, 'state', 'registrations')));
+    await until(
+      () => peers().includes(a.address) && peers().includes(bs.address),
+      'both announced',
+    );
+
+    // Each sends as its own user and receives through its own daemon.
+    const r1 = send(prof('p-alice'), 'p-alice-1', da, bs.address, 'hi bob');
+    assert.equal(r1.code, 0, r1.stderr);
+    await fb.waitFor((f) => f.messages().length === 1);
+    const r2 = send(prof('p-bob'), 'p-bob-1', db, a.address, 'hi alice');
+    assert.equal(r2.code, 0, r2.stderr);
+    await fa.waitFor((f) => f.messages().length === 1);
+    assert.deepEqual(
+      fb.messages().map((m) => [m.from, m.verified, m.body]),
+      [[a.address, 'alice', 'hi bob']],
+    );
+    assert.deepEqual(
+      fa.messages().map((m) => [m.from, m.verified, m.body]),
+      [[bs.address, 'bob', 'hi alice']],
+    );
+    assert.match(log('p-alice'), new RegExp(`delivered 1 message to ${re(a.address)}`));
+    assert.ok(!log('p-alice').includes(bs.address), "alice's daemon never touches bob's session");
+    assert.match(log('p-bob'), new RegExp(`delivered 1 message to ${re(bs.address)}`));
+    assert.ok(!log('p-bob').includes(a.address), "bob's daemon never touches alice's session");
+    assert.match(log('p-bob'), /mailbox user bob, profile p-bob/);
+
+    // Status, whoami and pause are per profile.
+    const st = mbox(['deliverd', '--status', '--profile', 'p-bob'], { env: base }).stdout;
+    assert.match(st, /^user: bob \(profile p-bob\)$/m);
+    assert.ok(st.includes(bs.address) && !st.includes(a.address), st);
+    const who = mbox(['whoami', '--profile', 'p-alice'], {
+      env: { ...base, AGENT_MAILBOX_SESSION: 'p-alice-1' },
+      cwd: da,
+    });
+    assert.deepEqual(who.stdout.split('\n').slice(0, 2), [a.address, 'profile: p-alice']);
+    const pz = mbox(['pause', '--all'], { env: prof('p-alice') });
+    assert.match(pz.stdout, /delivery paused for all sessions on this machine \(profile p-alice\)/);
+    assert.ok(fs.existsSync(profDir('p-alice', 'paused.json')));
+    assert.ok(!fs.existsSync(profDir('p-bob', 'paused.json')), "bob's profile is not paused");
+    const r3 = send(prof('p-alice'), 'p-alice-1', da, bs.address, 'still flowing');
+    assert.equal(r3.code, 0, r3.stderr);
+    await fb.waitFor((f) => f.messages().length === 2);
+    assert.equal(mbox(['resume', '--all'], { env: prof('p-alice') }).code, 0);
+
+    // Switching profiles: the session is resumed (a new Claude Code process) as p-bob. It is bob's
+    // now, served by bob's daemon; alice's profile keeps its own state for it.
+    ha.kill('SIGKILL');
+    const fs2 = await inbox('p-alice-1');
+    const h2 = fakeHost();
+    const sw = sessionStart(prof('p-bob'), 'p-alice-1', da, { socket: fs2.path, hostPid: h2.pid });
+    assert.equal(sw.address, a.address.replace(/^alice\./, 'bob.'));
+    assert.match(sw.ctx, /^Agent mailbox \(mailbox profile p-bob\)/);
+    assert.ok(fs.existsSync(profDir('p-bob', 'registrations', 'p-alice-1.json')));
+    await until(
+      () => !fs.existsSync(profDir('p-alice', 'registrations', 'p-alice-1.json')),
+      "alice's daemon drops the ended process's registration",
+    );
+    const r4 = send(prof('p-alice'), 'p-alice-2', da, sw.address, 'after the switch');
+    assert.equal(r4.code, 0, r4.stderr);
+    await fs2.waitFor((f) => f.messages().length === 1);
+    assert.deepEqual(
+      fs2.messages().map((m) => [m.verified, m.body]),
+      [['alice', 'after the switch']],
+    );
+    assert.match(log('p-bob'), new RegExp(`serving ${re(sw.address)}`));
+  });
+
+  it('the mailbox user changes under a running daemon: it restarts as the new user, flags the old sessions, and a session gets a new address and mail again', async () => {
+    const env = fromConfigFile(bobMachine());
+    setup(env, 'alice');
+    const sid = 'ua-user-1';
+    const sid2 = 'ub-user-2';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const dir = projectDir('uc');
+    const first = sessionStart(env, sid, dir, { socket: fake.path, hostPid: host.pid });
+    const second = sessionStart(env, sid2, dir, { socket: (await inbox(sid2)).path });
+    assert.match(first.address, /^alice\./);
+    await until(() => alive(daemonPid(env)) && peers().includes(first.address), 'served as alice');
+    const oldPid = daemonPid(env);
+    assert.equal(lockOf(env).user, 'alice');
+
+    setup(env, 'bob'); // `mbox setup` with another user while sessions run
+    await until(
+      () => /the client config changed \(user alice -> bob\); restarting/.test(logOf(env)),
+      'the daemon notices',
+    );
+    await until(() => {
+      const pid = daemonPid(env);
+      return pid !== oldPid && alive(pid) && /mailbox user bob$/m.test(logOf(env));
+    }, 'a daemon for bob took over');
+    await until(
+      () =>
+        logLines(
+          env,
+          new RegExp(
+            `${re(first.address)}: belongs to user alice, but this deliverd runs as user bob; not serving it`,
+          ),
+        ).length === 1,
+      'the old session is reported, once',
+    );
+    const doc = mbox(['doctor'], { env });
+    assert.equal(doc.code, 1, doc.stdout);
+    assert.match(
+      doc.stdout,
+      new RegExp(`FAIL  2 registered session\\(s\\) under another user: .*${re(first.address)}`),
+    );
+    const st = mbox(['deliverd', '--status'], { env }).stdout;
+    assert.match(st, /^user: bob$/m);
+    assert.ok(
+      st.includes(`${first.address}  `) && st.includes('(user alice, not bob: not served)'),
+    );
+
+    // Any mbox command in the session gives it an address under bob, a fresh cursor, and says so.
+    const who = mbox(['whoami'], { env: { ...env, AGENT_MAILBOX_SESSION: sid }, cwd: dir });
+    assert.equal(who.code, 0, who.stderr);
+    const next = (who.stdout.split('\n')[0] ?? '').trim();
+    assert.equal(next, first.address.replace(/^alice\./, 'bob.'));
+    assert.match(
+      who.stderr,
+      new RegExp(`this session's address was ${re(first.address)}, .* it is now ${re(next)}\\.`),
+    );
+    assert.equal(
+      parseJson<Registration>(
+        fs.readFileSync(statePath(env, 'registrations', `${sid}.json`), 'utf8'),
+      ).address,
+      next,
+      'the registration follows, which wakes the daemon',
+    );
+    await until(() => logLines(env, new RegExp(`serving ${re(next)}$`)).length === 1, 'served');
+    mail(next, 'to the new address');
+    await fake.waitFor((f) => f.messages().length === 1);
+    assert.equal(at(fake.messages(), 0).body, 'to the new address');
+
+    // A resumed session hears about it from its session-start hook.
+    const resumed = sessionStart(env, sid2, dir, { socket: (await inbox(sid2)).path });
+    assert.equal(resumed.address, second.address.replace(/^alice\./, 'bob.'));
+    assert.match(
+      resumed.ctx,
+      new RegExp(
+        `It was ${re(second.address)} until this machine's mailbox user changed; mail sent to that address no longer reaches this session`,
+      ),
+    );
+    const doc2 = mbox(['doctor'], { env });
+    assert.match(doc2.stdout, /ok {4}registered sessions belong to user bob/);
+  });
+
+  it('a user change in the environment: the next session start with the new user takes delivery over', async () => {
+    const env = bobMachine({
+      AGENT_MAILBOX_USER: 'alice',
+      AGENT_MAILBOX_PASSWORD: b.password('alice'),
+    });
+    const dir = projectDir('ue');
+    const fa = await inbox('ea-env-1');
+    const first = sessionStart(env, 'ea-env-1', dir, { socket: fa.path, hostPid: fakeHost().pid });
+    assert.match(first.address, /^alice\./);
+    await until(() => alive(daemonPid(env)) && peers().includes(first.address), 'served as alice');
+    const oldPid = daemonPid(env);
+    // Same machine and state, but the user's shell now says bob.
+    const bobEnv = { ...env, AGENT_MAILBOX_USER: 'bob', AGENT_MAILBOX_PASSWORD: b.password('bob') };
+    const fb = await inbox('eb-env-2');
+    const second = sessionStart(bobEnv, 'eb-env-2', dir, {
+      socket: fb.path,
+      hostPid: fakeHost().pid,
+    });
+    assert.match(second.address, /^bob\./);
+    assert.match(
+      logOf(env),
+      new RegExp(
+        `handover requested: deliverd ${re(VERSION)} \\(pid ${oldPid}\\) -> ${re(VERSION)} \\(user alice -> bob\\)`,
+      ),
+    );
+    await until(() => !alive(oldPid), 'the alice daemon handed over', 30000);
+    await until(() => alive(daemonPid(env)) && lockOf(env).user === 'bob', 'a daemon for bob');
+    await until(
+      () => logLines(env, new RegExp(`serving ${re(second.address)}$`)).length === 1,
+      'served',
+    );
+    mail(second.address, 'for bob');
+    await fb.waitFor((f) => f.messages().length === 1);
+    await until(
+      () =>
+        logLines(
+          env,
+          new RegExp(
+            `${re(first.address)}: belongs to user alice, but this deliverd runs as user bob`,
+          ),
+        ).length === 1,
+      'the alice session is reported',
+    );
+  });
+
+  it('a watcher whose session is given a new address (another user) says so and stops', async () => {
+    const env = makeEnv(b, 'alice', { AGENT_MAILBOX_POLL_MS: '200' });
+    const sid = 'w-user-0001';
+    const dir = projectDir('wu');
+    const w = new Watcher(env, { session: sid, cwd: dir });
+    cleanup.push(() => w.stop());
+    const [, address] = await w.waitFor(/online as (\S+)\./);
+    // Another command in the same session runs with bob's credentials (the user was changed).
+    const bobEnv = { ...env, AGENT_MAILBOX_USER: 'bob', AGENT_MAILBOX_PASSWORD: b.password('bob') };
+    const next = sessionAddrOf(bobEnv, sid, dir);
+    assert.equal(next, address!.replace(/^alice\./, 'bob.'));
+    await w.waitFor(
+      new RegExp(
+        `\\[mailbox\\] this session's address is now ${re(next)} \\(the mailbox user changed\\); this watcher stops`,
+      ),
+    );
+    assert.equal(await w.exited, 0);
+    // Its cursor is the fresh one for the new address, not the old watcher's.
+    const cur = parseJson<{ address?: string }>(
+      fs.readFileSync(
+        path.join(env.AGENT_MAILBOX_STATE_DIR, 'sessions', `${sid}.cursor.json`),
+        'utf8',
+      ),
+    );
+    assert.equal(cur.address, next);
   });
 });

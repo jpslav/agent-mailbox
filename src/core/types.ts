@@ -91,6 +91,11 @@ export interface SessionState {
   parent?: string | null;
   /** One line about what the session is doing (`mbox status`). */
   status?: string | null;
+  /**
+   * The address the session had before it was given this one because the mailbox user changed
+   * (see ensureSession). A cursor written without an address predates that change.
+   */
+  previousAddress?: string;
 }
 
 /** A session's self-described role: display only, never authority. */
@@ -101,6 +106,8 @@ export interface CursorFile {
   cursor: Cursor;
   /** Recently shown message ids -> delivery time (a bounded ring, newest last). */
   seen: Record<string, number>;
+  /** The address the cursor was made for (absent in files from before 0.5.7). */
+  address?: string;
 }
 
 // ---------------------------------------------------------------- registrations

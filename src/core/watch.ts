@@ -100,6 +100,12 @@ export async function runWatch({
     },
     onTick: () => lock.touch(),
     onHostGone: () => void shutdown(),
+    onReaddressed(address: string) {
+      write(
+        `[mailbox] this session's address is now ${address} (the mailbox user changed); this watcher stops. Start it again to receive as ${address}.\n`,
+      );
+      void shutdown();
+    },
   });
   if (stopping)
     await rx.stop({ depart: true }); // a signal arrived while starting up

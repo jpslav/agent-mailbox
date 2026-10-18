@@ -12,7 +12,7 @@ treat them as approximate.
 
 ## [Unreleased]
 
-## [0.5.7] - 2026-10-17
+## [0.5.8] - 2026-10-17
 
 ### Added
 - Events feeds: each user's sessions write `started`, `ended`, `status-changed`, `role-changed`,
@@ -31,6 +31,35 @@ treat them as approximate.
   `sharing` bucket and each user's events stream and regenerates every user's permissions (one
   server reload). Existing users start as `team`. Until then clients warn that the server has no
   events feed, and nothing else changes.
+
+## [0.5.7] - 2026-10-17
+
+### Added
+- Profiles: several mailbox identities on one machine and one OS account. `mbox setup --profile
+  <name>` writes `profiles/<name>.json` (mode 0600); `AGENT_MAILBOX_PROFILE=<name>` (or
+  `--profile <name>` on any command) selects it. Each profile has its own state directory, so its
+  own sessions, registrations, pause file and delivery daemon. `AGENT_MAILBOX_CONFIG` keeps
+  working; with a named profile it is an error. `mbox whoami`, `mbox doctor` and
+  `mbox deliverd --status` show the profile. The README covers sharing a Claude Code config with
+  per-person credentials, and why a profile cannot impersonate anyone.
+- `mbox doctor` reports registered sessions whose address belongs to another user, and a delivery
+  daemon running as another user than the config names.
+
+### Fixed
+- A session whose stored address belongs to another user than the configured one (the machine's
+  mailbox user was changed with `mbox setup`) silently received nothing. It now gets an address
+  under the current user (same label, a fresh position, no aliases) at its next `mbox` command or
+  session start, and is told the old address.
+- `mbox watch` for such a session no longer loops on "connection lost"; a watcher whose session
+  gets a new address says so and exits.
+- The delivery daemon restarts as the new user when the client config changes, and a session
+  start for another user than the running daemon's takes delivery over (a user changed in the
+  environment). The daemon logs the sessions it cannot serve instead of failing quietly.
+
+### Changed
+- A named profile takes its user and password only from its file: `AGENT_MAILBOX_USER` or
+  `AGENT_MAILBOX_PASSWORD` together with `AGENT_MAILBOX_PROFILE` is an error. The default profile
+  keeps every override.
 
 ## [0.5.6] - 2026-10-17
 

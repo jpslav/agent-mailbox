@@ -18,6 +18,16 @@ export interface HookInput {
   cwd: string | null;
 }
 
+/** What HookContext.ensure found. */
+export interface EnsuredSession {
+  state: SessionState;
+  /**
+   * The address this call replaced because the mailbox user changed (ensureSession), else null.
+   * Mail sent to it does not reach the session any more.
+   */
+  replaced: string | null;
+}
+
 /** What `mbox hook <agent> <event>` hands to a hook handler, besides the hook's stdin JSON. */
 export interface HookContext {
   env: Env;
@@ -27,8 +37,10 @@ export interface HookContext {
   launcher: string;
   /** Why the mailbox is not configured, or null when it is. */
   configError: string | null;
+  /** The selected profile (AGENT_MAILBOX_PROFILE), or null for the default one. */
+  profile: string | null;
   /** Make sure the session has an address and a cursor; resolves to its state. */
-  ensure(sid: string, cwd: string): Promise<SessionState>;
+  ensure(sid: string, cwd: string): Promise<EnsuredSession>;
   /** The session ended: write `ended` to the user's events feed and remove its presence entry. */
   endSession(sid: string): Promise<void>;
   /** Write an event about the session (`ensure` it first) to the user's feed; never throws. */
@@ -51,6 +63,10 @@ export type InstructionsContext =
       address: string;
       launcher: string;
       /** Does the session receive mail by push? (default: yes) */ push?: boolean;
+      /** The selected profile, when it is not the default one. */
+      profile?: string | null;
+      /** The address the session had until now (see EnsuredSession.replaced). */
+      replaced?: string | null;
     };
 
 export interface Adapter {
