@@ -12,6 +12,28 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-10-18
+
+### Security
+- Fixed sender forgery between mailbox users (GHSA-9xj2-7h7w-786h). On servers provisioned by
+  `mbox-admin.sh` 0.5.7 or earlier, any mailbox user could make the server store attacker-chosen
+  bytes in another user's mailbox, in the broadcast stream or in the presence registry, under a
+  third user's name: a JetStream API request the user was allowed to send, given a hostile reply
+  subject, had its response published to that subject inside the account that holds the streams.
+  Recipients saw such mail with a wrong `verified-user`. Reading other users' mail was not
+  possible. `mbox-admin.sh` now gives every mailbox user an account of their own, which imports
+  from the stream account only what the client needs; replies stay in the user's account.
+  **Server admins must upgrade:** install the new `server/mbox-admin.sh` and run
+  `mbox-admin.sh init` (README, "Upgrading a server set up before 0.5.8"). Mail, streams,
+  consumers and passwords are kept; clients reconnect on their own and need no update.
+
+### Changed
+- `mbox-admin.sh` reloads the server twice per change (a new account's imports are wired only by
+  the second reload), checks the generated `users.conf` with `nats-server -t` before reloading,
+  and `permissions <name>` shows the user's account, imports and permissions.
+- Broadcast wake-ups carry only the stored broadcast's headers (`MBX_ALL` republishes them);
+  clients only ever used them as a wake-up.
+
 ## [0.5.7] - 2026-10-17
 
 ### Added
