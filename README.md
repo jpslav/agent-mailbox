@@ -47,7 +47,7 @@ transport interface. This repo adds the `mbox` CLI, a Claude Code plugin and ser
   starts mentioning subjects, `$JS`, JetStream, consumers or NATS.
 - **Core** (`src/core/`): addresses, config, session state and cursors, the envelope, peer
   resolution, and the receiving side (`receiver.ts`: reconnect/backoff, de-duplication, presence,
-  orphan guard), used by `deliverd` (the push daemon: one per user and machine, serving every
+  orphan guard), used by `deliverd` (the push daemon: one per profile and machine, serving every
   registered session, see Delivery), `watch` (a stream of blocks on stdout) and `wait` (block
   until mail, print one batch, exit). `registrations.ts` holds the sessions registered for push
   delivery, `pause.ts` the emergency stop, `guide.ts` the text of `mbox guide`.
@@ -313,7 +313,8 @@ Start a new Claude Code session (terminal or desktop app): the SessionStart hook
 address and registers the session with the delivery daemon, which it starts if needed (see
 Delivery). `mbox peers` in another session lists it.
 
-Environment overrides: `AGENT_MAILBOX_SERVERS` (comma-separated), `AGENT_MAILBOX_USER`,
+Environment overrides: `AGENT_MAILBOX_PROFILE` (which profile, see "Several people on one
+machine"), `AGENT_MAILBOX_SERVERS` (comma-separated), `AGENT_MAILBOX_USER`,
 `AGENT_MAILBOX_PASSWORD`, `AGENT_MAILBOX_CONFIG` (config file path), `AGENT_MAILBOX_STATE_DIR`
 (default `${XDG_STATE_HOME:-~/.local/state}/agent-mailbox`), `AGENT_MAILBOX_MAX_BYTES`,
 `AGENT_MAILBOX_SESSION` and `AGENT_MAILBOX_AGENT` (see Architecture), `AGENT_MAILBOX_MAX_PER_MIN`
@@ -332,6 +333,51 @@ stream is **not** readable (a permission error is reported as `ok`).
    `mbox setup ...` line privately (it contains their password).
 3. They install the plugin as above. Addresses are visible in `mbox peers`; they can write to your
    sessions and you to theirs, but cannot read each other's mail.
+
+### Several people on one machine (profiles)
+
+A profile is one mailbox identity on a machine: a config file with a user's credentials, and its
+own state. The default profile is `config.json` above. Others are made with `--profile`:
+
+```sh
+printf '%s\n' '<bob password>' | mbox setup --profile bob --servers nats://100.x.y.z:4222 --user bob --password-stdin
+AGENT_MAILBOX_PROFILE=bob claude      # start Claude Code as bob
+mbox --profile bob doctor             # or pick the profile for one command
+```
+
+- `setup --profile <name>` writes `${XDG_CONFIG_HOME:-~/.config}/agent-mailbox/profiles/<name>.json`
+  (mode 0600). Names are `a-z`, `0-9` and `-`; `default` means the default profile.
+- `AGENT_MAILBOX_PROFILE` (or `--profile` on one command) selects it. Set it in the environment
+  Claude Code starts from: the hooks, the Bash tool and the delivery daemon all inherit it.
+- Each profile has its own state directory, `<state dir>/profiles/<name>/`, and so its own
+  sessions, registrations, pause file and delivery daemon. Two profiles in use on one machine run
+  two daemons, each logged in as its own user, and send and receive independently. `mbox pause
+--all` holds one profile's sessions.
+- `AGENT_MAILBOX_CONFIG` still works as before (one config file, the default state directory).
+  Setting it together with a profile is an error, because it is unclear which identity is meant.
+- Switching profiles: resume the session with a different `AGENT_MAILBOX_PROFILE`. It gets that
+  profile's address (`<that user>.<host>.<label>`). The other profile's address stops receiving.
+
+**No impersonation.** A profile is only as good as the password in it: the server checks every
+connection's password, and `verified-user` comes from the server, so a session acts as a user only
+with that user's password. Naming a profile, setting `AGENT_MAILBOX_USER` or editing an address
+grants nothing. All profiles of an OS account are readable by that account, so anything that runs
+as it (any of its sessions included) can use any of them. Profiles keep identities apart for people
+who share a machine and trust each other with it; people who must not be able to act as each other
+need separate OS accounts.
+
+**A shared Claude Code config.** The plugin, `CLAUDE.md`, skills and settings can be shared by
+everyone who uses an account or a config directory; mailbox credentials cannot. Each person runs
+`mbox setup --profile <their name>` with their own password and sets `AGENT_MAILBOX_PROFILE` in
+their own shell or launcher. Do not put it in a shared `settings.json` (`env`): that would make
+everyone the same person.
+
+**Changing a profile's user.** If `mbox setup` gives a profile another user while sessions run,
+its delivery daemon notices at its next rescan (within 30 s) and restarts as the new user. Sessions
+registered under the old user are not served; the daemon log, `mbox deliverd --status` and
+`mbox doctor` name them. Each gets an address under the new user (same label, a fresh position,
+no aliases) at its next `mbox` command or session start, and the session-start hook tells Claude
+the old address. Mail sent to the old address stays on the server for the old user.
 
 ## 4. How sessions use it
 
@@ -375,7 +421,8 @@ per session: no waiter, no running hook, no background task, nothing for the mod
   (mode 0600: socket path, token, the Claude Code pid, cwd), and starts `mbox deliverd` if it is
   not running (detached, own process group, not waited for). If the running daemon is an older
   version (after a plugin update), it takes delivery over; see the daemon item below.
-- **`mbox deliverd`**: one per user and machine, on one server connection. It watches the
+- **`mbox deliverd`**: one per profile and machine (see "Several people on one machine"), on one
+  server connection. It watches the
   registrations, runs each session's receiver (its server-side position, broadcasts, presence and
   heartbeats), collects what arrives within about 300 ms and posts it to the session's socket as
   one message (a header line, then one complete block per message, at most about 8,000
@@ -485,12 +532,13 @@ under their parents; one whose parent is not live is shown at the top level and 
 is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as
 untrusted as any other. Readers keep only well-formed values.
 
-Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/`: `<id>.json` (address, aliases, cwd,
+Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/` (for a named profile,
+`$AGENT_MAILBOX_STATE_DIR/profiles/<name>/sessions/`): `<id>.json` (address, aliases, cwd,
 role, parent, status),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
 (the current waiter). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
-daemon's pid, version and bundle path), `deliverd.starting` (a daemon being started),
+daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon being started),
 `deliverd.log`, `deliverd.out` (crash traces) and `paused.json`.
 
 ## Security model and limits
