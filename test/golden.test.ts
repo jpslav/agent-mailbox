@@ -47,6 +47,21 @@ describe('golden: envelope v1', () => {
     );
   });
 
+  it('an ask (0.6.1) is an ordinary envelope whose "to" is the area pseudo-address', () => {
+    const env = buildEnvelope({
+      from: 'bob.desk.api-7c1d',
+      to: 'area:repo:github.com/acme/web',
+      agent: 'claude-code',
+      body: 'how do I run the tests?',
+      sentAt: '2026-01-02T03:04:05.678Z',
+      id: 'abc',
+    });
+    assert.equal(
+      JSON.stringify(env),
+      '{"v":1,"id":"abc","from":"bob.desk.api-7c1d","to":"area:repo:github.com/acme/web","agent":"claude-code","subject":null,"body":"how do I run the tests?","inReplyTo":null,"sentAt":"2026-01-02T03:04:05.678Z"}',
+    );
+  });
+
   it('generates a UUID id and an ISO-8601 sentAt by default', () => {
     const env = buildEnvelope({ from: 'a.b.c', to: 'd.e.f', body: 'x' });
     assert.deepEqual(Object.keys(env), [

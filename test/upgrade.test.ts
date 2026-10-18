@@ -10,6 +10,7 @@ import path from 'node:path';
 import { after } from 'node:test';
 import { jetstream, jetstreamManager } from '@nats-io/jetstream';
 import { connect, type NatsConnection } from '@nats-io/transport-node';
+import { areaToken } from '../src/core/transport/nats.js';
 import {
   ADMIN,
   Broker,
@@ -564,6 +565,124 @@ describe(
           ],
           before,
         );
+      } finally {
+        await alice.close();
+        await admin.close();
+      }
+    });
+  },
+);
+
+// A server provisioned by v0.6.0 (events feeds, before asks): the first init of this version adds
+// the asks stream and its exports in place; a new client says what is missing before that, the
+// v0.6.0 client keeps working after it, and the asks stream takes no reply-injected writes.
+const ADMIN_060 = fromRelease('v0.6.0', 'server/mbox-admin.sh');
+const CLIENT_060 = fromRelease('v0.6.0', BUNDLE);
+describe(
+  'upgrade from v0.6.0 to asks',
+  { skip: SERVER.skip ?? ADMIN_060.skip ?? CLIENT_060.skip },
+  () => {
+    let b: Broker | null = null;
+    const watchers: Watcher[] = [];
+    after(async () => {
+      await Promise.all(watchers.map((w) => w.stop().catch(() => {})));
+      await b?.stop();
+    });
+
+    it('init adds the asks stream and its exports; old and new clients work; no reply lands in it', async () => {
+      b = new Broker(SERVER, { adminScript: ADMIN_060.path });
+      const broker = b;
+      await broker.init(['alice', 'bob']);
+      const aliceEnv = makeEnv(broker, 'alice');
+      const bobEnv = makeEnv(broker, 'bob');
+      const dir = projectDir('ask-upgrade');
+      const run = (bundle: string | undefined, env: MachineEnv, s: string, args: string[]) =>
+        mbox(args, {
+          env: { ...env, AGENT_MAILBOX_SESSION: s },
+          cwd: dir,
+          ...(bundle ? { bundle } : {}),
+        });
+      const WEB = 'repo:github.com/acme/web';
+
+      // Before the upgrade: the new client says what is missing, and nothing else breaks.
+      const offered = run(undefined, aliceEnv, 'a-new', ['offer', WEB]);
+      assert.equal(offered.code, 0, offered.stderr);
+      assert.match(offered.stderr, /no stream for asks yet .* run mbox-admin\.sh init/);
+      const asked = run(undefined, bobEnv, 'b-new', ['ask', WEB, 'too early']);
+      assert.equal(asked.code, 1);
+      assert.match(asked.stderr, /no stream for asks yet .* run mbox-admin\.sh init/);
+      const doctor = run(undefined, aliceEnv, 'a-new', ['doctor']);
+      assert.match(doctor.stdout, /FAIL.*asks \(help areas\)/);
+      assert.equal(run(undefined, aliceEnv, 'a-new', ['inbox']).code, 0); // asks are skipped
+
+      broker.adminScript = ADMIN;
+      const out = broker.admin(['init']).out;
+      assert.match(
+        out,
+        /created stream ASKS \(ask\.\*\.\*, file storage, max-age 7d, max-bytes 256MiB/,
+      );
+      assert.match(out, /reloaded nats-server/);
+      const again = broker.admin(['init']).out;
+      assert.match(again, /users\.conf unchanged: no server reload needed/);
+      assert.match(again, /stream ASKS already exists \(kept\)/);
+      assert.doesNotMatch(again, /created|reloaded|republishes/);
+      await until('alice reaches the stream account again', async () => {
+        return (await reachesStreams(broker, 'alice')) === 'ok';
+      });
+
+      // The new client: the offer made before the upgrade now brings asks.
+      const w = new Watcher(aliceEnv, { cwd: dir, session: 'a-new' });
+      watchers.push(w);
+      await w.waitFor(/online as/);
+      const r = run(undefined, bobEnv, 'b-new', ['ask', WEB, 'after the upgrade']);
+      assert.equal(r.code, 0, r.stderr);
+      await w.waitFor(/after the upgrade/, 30000);
+      assert.equal(w.messages().at(-1)?.verified, 'bob');
+      assert.match(run(undefined, aliceEnv, 'a-new', ['doctor']).stdout, /all checks passed/);
+
+      // The v0.6.0 client, unchanged: doctor, peers (which now holds entries with offers), mail.
+      const old = CLIENT_060.path;
+      const oldDoctor = run(old, bobEnv, 'b-old', ['doctor']);
+      assert.equal(oldDoctor.code, 0, oldDoctor.stdout + oldDoctor.stderr);
+      const peers = run(old, bobEnv, 'b-old', ['peers']);
+      assert.equal(peers.code, 0, peers.stderr);
+      const aliceAddr = (
+        run(undefined, aliceEnv, 'a-new', ['whoami']).stdout.split('\n')[0] ?? ''
+      ).trim();
+      assert.ok(peers.stdout.includes(aliceAddr), peers.stdout);
+      const bobOld = (run(old, bobEnv, 'b-old', ['whoami']).stdout.split('\n')[0] ?? '').trim();
+      const ow = new Watcher(bobEnv, { cwd: dir, session: 'b-old', bundle: old });
+      watchers.push(ow);
+      await ow.waitFor(/online as/);
+      assert.equal(
+        run(undefined, aliceEnv, 'a-new', ['send', bobOld, 'to the old client']).code,
+        0,
+      );
+      await ow.waitFor(/to the old client/);
+      assert.equal(run(old, bobEnv, 'b-old', ['send', aliceAddr, 'from the old client']).code, 0);
+      await w.waitFor(/from the old client/);
+      // and the new client lists the old client's entry (no offers in it)
+      const newPeers = run(undefined, aliceEnv, 'a-new', ['peers']);
+      assert.ok(newPeers.stdout.includes(bobOld), newPeers.stdout);
+
+      // No reply to alice's requests lands in the asks stream under another user's name.
+      const alice = await broker.conn('alice');
+      const admin = await broker.conn('admin');
+      try {
+        const jsm = await jetstreamManager(admin);
+        const before = (await jsm.streams.info('ASKS')).state.last_seq;
+        const tok = areaToken(WEB);
+        const pa = await jetstream(alice, { checkAPI: false }).publish(
+          `ask.${tok}.alice`,
+          JSON.stringify({ v: 1, id: 'inj', from: 'bob.h.x', body: 'spoof' }),
+        );
+        for (const reply of [`ask.${tok}.bob`, `ask.${tok}.carol`, `mbxwake.ask.${tok}.bob`])
+          alice.publish('$JS.API.DIRECT.GET.ASKS', JSON.stringify({ seq: pa.seq }), { reply });
+        await alice.flush();
+        await sleep(1500);
+        const info = await jsm.streams.info('ASKS');
+        assert.equal(info.state.last_seq, pa.seq, 'a reply was stored in ASKS');
+        assert.ok(pa.seq > before);
       } finally {
         await alice.close();
         await admin.close();
