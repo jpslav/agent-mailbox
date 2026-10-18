@@ -4,10 +4,11 @@
 //
 // ---- Transport interface (what core may rely on) ----------------------------------------------
 //
-// Addresses are the core's `<user>.<host>.<label>` strings, plus the broadcast pseudo-address 'all'.
+// Addresses are the core's `<user>.<host>.<label>` strings, plus the broadcast pseudo-address 'all'
+// and a help area's pseudo-address `area:<area>` (src/core/areas.ts): mail to an area is an ask.
 //
 //   publish(to, envelope, {timeoutMs}) -> {id}
-//       Deliver `envelope` (a JSON-able object with a unique `.id`) to one address or 'all'. The
+//       Deliver `envelope` (a JSON-able object with a unique `.id`) to one address, 'all' or an area. The
 //       broker stores it durably for its retention period; retries with the same id are deduped.
 //       Throws TooLargeError (`.tooLarge === true`) when the broker would refuse the size.
 //
@@ -32,7 +33,11 @@
 //       until they are all back, then offers it sorted; it gives up waiting a little after
 //       redeliverAfterMs (redeliverAfterMs + max(5 s, half of it)) and offers what it has.
 //       Broadcasts are in order among themselves, not relative to direct mail; they have no
-//       server-side acknowledgement: the caller's saved cursor is their position. onOpen() is
+//       server-side acknowledgement: the caller's saved cursor is their position. Asks in the
+//       areas among `addresses` work the same way, in order within each area; an area the cursor
+//       has no position for is read from its oldest stored ask (a session that starts offering an
+//       area gets what was asked there within the retention). A server without asks (provisioned
+//       before them) only means no asks: mail and broadcasts are unaffected. onOpen() is
 //       called each time the subscription is (re)established. The promise never resolves: it
 //       rejects when the connection ends, or with an AbortError when `signal` aborts. Errors with `.authProblem === true` mean
 //       credentials/permissions. Calling subscribe again with different addresses re-targets the
@@ -58,6 +63,7 @@
 //       when the server does not let this user read it (private, or no such user)
 //   events.shared() -> user[] | null  the users whose feed the admin shares with the team
 //
+//   asksReadable() -> boolean        can this user read asks (false: a server set up before them)
 //   limits.maxLabelLen(user, host)   longest label that still forms a routable address
 //   explainError(err) -> string      human-readable message for any error thrown above
 //   diagnose({user, host}) -> [{ok, name, hint?}]       connectivity / auth / permission self-check
@@ -68,8 +74,8 @@
 // subscription leaves it open, and close() releases it. Without it, each subscribe() has its own.
 // `faults` are test-only knobs (TransportFaults in types.ts).
 //
-// delivery = {id, time(unix s), to ('all' | address), sender (server-verified user), payload
-//             (string as published), cursor}
+// delivery = {id, time(unix s), to ('all' | address | 'area:<area>'), sender (server-verified
+//             user), payload (string as published), cursor}
 // -------------------------------------------------------------------------------------------------
 //
 // NATS mapping
@@ -78,6 +84,8 @@
 //   presence      KV bucket `presence`, key <user>.<host>.<session hash>
 //   events        evt.<user>.<host>                            stream EVT_<USER>   (evt.<user>.*)
 //   sharing       KV bucket `sharing`, key `team` = JSON list of the users whose feed is shared
+//   ask           ask.<area token>.<fromUser>                  stream ASKS         (ask.*.*)
+//                 (area token: 32 hex of sha256(area); readers map it back from the areas they offer)
 // Only <user> may publish evt.<user>.*, so a feed's owner is verified by the stream it is in. The
 // stream's subject must be a wildcard, like every stream here: the server sends a push consumer's
 // deliveries to a literal stream subject (it counts as interest), so anyone could write into a
@@ -90,7 +98,10 @@
 // verified sender. Each session reads its own stream through one durable pull consumer named after
 // the session (filter = this session's addresses, explicit ack); broadcasts are read with direct
 // gets from a locally remembered sequence (no consumer on the shared stream, so nobody needs
-// consumer rights there). Request replies use a per-user inbox prefix _INBOX_<user>.
+// consumer rights there). Asks are read the same way, per area, from ASKS, which every user reads
+// and each user writes only under their own name (the last token), like broadcasts; their wake-up
+// is the stored ask's headers, republished to mbxwake.ask.* and imported by every user account as
+// ask.*.*. Request replies use a per-user inbox prefix _INBOX_<user>.
 import crypto from 'node:crypto';
 import { connect } from '@nats-io/transport-node';
 import type { ConnectionOptions, NatsConnection, Subscription } from '@nats-io/transport-node';
@@ -107,6 +118,7 @@ import type {
 import { Kvm } from '@nats-io/kv';
 import type { KV } from '@nats-io/kv';
 import { SEG_RE } from '../addr.js';
+import { AREA_PREFIX, areaAddress, areaOf, checkOffers } from '../areas.js';
 import { checkEvent } from '../events.js';
 import { checkBranch, checkParent, checkRepo, checkRole, checkStatus } from '../session-meta.js';
 import type {
@@ -138,6 +150,11 @@ const EVT_PREFIX = 'evt';
 const SHARING_BUCKET = 'sharing';
 const SHARING_STREAM = `KV_${SHARING_BUCKET}`;
 const SHARING_KEY = 'team';
+const ASK_PREFIX = 'ask';
+/** Not MBX_ASK: `ask` is a valid user name, whose mailbox stream that would be. */
+const ASK_STREAM = 'ASKS';
+/** At most this many area positions are kept in a cursor (more only after many offer changes). */
+const MAX_AREA_POSITIONS = 64;
 
 // ---------------------------------------------------------------- names
 function parseAddr(s: unknown): [string, string, string] | null {
@@ -156,9 +173,16 @@ export const streamFor = (user: string): string =>
 export const eventsStreamFor = (user: string): string =>
   `${EVT_PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, '_')}`;
 
+/** The subject token of a help area: fixed length, and safe whatever characters the area uses. */
+export const areaToken = (area: string): string =>
+  crypto.createHash('sha256').update(area).digest('hex').slice(0, 32);
+
 export function subjectFor(to: string, fromUser: string): string {
   if (!SEG_RE.test(fromUser || '')) throw new Error(`invalid sender user "${fromUser}"`);
   if (to === 'all') return `${PREFIX}.all.${fromUser}`;
+  const area = areaOf(to);
+  if (area !== null) return `${ASK_PREFIX}.${areaToken(area)}.${fromUser}`;
+  if (to.startsWith(AREA_PREFIX)) throw new Error(`invalid area in "${to}"`);
   const p = parseAddr(to);
   if (!p)
     throw new Error(`invalid address "${to}" (expected <user>.<host>.<label>, each [a-z0-9-]+)`);
@@ -176,6 +200,13 @@ export function parseSubject(subject: string): { to: string; sender: string } | 
   if (t.length === 5 && t.slice(1).every((x) => SEG_RE.test(x)))
     return { to: t.slice(1, 4).join('.'), sender: t[4]! }; // length is 5
   return null;
+}
+
+/** ask.<token>.<sender> -> {token, sender}, or null for any other subject. */
+export function parseAskSubject(subject: string): { token: string; sender: string } | null {
+  const t = String(subject || '').split('.');
+  if (t.length !== 3 || t[0] !== ASK_PREFIX || !/^[0-9a-f]{32}$/.test(t[1] ?? '')) return null;
+  return SEG_RE.test(t[2] ?? '') ? { token: t[1]!, sender: t[2]! } : null; // length is 3
 }
 
 /** Durable consumer name for a session id (consumer names may not contain '.', '*', '>' or spaces). */
@@ -234,6 +265,18 @@ const isNoStream = (e: unknown): boolean =>
   shape(e)?.code === 10059 ||
   shape(e)?.api_error?.err_code === 10059 ||
   /no responders|stream not found|jetstream is not enabled/i.test(String(shape(e)?.message || ''));
+/**
+ * A permission violation about asks: a server provisioned before them refuses this user the ask
+ * subjects. That only means no asks, so it must not end the subscriptions on the connection.
+ */
+const isAskPermission = (e: unknown): boolean => {
+  if (!isPermission(e)) return false;
+  const subject = shape(e)?.subject ?? /"([^"]+)"/.exec(String(shape(e)?.message || ''))?.[1];
+  return (
+    subject === `$JS.API.DIRECT.GET.${ASK_STREAM}` ||
+    String(subject || '').startsWith(`${ASK_PREFIX}.`)
+  );
+};
 const isNotFound = (e: unknown): boolean =>
   shape(e)?.code === 10014 ||
   shape(e)?.api_error?.err_code === 10014 ||
@@ -314,12 +357,18 @@ interface UntrustedPresence {
   role?: unknown;
   parent?: unknown;
   status?: unknown;
+  offers?: unknown;
 }
 
-/** The position of a receiver: last sequence read from the own stream and from the broadcast stream. */
+/**
+ * The position of a receiver: last sequence read from the own stream, from the broadcast stream
+ * and, per area token, from the asks stream.
+ */
 interface NatsCursor {
   u: number | null;
   a: number | null;
+  /** Area token -> last sequence read in ASKS for that area (absent before 0.6.1: none read). */
+  k?: Record<string, number>;
   /** Where to start when there is no sequence yet (ISO-8601). */
   t: string;
 }
@@ -338,6 +387,8 @@ interface Shared {
   jsm: JetStreamManager;
   /** The presence bucket, opened on first use. */
   kv: KV | null;
+  /** Whether this user can read asks, once known. */
+  asks: boolean | null;
   /** In multiplex mode: the failure callbacks of the subscriptions riding on this connection. */
   subs: Set<(reason: unknown) => void>;
 }
@@ -380,7 +431,7 @@ export function createTransport(
       );
       const js = jetstream(nc, { checkAPI: false, timeout: timeoutMs || 10000 });
       const jsm = await jetstreamManager(nc, { checkAPI: false, timeout: timeoutMs || 10000 });
-      const s: Shared = { nc, js, jsm, kv: null, subs: new Set() };
+      const s: Shared = { nc, js, jsm, kv: null, asks: null, subs: new Set() };
       if (multiplex) {
         // One status watcher per shared connection: a permission error, or the connection ending,
         // fails every subscription riding on it (each then reconnects on its own schedule).
@@ -389,7 +440,7 @@ export function createTransport(
         });
         (async () => {
           for await (const st of nc.status()) {
-            if (st.type === 'error' && isPermission(st.error))
+            if (st.type === 'error' && isPermission(st.error) && !isAskPermission(st.error))
               for (const f of s.subs) f(tag(st.error));
           }
         })().catch(() => {});
@@ -453,6 +504,12 @@ export function createTransport(
         timeoutMs,
       );
     } catch (e) {
+      // A server provisioned before asks has no stream for them and grants no access to them.
+      if (areaOf(to) !== null && (isNoStream(e) || isPermission(e)))
+        // eslint-disable-next-line preserve-caught-error -- as below: the message must stand alone
+        throw new Error(
+          'the server has no stream for asks yet (it was set up before help areas); ask the admin to run mbox-admin.sh init',
+        );
       if (
         shape(e)?.name === 'NoRespondersError' ||
         /no responders|jetstream is not enabled/i.test(String(shape(e)?.message))
@@ -469,11 +526,16 @@ export function createTransport(
   }
 
   // ---- deliveries ----
+  /** `area` is the area an ask was read for (its subject names only the area's token). */
   const delivery = (
     { subject, seq, stream, timeMs, data, msgId }: StoredMessage,
     cursor: Cursor,
+    area?: string,
   ): Delivery => {
-    const p = parseSubject(subject) || { to: subject, sender: null };
+    const ask = area !== undefined ? parseAskSubject(subject) : null;
+    const p = ask
+      ? { to: areaAddress(area!), sender: ask.sender } // area is set when ask is
+      : parseSubject(subject) || { to: subject, sender: null };
     return {
       id: msgId || `${stream}:${seq}`,
       time: Math.floor(timeMs / 1000),
@@ -528,6 +590,36 @@ export function createTransport(
     return out;
   }
 
+  /**
+   * Can this user read asks? One single direct get: a batch get the server refuses is never
+   * answered (it looks like a timeout), a single one is refused at once. A server provisioned
+   * before asks refuses it (a permission error) or has nothing to answer it (no responders).
+   */
+  async function probeAsks(jsm: JetStreamManager): Promise<boolean> {
+    try {
+      await jsm.direct.getMessage(ASK_STREAM, { seq: 1 });
+      return true;
+    } catch (e) {
+      if (isPermission(e) || isNoStream(e)) return false;
+      if (/message not found|no message/i.test(String(shape(e)?.message))) return true; // nothing stored yet
+      throw tag(e);
+    }
+  }
+  async function asksReadable(): Promise<boolean> {
+    const s = await conn();
+    if (s.asks === null) s.asks = await probeAsks(s.jsm);
+    return s.asks;
+  }
+
+  /** The asks stored for `area` from `start` (a start_time or seq query), up to `max`. */
+  const asksIn = (
+    jsm: JetStreamManager,
+    area: string,
+    start: DirectBatchOptions,
+    max: number,
+  ): Promise<StoredMessage[]> =>
+    directAll(jsm, ASK_STREAM, start, `${ASK_PREFIX}.${areaToken(area)}.*`, max);
+
   // ---- now ----
   async function now(): Promise<Cursor> {
     const t = new Date().toISOString();
@@ -555,7 +647,8 @@ export function createTransport(
   }: SubscribeOptions): Promise<never> {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const name = consumerName(session);
-    const own = addresses.filter((a) => a !== 'all');
+    const areas = [...new Set(addresses.map(areaOf).filter((a): a is string => a !== null))];
+    const own = addresses.filter((a) => a !== 'all' && areaOf(a) === null);
     for (const a of own)
       if (parseAddr(a)?.[0] !== user)
         throw new Error(`address ${a} does not belong to user ${user}`);
@@ -565,11 +658,25 @@ export function createTransport(
     // The cursor is opaque to the core but ours: it was made by now() or a delivery, and may have
     // been through a file, so each field is read defensively.
     const given = cursor as Partial<NatsCursor> | null | undefined;
+    const tokens = new Map(areas.map((a) => [areaToken(a), a]));
+    const positions: Record<string, number> = {};
+    if (given?.k && typeof given.k === 'object') {
+      const kept = Object.entries(given.k).filter(
+        ([tok, seq]) => /^[0-9a-f]{32}$/.test(tok) && Number.isSafeInteger(seq) && seq >= 0,
+      );
+      // Positions of areas no longer offered are kept (offering one again goes on from there),
+      // up to a bound; past it, only the offered ones.
+      for (const [tok, seq] of kept)
+        if (kept.length <= MAX_AREA_POSITIONS || tokens.has(tok)) positions[tok] = seq;
+    }
     const cur: NatsCursor = {
       u: given?.u ?? null,
       a: given?.a ?? null,
+      k: positions,
       t: given?.t ?? new Date().toISOString(),
     };
+    /** A copy of the cursor for a delivery (the core stores it as is). */
+    const snapshot = (): NatsCursor => ({ ...cur, k: { ...cur.k } });
 
     let stopped = false;
     let fail!: (reason: unknown) => void;
@@ -612,12 +719,14 @@ export function createTransport(
       void nc.closed().then((err) => fail(tag(err || new Error('connection closed'))));
       (async () => {
         for await (const st of nc.status()) {
-          if (st.type === 'error' && isPermission(st.error)) fail(tag(st.error));
+          if (st.type === 'error' && isPermission(st.error) && !isAskPermission(st.error))
+            fail(tag(st.error));
         }
       })().catch(() => {});
     }
     let messages: ConsumerMessages | null = null;
     let wakeSub: Subscription | null = null;
+    const askSubs: Subscription[] = [];
     let directLoop: Promise<never> | null = null;
 
     // Deferred acknowledgements still in flight (see the interface: {ackAfter}).
@@ -731,7 +840,7 @@ export function createTransport(
                 data: m.data,
                 msgId: m.headers?.get('Nats-Msg-Id') || null,
               },
-              { ...cur },
+              snapshot(),
             ),
           );
         })) as { ackAfter?: Promise<unknown> } | null | undefined;
@@ -824,7 +933,7 @@ export function createTransport(
                 if (stopped) return; // the saved cursor is the position: nothing to hand back
                 await serial(async () => {
                   cur.a = m.seq;
-                  await onMessage(delivery(m, { ...cur }));
+                  await onMessage(delivery(m, snapshot()));
                 });
               }
               got += batch.length;
@@ -846,6 +955,66 @@ export function createTransport(
         await step(nc.flush());
         await step(catchUp());
         const iv = setInterval(() => void catchUp(), broadcastPollMs);
+        iv.unref?.();
+        failed.catch(() => clearInterval(iv));
+      }
+
+      // Asks in the offered areas: read like broadcasts, per area, from the remembered sequence (the
+      // oldest stored ask for an area the cursor does not know yet). Best effort: a server set up
+      // before asks, or a failing read, never ends the subscription; the next wake-up or poll
+      // tries again.
+      // Anything but a clear refusal (a timeout, say) counts as readable: the reads below are
+      // best effort and retried, while a refused batch read would hang until its timeout.
+      if (areas.length && (await step(probeAsks(jsm).catch(() => true)))) {
+        let running = false;
+        let again = false;
+        const catchUpAsks = async (retries = 0): Promise<void> => {
+          if (running) {
+            again = true;
+            return;
+          }
+          running = true;
+          try {
+            let got = 0;
+            for (const [tok, area] of tokens) {
+              for (;;) {
+                const last = cur.k?.[tok];
+                const batch = await asksIn(
+                  jsm,
+                  area,
+                  { seq: last === undefined ? 1 : last + 1 },
+                  256,
+                );
+                for (const m of batch) {
+                  if (stopped) return; // the saved cursor is the position: nothing to hand back
+                  await serial(async () => {
+                    cur.k = { ...cur.k, [tok]: m.seq };
+                    await onMessage(delivery(m, snapshot(), area));
+                  });
+                }
+                got += batch.length;
+                if (batch.length < 256) break;
+              }
+            }
+            if (!got && retries > 0)
+              setTimeout(() => void catchUpAsks(retries - 1).catch(() => {}), 150).unref?.();
+          } catch {
+            /* best effort: tried again on the next wake-up or poll */
+          } finally {
+            running = false;
+            if (again && !stopped) {
+              again = false;
+              void catchUpAsks();
+            }
+          }
+        };
+        for (const tok of tokens.keys())
+          askSubs.push(
+            nc.subscribe(`${ASK_PREFIX}.${tok}.*`, { callback: () => void catchUpAsks(3) }),
+          );
+        await step(nc.flush());
+        await step(catchUpAsks());
+        const iv = setInterval(() => void catchUpAsks(), broadcastPollMs);
         iv.unref?.();
         failed.catch(() => clearInterval(iv));
       }
@@ -872,11 +1041,12 @@ export function createTransport(
       } catch {
         /* already ended */
       }
-      try {
-        wakeSub?.unsubscribe();
-      } catch {
-        /* already ended */
-      }
+      for (const sub of [wakeSub, ...askSubs])
+        try {
+          sub?.unsubscribe();
+        } catch {
+          /* already ended */
+        }
       if (!nc.isClosed()) {
         // 2. Let the deliveries already handed out settle: acknowledged, or handed back.
         const settle = new Promise((r) => setTimeout(r, settleMs).unref?.());
@@ -917,19 +1087,38 @@ export function createTransport(
   ): Promise<Delivery[]> {
     const s = await conn();
     const start_time = new Date(Date.now() - lookbackMs).toISOString();
-    const out: StoredMessage[] = [];
+    const out: Array<{ m: StoredMessage; area?: string }> = [];
     for (const a of [...new Set(addresses)]) {
+      const area = areaOf(a);
       try {
-        if (a === 'all')
-          out.push(...(await directAll(s.jsm, ALL_STREAM, { start_time }, `${PREFIX}.all.*`, max)));
+        if (area !== null) {
+          // Asks: none on a server set up before them (that is not an error here).
+          if (await asksReadable())
+            for (const m of await asksIn(s.jsm, area, { start_time }, max)) out.push({ m, area });
+        } else if (a === 'all')
+          for (const m of await directAll(
+            s.jsm,
+            ALL_STREAM,
+            { start_time },
+            `${PREFIX}.all.*`,
+            max,
+          ))
+            out.push({ m });
         else
-          out.push(...(await directAll(s.jsm, ownStream, { start_time }, `${PREFIX}.${a}.*`, max)));
+          for (const m of await directAll(
+            s.jsm,
+            ownStream,
+            { start_time },
+            `${PREFIX}.${a}.*`,
+            max,
+          ))
+            out.push({ m });
       } catch (e) {
         throw tag(e);
       }
     }
-    out.sort((x, y) => x.timeMs - y.timeMs);
-    return out.map((m) => delivery(m, null));
+    out.sort((x, y) => x.m.timeMs - y.m.timeMs);
+    return out.map(({ m, area }) => delivery(m, null, area));
   }
 
   // ---- presence (KV bucket with a TTL) ----
@@ -1007,6 +1196,7 @@ export function createTransport(
           role: checkRole(j.role),
           parent: checkParent(j.parent),
           status: checkStatus(j.status),
+          offers: checkOffers(j.offers),
           lastSeen: m.time.getTime(),
           live: true,
         });
@@ -1204,6 +1394,17 @@ export function createTransport(
     } catch (e) {
       add(false, 'events feed sharing', explainError(e));
     }
+    try {
+      if (await asksReadable()) add(true, 'asks (help areas) are readable');
+      else
+        add(
+          false,
+          'asks (help areas)',
+          'the server has no stream for asks yet; ask the admin to run mbox-admin.sh init',
+        );
+    } catch (e) {
+      add(false, 'asks (help areas)', explainError(e));
+    }
     const other = `not-${user}`.slice(0, 40);
     try {
       await s.jsm.streams.info(streamFor(other));
@@ -1230,6 +1431,7 @@ export function createTransport(
     now,
     presence,
     events,
+    asksReadable,
     limits: { maxLabelLen },
     explainError,
     diagnose,

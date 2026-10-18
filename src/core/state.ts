@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, parseAddr, shortHost } from './addr.js';
+import { checkOffers } from './areas.js';
 import { profileName, xdgDir } from './config.js';
 import { checkParent, checkRole, checkStatus } from './session-meta.js';
 import type { Config, CursorFile, Env, Role, SessionState, Transport } from './types.js';
@@ -149,13 +150,14 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     : [];
   // `address` is checked, and the metadata peers will see; the other fields were written by
   // ensureSession and are not re-validated.
-  const { previousAddress, ...rest } = s;
+  const { previousAddress, offers, ...rest } = s;
   return {
     ...rest,
     aliases,
     role: checkRole(s.role),
     parent: checkParent(s.parent),
     status: checkStatus(s.status),
+    ...(offers !== undefined && { offers: checkOffers(offers) }),
     ...(typeof previousAddress === 'string' && { previousAddress }),
   } as unknown as SessionState;
 }

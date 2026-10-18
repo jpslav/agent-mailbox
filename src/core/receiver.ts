@@ -4,6 +4,7 @@
 // with reconnect/backoff. What happens to each message is up to the caller (onMessage).
 import fs from 'node:fs';
 import { BROADCAST } from './addr.js';
+import { areaAddress, areaOf } from './areas.js';
 import { parseDelivery } from './envelope.js';
 import { HEARTBEAT_MS, presenceRecord } from './registry.js';
 import {
@@ -123,7 +124,8 @@ export interface Receiver {
  *
  *   onMessage(delivery, message, fresh) -> what the transport's onMessage returns (its resolution,
  *       or {ackAfter}, acknowledges). `fresh` is false for an id delivered before (redelivery) and
- *       for the session's own broadcasts; the caller still commits those. Calls never overlap.
+ *       for the session's own broadcasts and asks; the caller still commits those. Calls never
+ *       overlap. Asks in the areas the session offers arrive here too (`to` is `area:<area>`).
  *   onStatus('lost', hint) | onStatus('restored')    connection state changes (once each)
  *   onTick()                                          every pollMs (lock upkeep)
  *   onHostGone()                                      the agent process named by hostPid exited
@@ -204,7 +206,10 @@ export async function openReceiver({
     persist();
   }
 
-  const addresses = () => [...new Set([st.address, ...st.aliases, BROADCAST])];
+  // Plus one pseudo-address per help area the session offers: asks in it arrive like mail.
+  const addresses = () => [
+    ...new Set([st.address, ...st.aliases, BROADCAST, ...(st.offers ?? []).map(areaAddress)]),
+  ];
   const isSelf = (from: string): boolean => st.address === from || st.aliases.includes(from);
 
   const post = (kind: 'announce' | 'heartbeat' | 'depart', timeoutMs: number): Promise<void> =>
@@ -228,9 +233,9 @@ export async function openReceiver({
 
   // ---- housekeeping timers ----
   /**
-   * Take in what `mbox name`, `mbox whoami` and `mbox status` wrote to the state file: a new alias
-   * resubscribes, role, parent and status only change what presence says. Returns whether
-   * anything changed.
+   * Take in what `mbox name`, `mbox offer`, `mbox whoami` and `mbox status` wrote to the state
+   * file: a new alias or offer resubscribes, role, parent and status only change what presence
+   * says (offers show there too). Returns whether anything changed.
    */
   const adoptState = (): boolean => {
     const next = readState(sid, env);
@@ -239,7 +244,9 @@ export async function openReceiver({
       readdressed(next);
       return false;
     }
-    const aliasesChanged = JSON.stringify(next.aliases) !== JSON.stringify(st.aliases);
+    const aliasesChanged =
+      JSON.stringify(next.aliases) !== JSON.stringify(st.aliases) ||
+      JSON.stringify(next.offers ?? []) !== JSON.stringify(st.offers ?? []);
     const metaChanged =
       next.role !== st.role || next.parent !== st.parent || next.status !== st.status;
     if (!aliasesChanged && !metaChanged) return false;
@@ -290,7 +297,9 @@ export async function openReceiver({
   // ---- message handling ----
   function handle(d: Delivery): DeliveryResult | Promise<DeliveryResult> {
     const m = parseDelivery(d);
-    const own = d.to === BROADCAST && m.sender === cfg.user && isSelf(m.from);
+    // The session's own broadcasts and asks come back to it: recorded, never shown as new.
+    const own =
+      (d.to === BROADCAST || areaOf(d.to) !== null) && m.sender === cfg.user && isSelf(m.from);
     return onMessage(d, m, !seen.has(m.id) && !own);
   }
 
