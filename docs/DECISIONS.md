@@ -464,11 +464,16 @@ context, decision, why.
   asking. One durable consumer per service (`svc=<name>` on the owner's stream, created with
   `deliver_policy` `all` and an inactivity limit equal to the stream's `max_age`) is the service's
   position, whoever holds it, so the next holder gets what earlier ones left unacknowledged,
-  first and in order (the hold of "Delivery order across readers"). The holder's receiver keeps
+  first and in order (the hold of "Delivery order across readers"; for a service it also ends as
+  soon as the consumer's info shows nothing outstanding outside it, because a previous holder that
+  is still live acknowledges what it had in flight instead of handing it back, and the hold would
+  otherwise run to its deadline). The holder's receiver keeps
   the claim alive with each heartbeat and before each subscription, claims it again when it lapsed
   and nobody took it, and checks before every service message that the claim still names its
   session; a session that lost the service hands the message back at once, stops reading the
-  service and drops it from its state. Only `mbox name --service <name> --release` deletes a claim:
+  service and drops it from its state; state writes now hold a lock file (`<sid>.json.lock`),
+  because a receiver and a command can write the same session's state. Only
+  `mbox name --service <name> --release` deletes a claim:
   a session that ends keeps its claims until they lapse with its presence (30 minutes), which
   costs nothing, since a holder without presence is free to take, and lets a resumed session keep
   its services. Service mail carries the rules for helpers in its block, like an ask.

@@ -18296,12 +18296,25 @@ async function ensureSession({
   }
   return st;
 }
+var sleepSync = (ms) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 function updateState(sid, fn, env = process.env) {
-  const st = readState(sid, env);
-  if (!st) throw new Error(`no state for session ${sid}`);
-  const next = fn({ ...st, aliases: [...st.aliases] }) || st;
-  atomicWriteJson(statePath(sid, env), next);
-  return next;
+  const lockFile = `${statePath(sid, env)}.lock`;
+  let lock = acquireFileLock(lockFile);
+  for (let i = 0; !lock.ok && i < 200; i++) {
+    sleepSync(10);
+    lock = acquireFileLock(lockFile);
+  }
+  try {
+    const st = readState(sid, env);
+    if (!st) throw new Error(`no state for session ${sid}`);
+    const next = fn({ ...st, aliases: [...st.aliases] }) || st;
+    atomicWriteJson(statePath(sid, env), next);
+    return next;
+  } finally {
+    if (lock.ok) lock.release();
+  }
 }
 function pidAlive(pid) {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
@@ -19214,6 +19227,10 @@ async function openReceiver({
   };
   const dropService = (service) => {
     if (!(st.services ?? []).includes(service)) return;
+    if (!(readState(sid, env)?.services ?? []).includes(service)) {
+      reread();
+      return;
+    }
     try {
       updateState(
         sid,
@@ -20991,11 +21008,17 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
         const svcName = parseService(service).name;
         const consumer = `${SVC_CONSUMER}${svcName}`;
         const sinfo = await infoOf(consumer);
+        maxAgeNs ??= (await step(jsm.streams.info(ownStream))).config.max_age ?? 0;
         if (sinfo) {
-          if (sinfo.config.ack_wait !== ackWait)
-            await step(jsm.consumers.update(ownStream, consumer, { ack_wait: ackWait }));
+          const inactive = sinfo.config.inactive_threshold ?? 0;
+          if (sinfo.config.ack_wait !== ackWait || inactive !== maxAgeNs)
+            await step(
+              jsm.consumers.update(ownStream, consumer, {
+                ack_wait: ackWait,
+                inactive_threshold: maxAgeNs
+              })
+            );
         } else {
-          maxAgeNs ??= (await step(jsm.streams.info(ownStream))).config.max_age ?? 0;
           await step(
             jsm.consumers.add(ownStream, {
               name: consumer,
@@ -21098,6 +21121,25 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
             timer: setTimeout(openGate, redeliverAfterMs + Math.max(5e3, redeliverAfterMs / 2))
           };
           p.gate.timer.unref?.();
+          if (service !== null) {
+            const owedCheck = setInterval(
+              () => {
+                const gate = p.gate;
+                if (!gate || stopped) return clearInterval(owedCheck);
+                jsm.consumers.info(ownStream, consumerName2).then(
+                  (ci) => {
+                    if (p.gate === gate && ci.num_ack_pending <= gate.held.size) openGate();
+                  },
+                  () => {
+                  }
+                  // tried again at the next tick; the deadline still applies
+                );
+              },
+              Math.min(5e3, Math.max(500, redeliverAfterMs / 20))
+            );
+            owedCheck.unref?.();
+            failed.catch(() => clearInterval(owedCheck));
+          }
         }
         const messages = await consumer.consume({
           max_messages: 64,
@@ -22419,12 +22461,12 @@ async function readStdin(timeoutMs) {
   });
 }
 async function serviceLive(transport, service, peers, registryErr) {
-  if (registryErr) return false;
+  if (registryErr) return null;
   try {
     const { claim } = await transport.services.read(service);
     return !!claim && holderLive(claim, peers);
   } catch {
-    return false;
+    return null;
   }
 }
 program2.command("send").description(
@@ -22450,7 +22492,9 @@ program2.command("send").description(
       }
       let target;
       const service = parseService(to);
-      if (service) target = { to, live: await serviceLive(transport, to, peers, registryErr) };
+      const serviceHeld = service ? await serviceLive(transport, to, peers, registryErr) : null;
+      const serviceKnown = serviceHeld !== null;
+      if (service) target = { to, live: serviceHeld === true };
       else if (to === BROADCAST || isAddr(to) && registryErr) target = { to, live: true };
       else if (registryErr)
         throw new UsageError(
@@ -22472,7 +22516,12 @@ program2.command("send").description(
         );
       }
       const res = await transport.publish(target.to, envelope);
-      if (service && !target.live) {
+      if (service && !serviceKnown) {
+        process.stderr.write(
+          `warning: could not check whether a live session holds ${to}; the message is stored on the server either way.
+`
+        );
+      } else if (service && !target.live) {
         const prefixOf = peers.filter((p) => p.live && p.address.startsWith(`${to}.`));
         process.stderr.write(
           `warning: no live session holds ${to}; the message is queued on the server (kept for the server's retention period, 180 days by default) until a session claims it with mbox name --service ${service.name}.${prefixOf.length ? ` (${to} is a service address; to reach live session ${prefixOf.map((p) => p.address).join(", ")}, use the full address.)` : ""}

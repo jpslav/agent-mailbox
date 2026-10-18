@@ -955,11 +955,18 @@ export function createTransport(
         const svcName = parseService(service)!.name; // svcAddrs are service addresses
         const consumer = `${SVC_CONSUMER}${svcName}`;
         const sinfo = await infoOf(consumer);
+        maxAgeNs ??= (await step(jsm.streams.info(ownStream))).config.max_age ?? 0;
         if (sinfo) {
-          if (sinfo.config.ack_wait !== ackWait)
-            await step(jsm.consumers.update(ownStream, consumer, { ack_wait: ackWait }));
+          // The stream's max_age may have changed since: the inactivity limit follows it.
+          const inactive = sinfo.config.inactive_threshold ?? 0;
+          if (sinfo.config.ack_wait !== ackWait || inactive !== maxAgeNs)
+            await step(
+              jsm.consumers.update(ownStream, consumer, {
+                ack_wait: ackWait,
+                inactive_threshold: maxAgeNs,
+              }),
+            );
         } else {
-          maxAgeNs ??= (await step(jsm.streams.info(ownStream))).config.max_age ?? 0;
           await step(
             jsm.consumers.add(ownStream, {
               name: consumer,
@@ -1097,6 +1104,28 @@ export function createTransport(
             timer: setTimeout(openGate, redeliverAfterMs + Math.max(5000, redeliverAfterMs / 2)),
           };
           p.gate.timer.unref?.();
+          // A service's previous holder may still be live after a takeover, and acknowledge what
+          // it had in flight instead of handing it back: then it never comes back, and the gate
+          // would wait for its deadline. So a service's gate also opens as soon as nothing is
+          // outstanding anywhere but here (every unacknowledged message is one this subscription
+          // holds), which the consumer's info says.
+          if (service !== null) {
+            const owedCheck = setInterval(
+              () => {
+                const gate = p.gate;
+                if (!gate || stopped) return clearInterval(owedCheck);
+                jsm.consumers.info(ownStream, consumerName).then(
+                  (ci) => {
+                    if (p.gate === gate && ci.num_ack_pending <= gate.held.size) openGate();
+                  },
+                  () => {}, // tried again at the next tick; the deadline still applies
+                );
+              },
+              Math.min(5000, Math.max(500, redeliverAfterMs / 20)),
+            );
+            owedCheck.unref?.();
+            failed.catch(() => clearInterval(owedCheck));
+          }
         }
 
         const messages = await consumer.consume({

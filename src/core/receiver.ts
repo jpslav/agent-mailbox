@@ -252,6 +252,12 @@ export async function openReceiver({
   /** Another session holds `service` now: stop reading it (the state change resubscribes). */
   const dropService = (service: string): void => {
     if (!(st.services ?? []).includes(service)) return;
+    // Released by this session's own `mbox name --service --release`, which removed it from the
+    // state first: nothing was lost, only take the change in.
+    if (!(readState(sid, env)?.services ?? []).includes(service)) {
+      reread();
+      return;
+    }
     try {
       updateState(
         sid,

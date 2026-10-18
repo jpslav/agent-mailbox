@@ -214,7 +214,10 @@ The NATS layout is a transport detail: only `src/core/transport/nats.ts` and `se
   when that is 0): a consumer recreated while acknowledged mail is still stored would deliver it
   again. It is the service's position whoever holds it; a subscription reads it like the
   session's own consumer, with the same ordering and hand-back rules (the owed messages of the
-  previous holder come first). Before each message it reads the claim (one direct get) and, when
+  previous holder come first; a service's hold also ends once the consumer's `num_ack_pending` is
+  no more than what the subscription holds, checked every few seconds, since a previous holder
+  still live after a takeover acknowledges what it had in flight). The inactivity limit follows
+  the stream's `max_age` when it changes. Before each message it reads the claim (one direct get) and, when
   the claim no longer names its session, stops pulling, naks the message without delay and drops
   the service; it also skips a service it does not hold when it starts.
 - Service claims: an entry in the `presence` bucket under `U._svc.N`, which only `U`'s account may

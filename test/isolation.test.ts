@@ -329,6 +329,7 @@ describe('per-user account isolation', { skip: SERVER.skip }, () => {
       for (const [subject, body] of [
         ['$JS.API.CONSUMER.DURABLE.CREATE.MBX_BOB.svc=helpdesk', svc],
         ['$JS.API.CONSUMER.CREATE.MBX_BOB.svc=helpdesk', svc],
+        ['$JS.API.CONSUMER.CREATE.MBX_BOB.svc=helpdesk.mbx.bob._svc.helpdesk.*', svc],
         ['$JS.API.CONSUMER.INFO.MBX_BOB.svc=helpdesk', ''],
         ['$JS.API.CONSUMER.MSG.NEXT.MBX_BOB.svc=helpdesk', { batch: 1 }],
         ['$JS.API.CONSUMER.DELETE.MBX_BOB.svc=helpdesk', ''],

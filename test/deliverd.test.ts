@@ -1688,6 +1688,42 @@ describe('mbox deliverd', { skip: SERVER.skip }, () => {
     assert.match(inboxOut.stdout, new RegExp(`message ${later} from .* to bob\\.support`));
   });
 
+  it('a takeover from a holder with a delivery in flight: once that holder acknowledges it, the new holder gets newer mail at once, not after the hold deadline', async () => {
+    // A long ack_wait: the hold for owed messages would end only after 180 s, far past this test.
+    const slow = { AGENT_MAILBOX_REDELIVER_MS: '120000' };
+    const env = bobMachine(slow);
+    const sid = 'd-svc-busy';
+    const fake = await inbox(sid);
+    const host = fakeHost();
+    const dir = projectDir('svc-busy');
+    const { address } = sessionStart(env, sid, dir, { socket: fake.path, hostPid: host.pid });
+    await until(() => peers().includes(address), 'announced');
+    const run = (s: string, args: string[]) =>
+      mbox(args, { env: { ...env, AGENT_MAILBOX_SESSION: s }, cwd: dir });
+    assert.equal(run(sid, ['name', '--service', 'busy']).code, 0);
+    // The inbox holds the first delivery open: the daemon has it in flight, unacknowledged.
+    let release!: () => void;
+    fake.hold = new Promise<void>((r) => (release = r));
+    const first = mail('bob.busy', 'in flight at the takeover');
+    await fake.waitFor((f) => f.messages().some((m) => m.id === first), 30000);
+    const taken = run('d-svc-next', ['name', '--service', 'busy', '--takeover']);
+    assert.equal(taken.code, 0, taken.stderr);
+    const w = new Watcher({ ...env, ...slow }, { cwd: dir, session: 'd-svc-next' });
+    cleanup.push(() => w.stop().then(() => {}));
+    await w.waitFor(/online as/);
+    // Both pull now, and the new holder started while the first message was still owed.
+    await until(
+      async () => (await jsm.consumers.info('MBX_BOB', 'svc=busy')).num_waiting >= 2,
+      'both holders pull the service',
+    );
+    release(); // the old holder acknowledges what it had in flight
+    fake.hold = null;
+    const second = mail('bob.busy', 'after the takeover');
+    await w.waitFor(new RegExp(second), 60000);
+    assert.ok(!w.out.includes('in flight at the takeover'));
+    assert.equal(w.messages().at(-1)?.to, 'bob.busy');
+  });
+
   it('a server without asks: a session that offers an area still gets its mail, and the daemon keeps serving every session', async () => {
     if (ADMIN_060.skip) return; // a clone without the v0.6.0 tag
     const old = new Broker(SERVER, { adminScript: ADMIN_060.path });

@@ -695,20 +695,20 @@ async function readStdin(timeoutMs: number): Promise<string> {
 
 /**
  * Does a live session hold `service`? A claim whose holder has no presence entry does not count.
- * Unknown (no registry, or the claim unreadable) counts as not live: the message is queued either way.
+ * null when it cannot be told (no registry, or the claim unreadable): the message is queued anyway.
  */
 async function serviceLive(
   transport: Transport,
   service: string,
   peers: PresenceEntry[],
   registryErr: unknown,
-): Promise<boolean> {
-  if (registryErr) return false;
+): Promise<boolean | null> {
+  if (registryErr) return null;
   try {
     const { claim } = await transport.services.read(service);
     return !!claim && holderLive(claim, peers);
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -743,7 +743,10 @@ program
         }
         let target: { to: string; live: boolean };
         const service = parseService(to);
-        if (service) target = { to, live: await serviceLive(transport, to, peers, registryErr) };
+        // Whether a live session holds the service: null when that cannot be told.
+        const serviceHeld = service ? await serviceLive(transport, to, peers, registryErr) : null;
+        const serviceKnown = serviceHeld !== null;
+        if (service) target = { to, live: serviceHeld === true };
         else if (to === BROADCAST || (isAddr(to) && registryErr)) target = { to, live: true };
         else if (registryErr)
           throw new UsageError(
@@ -766,7 +769,11 @@ program
           );
         }
         const res = await transport.publish(target.to, envelope);
-        if (service && !target.live) {
+        if (service && !serviceKnown) {
+          process.stderr.write(
+            `warning: could not check whether a live session holds ${to}; the message is stored on the server either way.\n`,
+          );
+        } else if (service && !target.live) {
           // Before 0.7.0 a two-part target was a prefix of session addresses: say so when it is one.
           const prefixOf = peers.filter((p) => p.live && p.address.startsWith(`${to}.`));
           process.stderr.write(
