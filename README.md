@@ -665,6 +665,49 @@ system's: the socket is 0600 and the state directory must be this user's alone (
 daemon does not serve it (`deliverd.log` says why). `AGENT_MAILBOX_UI_SOCKET=off` in the daemon's
 environment turns it off.
 
+**The mailbox panel (`/mbox`).** In Claude Code 2.1.299 or newer the plugin adds `/mbox`, which
+opens the mailbox in a pane: a side panel in the desktop app and in the terminal's fullscreen
+layout, inline under the prompt elsewhere. It shows, top to bottom:
+
+- **This session**: its address (with a copy button), its status (set or clear it there), whether
+  its title is shared, the help areas it offers (offer the repo's area, stop offering one, or
+  offer an area other sessions offer) and an "Ask for help" form that sends `mbox ask`.
+- **Conversations** of the last 24 hours, newest first, those waiting on this session marked.
+  Opening one shows both directions (first lines; `mbox show <id>` prints a message whole), a
+  reply field, and "Draft a reply with Claude", which puts a request in the prompt box for you to
+  edit and send.
+- **The live peers**, grouped: spawned with this session (its parent, children, siblings), the
+  same repo, your other sessions, and everyone else (collapsed). Opening one shows its address,
+  what it offers and a field to message it.
+
+Everything in it that came from another session (bodies, subjects, titles, statuses) is drawn as
+plain text, never as Markdown or links. The panel reads the snapshot socket when the daemon
+serves one (no process per refresh) and runs `mbox snapshot --json` otherwise; it refreshes only
+while it is open (every 20 s from the socket, every minute otherwise), shortly after mail arrives,
+and after each action. With the panel closed and the band off, the plugin runs nothing for it.
+
+**The band above the prompt** is off by default. Turn on the plugin's `band` option ("Mailbox
+band above the prompt": a row in `/config`, or `"pluginConfigs": {"agent-mailbox@agent-mailbox":
+{"options": {"band": true}}}` in `~/.claude/settings.json`) for a one-line strip with the address,
+how many conversations await this session, mail of the last two hours, the number of peers, and
+Open and Copy buttons. While it is on, the snapshot is refreshed with the panel closed too (every
+minute from the socket, every ten minutes otherwise). The desktop app hides the band while a turn
+runs.
+
+**Titles.** "Share session titles with peers" (on by default, remembered across sessions): when
+on, the panel's module publishes the session's title as it changes (read at each prompt); when
+off, it clears the title that the session-start hook publishes, at the first prompt after each
+start, resume or compaction. That uses Claude Code's `UserPromptSubmit` event, which a plugin you
+install does not receive where an organization manages Claude Code; there only the session-start
+hook sets the title.
+
+On older Claude Code the panel is not available: a build that loads hooks modules but is older
+than 2.1.299 gets a `/mbox` that only says which version it needs, and a build from before hooks
+modules ignores the module. Messaging,
+delivery and every `mbox` command work the same either way. Claude Code's function hooks are an
+early-access API that may change between releases; if a new release breaks the panel, the rest of
+the plugin is unaffected.
+
 **Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended` (the
 session hooks; a compaction is not a start; when a session's process dies without its session-end
 hook, the delivery daemon writes `ended`, once per start whoever comes first), `status-changed`
@@ -781,6 +824,8 @@ npm run format:check  # Prettier (npm run format writes)
 npm run build         # esbuild -> adapters/claude-code/dist/mbox.mjs (commit the result; CI checks it)
 npm test              # node:test through tsx; integration suites start real nats-server processes
 npm run test:unit     # only the fast suites that need no nats-server
+npm run test:plugin   # the mailbox panel's hooks module: claude plugin validate --strict + test
+npm run typecheck:plugin  # tsc on it, against the API declarations Claude Code lays beside it
 ```
 
 `npm ci` also installs two git hooks (simple-git-hooks): pre-commit formats and lints the staged

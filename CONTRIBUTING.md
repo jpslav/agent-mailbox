@@ -22,7 +22,15 @@ npm run lint          # ESLint
 npm run format:check  # Prettier (`npm run format` fixes it)
 npm run build         # bundles src/ into adapters/claude-code/dist/mbox.mjs (commit the result)
 npm test              # everything; `npm run test:unit` runs only the fast suites
+npm run test:plugin   # the mailbox panel (a Claude Code hooks module): claude plugin validate + test
 ```
+
+The mailbox panel (`adapters/claude-code/hooks/register.tsx`) is loaded by Claude Code itself.
+`npm run test:plugin` needs Claude Code 2.1.299 or newer on `PATH` (or `CLAUDE_BIN=<path>`).
+`npm run typecheck:plugin` type-checks it against the API declarations Claude Code writes into
+`adapters/claude-code/.claude-plugin/types/` (git-ignored) the first time an interactive
+`claude --plugin-dir adapters/claude-code` session loads the folder; without them it says so and
+skips.
 
 The source is strict TypeScript under `src/` and `test/`. `adapters/claude-code/dist/mbox.mjs` is
 a committed build: run `npm run build` after changing anything under `src/` and commit the

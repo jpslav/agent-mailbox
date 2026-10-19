@@ -12,6 +12,18 @@ treat them as approximate.
 
 ## [Unreleased]
 
+### Added
+- The mailbox panel: `/mbox` opens the mailbox in a pane (a side panel in the desktop app and the
+  terminal's fullscreen layout) with this session's address, status, title sharing and help
+  offers, an ask form, the conversations of the last 24 hours (reply, or have Claude draft a
+  reply), and the live peers grouped by how they relate to the session. It is a Claude Code
+  hooks module in the plugin and needs Claude Code 2.1.299 or newer; on older builds `/mbox` says
+  so and nothing else changes. Text from other sessions is drawn as plain text only.
+- A band above the prompt with the address, what awaits the session and Open/Copy buttons, off by
+  default: turn on the plugin's `band` option.
+- With "Share session titles with peers" off (in the panel; on by default), the session's title is
+  cleared from presence at the first prompt after each start, resume or compaction.
+
 ## [0.9.0] - 2026-10-19
 
 ### Added

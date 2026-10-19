@@ -564,3 +564,35 @@ context, decision, why.
   cached snapshot up to 30 s late; the session's own repo and branch and the peers' `lastSeen`
   up to five minutes. A state directory that is not 0700 (set up by hand) gets no
   socket until it is fixed. Set `AGENT_MAILBOX_UI_SOCKET=off` to turn it off.
+
+## The mailbox panel: a hooks module inside the plugin, opt-in band, refresh only while shown
+
+- **Date:** 2026-10
+- **Context:** A side panel prototyped as a separate Claude Code mod showed a session's mailbox
+  (its own card, conversations, peers by relation) and a band above every prompt. It searched
+  the plugin cache for an `mbox` binary, fell back to parsing the 0.7 commands' tables, and
+  refreshed on a timer in every session whether anything was shown or not.
+- **Decision:** The panel ships inside the agent-mailbox plugin as a Claude Code hooks module
+  (`"modules": ["./register.tsx"]` in `hooks/hooks.json`, beside the command hooks), with its
+  `$.state` contract in `types/index.d.ts` named by `plugin.json`. It runs the plugin's own
+  `bin/mbox` (`$.plugin.root`), reads only `mbox snapshot --json` or the daemon's `ui.sock`, and
+  refreshes only while the pane or the band is shown. The band is opt-in (`userConfig.band`,
+  default off); `/mbox` is always there. The module requires Claude Code 2.1.299 and checks the
+  version at session start: `$.state` exists from 2.1.281, but the elements and props the panel
+  draws are refused before 2.1.299 (2.1.284 to 2.1.294 require a label on a Button with
+  children, 2.1.295 and 2.1.296 refuse `Text` `size`), and a refused tree draws nothing. On an
+  older build the module registers `/mbox` alone, which says what it needs.
+- **Why:** One plugin means one install and one version: the module and the `mbox` it runs are
+  released together, so no fallback for an older CLI is needed. A band above every prompt in
+  every session is a cost (a row of the screen, and polling) that a person should choose.
+  Command hooks are unaffected by the module: builds before hooks modules strip the unknown
+  `modules` key (their hooks.json schema is a plain object), and a hook that throws is skipped
+  without touching the others.
+- **Limits:** the function-hooks API is early access and may change between releases; a release
+  that breaks the panel leaves messaging alone. The API declarations are not in the repo (the
+  engine writes them, about 1 MB per build), so CI checks the module with
+  `claude plugin validate --strict` and `claude plugin test` from a pinned Claude Code, and `tsc`
+  runs only where the declarations are laid. Title sharing uses the classic `UserPromptSubmit`
+  event, which an organization-managed Claude Code does not pass to plugins a person installs.
+  With sharing off, the title the session-start hook publishes stays visible until the next
+  prompt.
