@@ -126,7 +126,10 @@ const BAND_PROPS = {
 };
 
 /** The world beneath the plugin: an mbox that answers a snapshot, and what was run and copied. */
-function world(on: On): { spawned: string[][]; bins: string[]; copies: string[] } {
+function world(
+  on: On,
+  version = '2.1.299',
+): { spawned: string[][]; bins: string[]; copies: string[] } {
   const spawned: string[][] = [];
   const bins: string[] = [];
   const copies: string[] = [];
@@ -139,6 +142,9 @@ function world(on: On): { spawned: string[][]; bins: string[]; copies: string[] 
     return { value: ok('') };
   });
   on('session.id', () => ({ value: 'session-1' }));
+  on('session.version', () => ({ value: { version } }));
+  on('classic.UserPromptSubmit', () => ({}));
+  on('classic.SessionStart', () => ({}));
   on('session.receive', (_$, e) => ({ text: e.text }));
   on('command.register', (_$, e) => ({ value: { command: e.name } }));
   on('ui.panes', () => ({ value: [] }));
@@ -269,3 +275,66 @@ test(
     expect(spawned.length).toBe(before + 2);
   },
 );
+
+test(
+  'an older Claude Code: /mbox says what it needs, nothing else runs',
+  { options: { band: true } },
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1000 });
+    const { spawned } = world(on, '2.1.290');
+    on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+      const { Text } = $.ui.resolve(e);
+      return <Text>engine band</Text>;
+    });
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+    await clock.settle();
+    const r = await $.command.run(MBOX);
+    expect(r.text).toMatch(/needs Claude Code 2\.1\.299 or newer \(this is 2\.1\.290\)/);
+    const band = await $.ui.mount({
+      plugin: 'agent-mailbox',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      props: BAND_PROPS,
+    });
+    expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined();
+    await band.unmount();
+    await $.classic.UserPromptSubmit({ prompt: 'hi', session_title: 'A title' });
+    await clock.advance(30 * 60_000);
+    expect(spawned).toEqual([]);
+  },
+);
+
+test('title sharing: published as it changes, cleared once when turned off', async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 });
+  const { spawned } = world(on);
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  await $.classic.UserPromptSubmit({ prompt: 'a', session_title: 'Port the panel' });
+  await $.classic.UserPromptSubmit({ prompt: 'b', session_title: 'Port the panel' });
+  await clock.settle();
+  expect(spawned).toEqual([['title', 'Port the panel']]);
+
+  await $.command.run(MBOX);
+  await clock.settle();
+  const pane = await $.ui.mount({
+    plugin: 'agent-mailbox',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'mbox',
+    props: PANE_PROPS,
+  });
+  await pane.press({ key: 'share-title' });
+  await pane.unmount();
+  await $.classic.UserPromptSubmit({ prompt: 'c', session_title: 'Port the panel' });
+  await clock.settle();
+  const titles = spawned.filter((a) => a[0] === 'title');
+  expect(titles).toEqual([
+    ['title', 'Port the panel'],
+    ['title', '--clear'],
+  ]);
+
+  // A resume or compaction: the command hook published it again, so it is cleared again.
+  await $.classic.SessionStart({ source: 'compact' });
+  await $.classic.UserPromptSubmit({ prompt: 'd', session_title: 'Port the panel' });
+  await clock.settle();
+  expect(spawned.filter((a) => a[0] === 'title').length).toBe(3);
+});

@@ -114,6 +114,16 @@ export function asSnapshot(json: unknown): Snapshot | null {
 
 // ---------------------------------------------------------------- view helpers
 
+/** Whether a version string (`2.1.299`, `2.1.300-dev`) is at least `min` (`x.y.z`). */
+export function isAtLeast(version: string, min: string): boolean {
+  const parts = (v: string): number[] =>
+    (/^(\d+)\.(\d+)\.(\d+)/.exec(v) ?? []).slice(1).map(Number);
+  const [a, b] = [parts(version), parts(min)];
+  if (a.length !== 3 || b.length !== 3) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return (a[i] ?? 0) > (b[i] ?? 0);
+  return true;
+}
+
 /** Everything but the build time: equal fingerprints mean nothing to redraw. */
 export const fingerprint = (s: Snapshot): string => JSON.stringify({ ...s, at: 0 });
 

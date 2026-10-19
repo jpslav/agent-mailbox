@@ -4,10 +4,11 @@
 // address and what awaits the session. It draws `mbox snapshot --json` (README, "The mailbox
 // panel"), read from the delivery daemon's ui.sock when it serves one.
 //
-// Function hooks are early access in Claude Code, and this module needs `$.state` (2.1.MIN or
-// newer, MIN_VERSION below). On an older build that loads hooks modules it registers /mbox
-// only, which says so; a build that predates hooks modules ignores the `modules` key, and the
-// command hooks in hooks.json run either way.
+// Function hooks are early access in Claude Code. This module needs MIN_VERSION or newer:
+// `$.state` arrived in 2.1.281, and the elements and props it draws with validate from 2.1.299.
+// On an older build that loads hooks modules it registers /mbox only, which says so; a build
+// that predates hooks modules ignores the `modules` key. The command hooks in hooks.json (the
+// address, delivery) run either way.
 import type { ElementTable, EngineInterface, Register, RenderElement } from 'claude-code';
 
 import type { Snapshot, Source, Thread } from '../types';
@@ -16,6 +17,7 @@ import {
   asSnapshot,
   clean,
   fingerprint,
+  isAtLeast,
   groupPeers,
   headline,
   recentCount,
@@ -64,7 +66,12 @@ let lastAt = 0;
 let busy = false;
 let again = false;
 let isPaneOpen = false;
-let publishedTitle: string | null = null;
+// The title this module last published: a string, null once cleared, undefined when unknown
+// (the session-start command hook publishes the session's title at every start, resume and
+// compaction, whatever the toggle says).
+let publishedTitle: string | null | undefined;
+// Title updates run one after another, so two prompts in a row publish once.
+let titleQueue: Promise<void> = Promise.resolve();
 const stats: Source = {
   kind: 'none',
   spawns: 0,
@@ -218,14 +225,30 @@ async function draft($: Engine, text: string): Promise<void> {
 async function toggleShare($: Engine, share: boolean): Promise<void> {
   await $.state.set(SHARE_TITLE, share);
   await $.store.set('shareTitle', share);
+  if (!share) await syncTitle($, undefined);
+  else publishedTitle = undefined; // the next prompt publishes it
 }
 
-/** Publishes the session's title to presence when sharing is on and it changed. */
-async function publishTitle($: Engine, title: string | undefined): Promise<void> {
-  const t = clean(title ?? '');
-  if (!t || t === publishedTitle) return;
+/**
+ * Keeps the session's title in presence as the toggle says: published when it changed while
+ * sharing is on; cleared once while it is off (again after each start, resume or compaction,
+ * where the command hook published it).
+ */
+function syncTitle($: Engine, title: string | undefined): Promise<void> {
+  titleQueue = titleQueue.then(() => syncTitleNow($, title)).catch(() => undefined);
+  return titleQueue;
+}
+
+async function syncTitleNow($: Engine, title: string | undefined): Promise<void> {
   const { value: share = false } = await $.state.get(SHARE_TITLE);
-  if (!share) return;
+  if (!share) {
+    if (publishedTitle === null) return;
+    const r = await run($, ['title', '--clear']);
+    if (r.ok) publishedTitle = null;
+    return;
+  }
+  const t = [...clean(title ?? '')].slice(0, 120).join('');
+  if (!t || t === publishedTitle) return;
   const r = await run($, ['title', t]);
   if (r.ok) publishedTitle = t;
 }
@@ -811,16 +834,18 @@ export const register: Register = (on, options) => {
       name: 'mbox',
       description: 'Show the agent mailbox in a side panel',
     });
-    // A build without `$.state` (before MIN_VERSION) would fail every hook below: /mbox says so,
+    // An older build would refuse what the hooks below draw (or lack `$.state`): /mbox says so,
     // and nothing else runs. Titles are shared unless the person turned it off (kept across
     // sessions).
     try {
-      await $.state.set(SHARE_TITLE, (await $.store.get('shareTitle')) !== false);
-      isSupported = true;
+      isSupported = isAtLeast((await $.session.version()).version, MIN_VERSION);
+      if (isSupported) {
+        await $.state.set(SHARE_TITLE, (await $.store.get('shareTitle')) !== false);
+      }
     } catch {
       isSupported = false;
-      return next(e);
     }
+    if (!isSupported) return next(e);
     isPaneOpen = (await $.ui.panes()).some((p) => p.id === PANE);
     $.clock.every(TICK_MS, () => void tick($));
     if (isShown()) void refresh($);
@@ -850,9 +875,16 @@ export const register: Register = (on, options) => {
     return next(e);
   });
 
-  // The session's title, as Claude Code hands it to the classic hooks; published when shared.
+  // The session's title, as Claude Code hands it to the classic hooks: published when shared,
+  // cleared when not (README, "The mailbox panel").
   on('classic.UserPromptSubmit', async ($, e, next) => {
-    if (isSupported) void publishTitle($, e.session_title);
+    if (isSupported) void syncTitle($, e.session_title);
+    return next(e);
+  });
+
+  // The command hook has just published the title again (a start, resume or compaction).
+  on('classic.SessionStart', async ($, e, next) => {
+    publishedTitle = undefined;
     return next(e);
   });
 
