@@ -15,9 +15,6 @@ concurrency:
 env:
   NATS_SERVER_VERSION: v2.15.1
   NATSCLI_VERSION: v0.5.0
-  # The Claude Code that validates and tests the plugin's hooks module (the mailbox panel); at
-  # least the module's MIN_VERSION (adapters/claude-code/hooks/register.tsx).
-  CLAUDE_CODE_VERSION: 2.1.299
   # simple-git-hooks installs the git hooks on `npm ci`; a CI checkout has no use for them.
   SKIP_INSTALL_SIMPLE_GIT_HOOKS: '1'
 
@@ -113,7 +110,8 @@ jobs:
 
       # The mailbox panel is a hooks module Claude Code loads itself, not part of the bundle:
       # `claude plugin validate --strict` and `claude plugin test` from the official npm package,
-      # pinned. Both are local checks: no account, no model calls.
+      # pinned with its platform packages by integrity hash in ci/claude-code/package-lock.json
+      # (at least the module's MIN_VERSION). Both are local checks: no account, no model calls.
       - name: Plugin hooks module (claude plugin validate and test)
         shell: bash
         env:
@@ -122,9 +120,8 @@ jobs:
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
         run: |
           set -euo pipefail
-          npm install --no-save --no-package-lock --no-audit --no-fund \
-            --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
-          CLAUDE_BIN="$RUNNER_TEMP/claude-code/node_modules/.bin/claude" npm run test:plugin
+          npm ci --prefix ci/claude-code --no-audit --no-fund
+          CLAUDE_BIN="$PWD/ci/claude-code/node_modules/.bin/claude" npm run test:plugin
 
       - run: npm test
 

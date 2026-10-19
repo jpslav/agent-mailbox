@@ -56,8 +56,8 @@ function self(v: unknown): Self {
 
 /**
  * The CLI's (or the daemon's) JSON as a Snapshot, every field checked for shape; null when it is
- * not a v1 snapshot. The text in it came from other sessions: cleaned to printable lines here,
- * bodies kept multi-line but never interpreted.
+ * not a v1 snapshot. The text in it came from other sessions: cleaned to printable lines here.
+ * Mail bodies are dropped (nothing draws them).
  */
 export function asSnapshot(json: unknown): Snapshot | null {
   const o = obj(json);
@@ -75,20 +75,7 @@ export function asSnapshot(json: unknown): Snapshot | null {
       lastSeen: num(p.lastSeen),
       relation: relation(p.relation),
     })),
-    mail: list(o.mail).map((m) => ({
-      id: str(m.id),
-      from: str(m.from),
-      to: str(m.to),
-      kind: kind(m.kind),
-      area: strOrNull(m.area),
-      subject: strOrNull(m.subject),
-      body: typeof m.body === 'string' ? m.body.slice(0, 2000) : '',
-      isTruncated: m.isTruncated === true,
-      verifiedUser: str(m.verifiedUser),
-      isMismatch: m.isMismatch === true,
-      inReplyTo: strOrNull(m.inReplyTo),
-      time: num(m.time),
-    })),
+    mail: list(o.mail).map((m) => ({ id: str(m.id), kind: kind(m.kind), time: num(m.time) })),
     threads: list(o.threads).map((t) => ({
       with: str(t.with),
       kind: kind(t.kind),

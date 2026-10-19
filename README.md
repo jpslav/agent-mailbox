@@ -667,7 +667,7 @@ environment turns it off.
 
 **The mailbox panel (`/mbox`).** In Claude Code 2.1.299 or newer the plugin adds `/mbox`, which
 opens the mailbox in a pane: a side panel in the desktop app and in the terminal's fullscreen
-layout, inline under the prompt elsewhere. It shows, top to bottom:
+layout, inline above the prompt elsewhere. It shows, top to bottom:
 
 - **This session**: its address (with a copy button), its status (set or clear it there), whether
   its title is shared, the help areas it offers (offer the repo's area, stop offering one, or
@@ -684,7 +684,10 @@ Everything in it that came from another session (bodies, subjects, titles, statu
 plain text, never as Markdown or links. The panel reads the snapshot socket when the daemon
 serves one (no process per refresh) and runs `mbox snapshot --json` otherwise; it refreshes only
 while it is open (every 20 s from the socket, every minute otherwise), shortly after mail arrives,
-and after each action. With the panel closed and the band off, the plugin runs nothing for it.
+and after each action. With the panel closed and the band off it reads nothing; the only
+process it may run then is `mbox title` when the session's title changes (below). A conversation
+whose sender's address does not belong to its verified user is shown as "Unverified sender",
+with no reply field.
 
 **The band above the prompt** is off by default. Turn on the plugin's `band` option ("Mailbox
 band above the prompt": a row in `/config`, or `"pluginConfigs": {"agent-mailbox@agent-mailbox":
@@ -692,10 +695,11 @@ band above the prompt": a row in `/config`, or `"pluginConfigs": {"agent-mailbox
 how many conversations await this session, mail of the last two hours, the number of peers, and
 Open and Copy buttons. While it is on, the snapshot is refreshed with the panel closed too (every
 minute from the socket, every ten minutes otherwise). The desktop app hides the band while a turn
-runs.
+runs. The band takes the place of anything else drawn above the prompt (another plugin's band).
 
 **Titles.** "Share session titles with peers" (on by default, remembered across sessions): when
-on, the panel's module publishes the session's title as it changes (read at each prompt); when
+on, the panel's module publishes the session's title when it differs from the one last published
+(read at each prompt); when
 off, it clears the title that the session-start hook publishes, at the first prompt after each
 start, resume or compaction. That uses Claude Code's `UserPromptSubmit` event, which a plugin you
 install does not receive where an organization manages Claude Code; there only the session-start

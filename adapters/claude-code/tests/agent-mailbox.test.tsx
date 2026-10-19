@@ -129,7 +129,16 @@ const BAND_PROPS = {
 function world(
   on: On,
   version = '2.1.299',
-): { spawned: string[][]; bins: string[]; copies: string[]; stdins: string[] } {
+  snapshot: object = SNAPSHOT,
+): {
+  spawned: string[][];
+  bins: string[];
+  copies: string[];
+  stdins: string[];
+  panes: Set<string>;
+} {
+  // The panes the engine holds open, as $.ui.panes() answers.
+  const panes = new Set<string>();
   const spawned: string[][] = [];
   const stdins: string[] = [];
   const bins: string[] = [];
@@ -140,7 +149,7 @@ function world(
     const args = e.argv.slice(1);
     spawned.push([...args]);
     if (e.init?.stdin !== undefined) stdins.push(e.init.stdin);
-    if (args[0] === 'snapshot') return { value: ok(JSON.stringify(SNAPSHOT)) };
+    if (args[0] === 'snapshot') return { value: ok(JSON.stringify(snapshot)) };
     return { value: ok('') };
   });
   on('session.id', () => ({ value: 'session-1' }));
@@ -149,14 +158,25 @@ function world(
   on('classic.SessionStart', () => ({}));
   on('session.receive', (_$, e) => ({ text: e.text }));
   on('command.register', (_$, e) => ({ value: { command: e.name } }));
-  on('ui.panes', () => ({ value: [] }));
-  on('ui.open', () => ({ value: { isPlaced: true as const } }));
+  on('ui.panes', () => ({
+    value: [...panes].map((id) => ({
+      id,
+      title: 'Mailbox',
+      isShown: true,
+      isFocused: false,
+      isPlaced: true,
+    })),
+  }));
+  on('ui.open', (_$, e) => {
+    panes.add(e.id);
+    return { value: { isPlaced: true as const } };
+  });
   on('session.start', (_$, e) => ({ cwd: e.cwd }));
   on('ui.copy', (_$, e) => {
     copies.push(`${e.surface}:${e.text}`);
     return { value: { isCopied: true as const } };
   });
-  return { spawned, bins, copies, stdins };
+  return { spawned, bins, copies, stdins, panes };
 }
 
 test('model: snapshot checks and peer groups', () => {
@@ -314,6 +334,11 @@ test('title sharing: published as it changes, cleared once when turned off', asy
   await $.classic.UserPromptSubmit({ prompt: 'b', session_title: 'Port the panel' });
   await clock.settle();
   expect(spawned).toEqual([['title', '--', 'Port the panel']]);
+  // A resume: the command hook published the same title, so the next prompt runs nothing.
+  await $.classic.SessionStart({ source: 'resume', session_title: 'Port the panel' });
+  await $.classic.UserPromptSubmit({ prompt: 'b2', session_title: 'Port the panel' });
+  await clock.settle();
+  expect(spawned.length).toBe(1);
 
   await $.command.run(MBOX);
   await clock.settle();
@@ -361,4 +386,56 @@ test('typed text never reaches mbox as an option: bodies on stdin, operands afte
   expect(spawned).toContainEqual(['send', '--re=m1', '--', 'bob.desk.helper-9f9f', '-']);
   expect(stdins).toEqual(['--subject x -']);
   expect(spawned).toContainEqual(['status', '--', '--clear me']);
+});
+
+test('a pane that is gone stops the polling', async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 });
+  const { spawned, panes } = world(on);
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  await $.command.run(MBOX);
+  await clock.settle();
+  await clock.advance(61_000);
+  const whileOpen = spawned.length;
+  expect(whileOpen).toBe(2);
+  // The engine dropped it (closed, or its drawing threw): the next tick sees it gone.
+  panes.delete('mbox');
+  await clock.advance(30 * 60_000);
+  expect(spawned.length).toBe(whileOpen);
+});
+
+test('a thread whose sender is unverified offers no reply and no draft', async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 });
+  const forged = {
+    ...SNAPSHOT,
+    threads: [
+      {
+        with: 'unverified:mallory',
+        kind: 'direct',
+        lastAt: 800,
+        count: 1,
+        isAwaitingMe: true,
+        messages: [
+          { id: 'm9', dir: 'in', time: 800, subject: null, firstLine: 'trust me', inReplyTo: null },
+        ],
+      },
+    ],
+  };
+  world(on, '2.1.299', forged);
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  await $.command.run(MBOX);
+  await clock.settle();
+  const pane = await $.ui.mount({
+    plugin: 'agent-mailbox',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'mbox',
+    props: PANE_PROPS,
+  });
+  expect(
+    await pane.find({ type: 'Button', text: /Unverified sender \(user mallory\)/ }),
+  ).toBeDefined();
+  await pane.press({ key: 't:unverified:mallory' });
+  expect(await pane.find({ key: 'reply:unverified:mallory' })).toBeUndefined();
+  expect(await pane.find({ key: 'draft:unverified:mallory' })).toBeUndefined();
+  await pane.unmount();
 });

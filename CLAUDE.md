@@ -35,8 +35,9 @@ The source is strict TypeScript (`src/`, `test/`); `esbuild` bundles it, `tsc` o
   function hooks; the declarations are not in the repo (the engine lays them, git-ignored, in
   `adapters/claude-code/.claude-plugin/types/`). `npm run typecheck:plugin` type-checks it where
   they are laid; `npm run test:plugin` runs `claude plugin validate --strict` and
-  `claude plugin test` on it (Claude Code 2.1.299 or newer, or `CLAUDE_BIN`). ESLint lints it
-  without type information.
+  `claude plugin test` on it (Claude Code 2.1.299 or newer, or `CLAUDE_BIN`); CI runs it with the
+  Claude Code pinned in `ci/claude-code/package-lock.json`. ESLint lints it without type
+  information.
 - `server/`: `mbox-admin.sh` (users, streams, permissions), `install.sh` (prints install steps),
   `nats-server.conf.example`, `systemd/` and `launchd/` service files.
 - `test/`: `node:test` suites in TypeScript, run through `tsx`; the integration ones start a real

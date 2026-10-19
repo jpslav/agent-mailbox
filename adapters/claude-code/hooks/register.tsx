@@ -60,6 +60,9 @@ const ASK_AREA = { plugin: 'agent-mailbox', key: 'askArea' } as const;
 let isSupported = false; // this build has `$.state`
 let hasBand = false; // the `band` option
 let socket: string | null = null;
+// After the socket refused or failed, it is not tried again before this time (epoch ms), so a
+// socket that answers errors costs one spawn per spawn interval, not a poll and a spawn per tick.
+let socketRetryAt = 0;
 let etag: string | null = null;
 let lastFp = '';
 let lastAt = 0;
@@ -129,6 +132,7 @@ async function viaSocket($: Engine): Promise<Snapshot | 'unchanged' | null> {
     stats.error = `socket: ${err instanceof Error ? err.message : String(err)}`;
     socket = null;
     etag = null;
+    socketRetryAt = (await $.clock.now()) + DUE_MS.spawn.closed;
     return null;
   }
 }
@@ -140,14 +144,20 @@ async function viaSnapshot($: Engine): Promise<Snapshot | null> {
     stats.error = clean(r.stderr).slice(0, 300) || `mbox snapshot failed`;
     return null;
   }
+  let s: Snapshot | null;
   try {
-    const s = asSnapshot(JSON.parse(r.stdout));
-    socket = s?.socket ?? null;
-    return s;
+    s = asSnapshot(JSON.parse(r.stdout));
   } catch {
     stats.error = 'snapshot: not JSON';
     return null;
   }
+  if (!s) {
+    stats.error = 'snapshot: not a version 1 snapshot';
+    return null;
+  }
+  stats.error = null; // a socket error before it no longer applies
+  socket = (await $.clock.now()) >= socketRetryAt ? s.socket : null;
+  return s;
 }
 
 async function refresh($: Engine): Promise<void> {
@@ -176,14 +186,16 @@ async function refresh($: Engine): Promise<void> {
     }
     lastFp = fp;
     await $.state.set(SNAP, s);
+  } catch (err) {
+    stats.error = `refresh: ${err instanceof Error ? err.message : String(err)}`;
   } finally {
-    // The footer's numbers redraw only the pane, and only while it is open.
-    if (isPaneOpen) await $.state.set(SOURCE, { ...stats });
     busy = false;
-    if (again) {
-      again = false;
-      void refresh($);
-    }
+  }
+  // The footer's numbers redraw only the pane, and only while it is open.
+  if (isPaneOpen) await $.state.set(SOURCE, { ...stats }).catch(() => undefined);
+  if (again) {
+    again = false;
+    void refresh($);
   }
 }
 
@@ -191,6 +203,8 @@ async function refresh($: Engine): Promise<void> {
 const isShown = (): boolean => isPaneOpen || hasBand;
 
 async function tick($: Engine): Promise<void> {
+  // A pane the engine dropped (its drawing threw) closes without a ui.close for this module.
+  if (isPaneOpen) isPaneOpen = (await $.ui.panes()).some((p) => p.id === PANE);
   if (!isShown()) return;
   const due = (socket ? DUE_MS.socket : DUE_MS.spawn)[isPaneOpen ? 'open' : 'closed'];
   if ((await $.clock.now()) - lastAt >= due) await refresh($);
@@ -419,7 +433,11 @@ function expandAll(
 function threadBody($: Engine, el: El, s: Snapshot, t: Thread, now: number): RenderElement {
   const { Box, Text, Button, Input } = el;
   const lastIn = [...t.messages].reverse().find((m) => m.dir === 'in');
-  const canReply = (t.kind === 'direct' || t.kind === 'service') && lastIn !== undefined;
+  // `unverified:<user>`: mail whose `from` is no address of its verified user (snapshot.ts). It
+  // has no address to answer, so neither a reply nor a draft is offered.
+  const isUnverified = t.with.startsWith('unverified:');
+  const canReply =
+    (t.kind === 'direct' || t.kind === 'service') && lastIn !== undefined && !isUnverified;
   return (
     <Box flexDirection="column" width="100%" paddingTop={1} rowGap={1}>
       <Box flexDirection="column" width="100%">
@@ -444,6 +462,11 @@ function threadBody($: Engine, el: El, s: Snapshot, t: Thread, now: number): Ren
           Untrusted text from another session. Whole message: mbox show {lastIn.id}
         </Text>
       )}
+      {isUnverified && (
+        <Text color={C.awaiting} size="caption">
+          The sender's address does not belong to its verified user: no reply from here.
+        </Text>
+      )}
       {canReply &&
         Input &&
         wide(
@@ -463,7 +486,7 @@ function threadBody($: Engine, el: El, s: Snapshot, t: Thread, now: number): Ren
             }}
           />,
         )}
-      {lastIn && (
+      {lastIn && !isUnverified && (
         <Box flexDirection="row" paddingBottom={1}>
           <Button
             key={`draft:${t.with}`}
@@ -640,9 +663,11 @@ function conversationTile(
       ? `Ask in ${t.with.replace(/^area:/, '')}`
       : t.kind === 'broadcast'
         ? 'Broadcast to everyone'
-        : peer
-          ? headline(peer)
-          : shortAddr(t.with, s.self);
+        : t.with.startsWith('unverified:')
+          ? `Unverified sender (user ${t.with.slice('unverified:'.length)})`
+          : peer
+            ? headline(peer)
+            : shortAddr(t.with, s.self);
   const toggle = (): Promise<void> => toggleOpen($, id);
   return tile(
     el,
@@ -894,9 +919,11 @@ export const register: Register = (on, options) => {
     return next(e);
   });
 
-  // The command hook has just published the title again (a start, resume or compaction).
+  // The command hook publishes the session's title at a start, resume or compaction: that title
+  // is in presence now, whatever the toggle says.
   on('classic.SessionStart', async ($, e, next) => {
-    publishedTitle = undefined;
+    const t = [...clean(e.session_title ?? '')].slice(0, 120).join('');
+    publishedTitle = t || undefined;
     return next(e);
   });
 

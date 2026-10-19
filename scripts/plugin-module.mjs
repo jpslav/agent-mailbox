@@ -25,7 +25,8 @@ function minVersion() {
   return m[1];
 }
 
-const parts = (v) => v.split('.').map(Number);
+// As isAtLeast in hooks/model.ts: `2.1.300-dev` counts as 2.1.300.
+const parts = (v) => (/^(\d+)\.(\d+)\.(\d+)/.exec(v) ?? [0, 0, 0, 0]).slice(1).map(Number);
 function atLeast(v, min) {
   const [a, b] = [parts(v), parts(min)];
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
@@ -61,7 +62,7 @@ function test() {
     console.error(`test:plugin: cannot run ${claude} (set CLAUDE_BIN to a Claude Code binary)`);
     return 1;
   }
-  const version = /(\d+\.\d+\.\d+)/.exec(v.stdout)?.[1] ?? '0.0.0';
+  const version = /(\d+\.\d+\.\d+\S*)/.exec(v.stdout)?.[1] ?? '0.0.0';
   const min = minVersion();
   if (!atLeast(version, min)) {
     console.error(

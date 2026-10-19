@@ -28,18 +28,13 @@ export type Peer = Self & {
   relation: Relation;
 };
 
+/**
+ * Received mail as the panel keeps it: only what it counts. The bodies stay out of the state
+ * (the conversations carry first lines; `mbox show <id>` prints a message whole).
+ */
 export type Mail = {
   id: string;
-  from: string;
-  to: string;
   kind: Kind;
-  area: string | null;
-  subject: string | null;
-  body: string;
-  isTruncated: boolean;
-  verifiedUser: string;
-  isMismatch: boolean;
-  inReplyTo: string | null;
   /** Epoch ms. */
   time: number;
 };
