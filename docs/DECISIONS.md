@@ -524,7 +524,9 @@ context, decision, why.
   server. The title is what a person recognises a session by; status says what it is doing now.
 - **Limits:** the sent log records what this session sent through `mbox`, on this machine only;
   a session moved to another machine starts a new log, and a lost state directory loses it.
-  Threads are a display aid: `inReplyTo` and `from` are self-asserted, so a forged reply can
-  appear in another thread. The title is published to every mailbox user like the rest of
+  Threads are a display aid: `inReplyTo` is self-asserted, so a forged reply can appear in
+  another thread; received mail whose `from` is not an address of its verified user is kept in an
+  `unverified:<user>` thread rather than the thread it claims. A snapshot lists at most the newest
+  200 received messages, over at most 30 days. The title is published to every mailbox user like the rest of
   presence; whether the hook should publish the agent's session title without being asked is the
   repo owner's call (it does in 0.8.0).

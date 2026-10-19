@@ -55,7 +55,12 @@ import {
   statusLine,
 } from './core/session-meta.js';
 import { appendSentLog, readSentLog, sentRecord } from './core/sentlog.js';
-import { SNAPSHOT_SINCE, buildSnapshot, snapshotAddresses } from './core/snapshot.js';
+import {
+  SNAPSHOT_SINCE,
+  SNAPSHOT_SINCE_MAX_MS,
+  buildSnapshot,
+  snapshotAddresses,
+} from './core/snapshot.js';
 import {
   ForeignAddressError,
   NoSessionError,
@@ -1284,12 +1289,15 @@ program
       if (!opts.json) throw new UsageError('pass --json (the only output format)');
       if (!/^\d+[smhd]$/.test(opts.since))
         throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
-      const { cfg, transport, sid, st } = await context();
       const lookback = sinceMs(opts.since);
+      if (lookback > SNAPSHOT_SINCE_MAX_MS)
+        throw new UsageError(`--since is at most 30d (got "${opts.since}")`);
+      const { cfg, transport, sid, st } = await context();
       const [peers, claims, deliveries] = await Promise.all([
         transport.presence.list(),
         transport.services.list().catch((): ServiceClaim[] => []),
-        transport.poll(snapshotAddresses(st), { lookbackMs: lookback }),
+        // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
+        transport.poll(snapshotAddresses(st), { lookbackMs: lookback, max: Infinity }),
       ]);
       const { repo, branch } = gitInfo(st.cwd);
       const snap = buildSnapshot({

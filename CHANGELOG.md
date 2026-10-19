@@ -19,7 +19,7 @@ treat them as approximate.
   (version 1) with the session itself, the live peers (with their relation to it: parent, child,
   sibling, same repo, correspondent, the same user, or other), the mail `mbox inbox` reads over
   the lookback, the messages the session sent, both paired into threads, and the help areas live
-  sessions offer. Made for a side panel that used to spawn `whoami`, `peers` and `inbox` every
+  sessions offer (at most the newest 200 received messages; `--since` up to 30d). Made for a side panel that used to spawn `whoami`, `peers` and `inbox` every
   minute. Bodies are cut to 2000 characters and passed on as untrusted text.
 - A per-session sent log: `mbox send` and `mbox ask` append what they sent to
   `sessions/<id>.sent.jsonl` in the state directory (mode 0600, the newest 500 kept). Sent mail

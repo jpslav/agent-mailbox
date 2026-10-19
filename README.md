@@ -642,8 +642,9 @@ untrusted as any other. Readers keep only well-formed values.
 server connection, everything a side panel draws about the session as one JSON object: the session
 itself, the live peers (each with its relation to this session: parent, child, sibling, same
 repo, correspondent, the same user, or other), the mail `mbox inbox` would print over the
-lookback, the messages the session sent, both paired into threads by counterpart (replies, by
-`--re`, join the thread of what they answer), and the help areas live sessions offer. Bodies are
+lookback (the newest 200; `--since` at most 30d), the messages the session sent, both paired into threads by counterpart (replies, by
+`--re`, join the thread of what they answer; mail whose `from` is not an address of its verified
+sender's user goes to a thread `unverified:<user>`), and the help areas live sessions offer. Bodies are
 cut to 2000 characters and passed on as they are: untrusted text, to be drawn as plain text.
 Sent mail cannot be read back from the server (it is stored for its recipients), so `mbox send`
 and `mbox ask` append each message they send to the session's sent log,

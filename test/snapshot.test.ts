@@ -15,6 +15,7 @@ import {
 } from '../src/core/sentlog.js';
 import {
   SNAPSHOT_BODY_MAX,
+  SNAPSHOT_MAIL_MAX,
   buildSnapshot,
   buildThreads,
   firstLine,
@@ -256,6 +257,58 @@ describe('snapshot', () => {
     assert.equal(mail.threads[3]?.messages[0]?.firstLine, 'hello');
     assert.equal(mail.threads[0]?.lastAt, mail.mail.at(-1)?.time);
     assert.equal(mail.sent.length, 4);
+  });
+
+  it('a forged or odd from never joins another thread; a reply joins its parent whatever the clocks say', () => {
+    const snap = buildSnapshot(
+      input({
+        deliveries: [
+          // mallory claims to be bob, and another claims to be the broadcast
+          delivery(ME, 'mallory', env({ id: 'f1', from: 'bob.desk.x', body: 'forged' }), 30),
+          delivery(ME, 'mallory', env({ id: 'f2', from: 'all', body: 'not a broadcast' }), 29),
+          delivery(ME, 'bob', env({ id: 'b1', from: 'bob.desk.x', body: 'real' }), 28),
+          // the reply arrives with a server time before the local time of the ask it answers
+          delivery(
+            ME,
+            'carol',
+            env({ id: 'r1', from: 'carol.h.l', body: 'a', inReplyTo: 'q1' }),
+            20,
+          ),
+          delivery(
+            ME,
+            'bob',
+            env({ id: 'long1', from: 'bob.desk.' + 'y'.repeat(5000), body: 'z' }),
+            1,
+          ),
+        ],
+        sent: [sent('area:lang:ts', 19, { id: 'q1' })],
+      }),
+    );
+    assert.deepEqual(
+      snap.threads.map((t) => [
+        t.with.slice(0, 40),
+        t.kind,
+        t.messages.map((m) => m.id.slice(0, 5)),
+      ]),
+      [
+        ['bob.desk.' + 'y'.repeat(31), 'direct', ['long1']], // cut, still bob's
+        ['area:lang:ts', 'ask', ['r1', 'q1']],
+        ['bob.desk.x', 'direct', ['b1']],
+        ['unverified:mallory', 'direct', ['f1', 'f2']],
+      ],
+    );
+    assert.ok(snap.mail.every((m) => m.id.length <= 256 && m.from.length <= 256));
+    assert.ok(snap.threads.every((t) => t.with.length <= 256));
+  });
+
+  it('lists the newest received messages only, up to the cap', () => {
+    const many = Array.from({ length: SNAPSHOT_MAIL_MAX + 5 }, (_, i) =>
+      delivery(ME, 'bob', env({ id: `n${i}`, from: 'bob.desk.x', body: 'b' }), 600 - i),
+    );
+    const snap = buildSnapshot(input({ deliveries: many }));
+    assert.equal(snap.mail.length, SNAPSHOT_MAIL_MAX);
+    assert.equal(snap.mail.at(-1)?.id, `n${SNAPSHOT_MAIL_MAX + 4}`);
+    assert.equal(snap.mail[0]?.id, 'n5');
   });
 
   it('first lines: the first non-blank line, one line, cut', () => {
