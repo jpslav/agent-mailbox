@@ -19739,6 +19739,23 @@ function readSentLog(sid, env = process.env) {
   }
   return parseLines(text).slice(-SENT_KEEP);
 }
+function endsWithNewline(file) {
+  let fd;
+  try {
+    fd = fs8.openSync(file, "r");
+  } catch {
+    return true;
+  }
+  try {
+    const size = fs8.fstatSync(fd).size;
+    if (size === 0) return true;
+    const last = Buffer.alloc(1);
+    fs8.readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 10;
+  } finally {
+    fs8.closeSync(fd);
+  }
+}
 function appendSentLog(sid, rec, env = process.env, {
   compactBytes = SENT_COMPACT_BYTES,
   keep = SENT_KEEP
@@ -19746,7 +19763,8 @@ function appendSentLog(sid, rec, env = process.env, {
   const file = sentLogPath(sid, env);
   mkdirp(path8.dirname(file));
   withFileLock(`${file}.lock`, () => {
-    fs8.appendFileSync(file, JSON.stringify(rec) + "\n", { mode: 384 });
+    const lead = endsWithNewline(file) ? "" : "\n";
+    fs8.appendFileSync(file, lead + JSON.stringify(rec) + "\n", { mode: 384 });
     if (fs8.statSync(file).size <= compactBytes) return;
     const kept = parseLines(fs8.readFileSync(file, "utf8")).slice(-keep);
     const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -19762,6 +19780,16 @@ var SNAPSHOT_SINCE = "24h";
 var SINCE_RE = /^\d{1,6}[smhd]$/;
 var UNIT_MS = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
 var sinceToMs = (since) => parseInt(since, 10) * UNIT_MS[since.slice(-1)];
+function canonicalSince(since) {
+  const ms = sinceToMs(since);
+  for (const [unit, n] of [
+    ["d", UNIT_MS.d],
+    ["h", UNIT_MS.h],
+    ["m", UNIT_MS.m]
+  ])
+    if (ms > 0 && ms % n === 0) return `${ms / n}${unit}`;
+  return `${ms / UNIT_MS.s}s`;
+}
 var SNAPSHOT_SINCE_MAX_MS = 30 * 864e5;
 var SNAPSHOT_MAIL_MAX = 200;
 var FIELD_MAX = 256;
@@ -19816,7 +19844,9 @@ function buildThreads(mail, sent) {
       subject: m.subject,
       firstLine: firstLine(m.body),
       inReplyTo: m.inReplyTo,
-      base: m.kind === "direct" ? senderKey(m) : m.to
+      // Mail to one of my own service addresses is a conversation with its sender, as direct
+      // mail is: keyed by the service, every caller would share one thread.
+      base: m.kind === "direct" || m.kind === "service" ? senderKey(m) : m.to
     })),
     ...sent.map((s) => ({
       id: s.id,
@@ -20153,11 +20183,12 @@ async function startUiServer(input) {
       error(res, 404, "not found; the endpoint is /v1/snapshot?session=<id>&since=24h");
       return;
     }
-    const since = url.searchParams.get("since") ?? SNAPSHOT_SINCE;
-    if (!SINCE_RE.test(since) || sinceToMs(since) > SNAPSHOT_SINCE_MAX_MS) {
+    const asked = url.searchParams.get("since") ?? SNAPSHOT_SINCE;
+    if (!SINCE_RE.test(asked) || sinceToMs(asked) > SNAPSHOT_SINCE_MAX_MS) {
       error(res, 400, "since must look like 30m, 2h or 1d, and be at most 30d");
       return;
     }
+    const since = canonicalSince(asked);
     let sid;
     try {
       sid = validateSessionId(url.searchParams.get("session") ?? "");

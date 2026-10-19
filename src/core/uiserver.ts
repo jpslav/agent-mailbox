@@ -20,6 +20,7 @@ import net from 'node:net';
 import path from 'node:path';
 import {
   SINCE_RE,
+  canonicalSince,
   SNAPSHOT_SINCE,
   SNAPSHOT_SINCE_MAX_MS,
   gatherSnapshot,
@@ -274,11 +275,13 @@ export async function startUiServer(input: UiServerInput): Promise<UiServer | nu
       error(res, 404, 'not found; the endpoint is /v1/snapshot?session=<id>&since=24h');
       return;
     }
-    const since = url.searchParams.get('since') ?? SNAPSHOT_SINCE;
-    if (!SINCE_RE.test(since) || sinceToMs(since) > SNAPSHOT_SINCE_MAX_MS) {
+    const asked = url.searchParams.get('since') ?? SNAPSHOT_SINCE;
+    if (!SINCE_RE.test(asked) || sinceToMs(asked) > SNAPSHOT_SINCE_MAX_MS) {
       error(res, 400, 'since must look like 30m, 2h or 1d, and be at most 30d');
       return;
     }
+    // Equal lookbacks spelled differently share one cache entry (and one build).
+    const since = canonicalSince(asked);
     let sid: string;
     try {
       sid = validateSessionId(url.searchParams.get('session') ?? '');

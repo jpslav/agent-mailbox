@@ -41,6 +41,20 @@ const UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
 /** The milliseconds in a lookback that matches SINCE_RE. */
 export const sinceToMs = (since: string): number =>
   parseInt(since, 10) * UNIT_MS[since.slice(-1) as keyof typeof UNIT_MS];
+/**
+ * One spelling per lookback, in the largest unit that divides it (`60m` and `3600s` are `1h`), so
+ * equal lookbacks share a cache entry.
+ */
+export function canonicalSince(since: string): string {
+  const ms = sinceToMs(since);
+  for (const [unit, n] of [
+    ['d', UNIT_MS.d],
+    ['h', UNIT_MS.h],
+    ['m', UNIT_MS.m],
+  ] as const)
+    if (ms > 0 && ms % n === 0) return `${ms / n}${unit}`;
+  return `${ms / UNIT_MS.s}s`;
+}
 /** The longest lookback a snapshot accepts. */
 export const SNAPSHOT_SINCE_MAX_MS = 30 * 86400000;
 /** A snapshot lists at most this many received messages: the newest. */
@@ -138,9 +152,9 @@ function senderKey(m: SnapshotMail): string {
 }
 
 /**
- * Pair received and sent mail into one thread per counterpart. Mail to 'all', to an area or to a
- * service address belongs to that address's thread; other received mail to its sender's thread
- * (senderKey), other sent mail to its recipient's. A message that answers (inReplyTo) one in the
+ * Pair received and sent mail into one thread per counterpart. Received mail to 'all' or to an
+ * area belongs to that address's thread; received direct mail, and mail to a service address this
+ * session holds, to its sender's thread (senderKey); sent mail to its recipient's. A message that answers (inReplyTo) one in the
  * snapshot joins that message's thread instead, so the replies to an ask or a broadcast stay with
  * it (whatever the clocks of sender and server say about their order).
  */
@@ -154,7 +168,9 @@ export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): Snapshot
       subject: m.subject,
       firstLine: firstLine(m.body),
       inReplyTo: m.inReplyTo,
-      base: m.kind === 'direct' ? senderKey(m) : m.to,
+      // Mail to one of my own service addresses is a conversation with its sender, as direct
+      // mail is: keyed by the service, every caller would share one thread.
+      base: m.kind === 'direct' || m.kind === 'service' ? senderKey(m) : m.to,
     })),
     ...sent.map((s) => ({
       id: s.id,
