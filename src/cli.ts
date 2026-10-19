@@ -50,17 +50,17 @@ import {
   checkParent,
   checkRole,
   checkTitle,
-  gitInfo,
   statusLength,
   statusLine,
 } from './core/session-meta.js';
-import { appendSentLog, readSentLog, sentRecord } from './core/sentlog.js';
+import { appendSentLog, sentRecord } from './core/sentlog.js';
 import {
+  SINCE_RE,
   SNAPSHOT_SINCE,
   SNAPSHOT_SINCE_MAX_MS,
-  buildSnapshot,
-  snapshotAddresses,
+  gatherSnapshot,
 } from './core/snapshot.js';
+import { probeUiSocket } from './core/uiserver.js';
 import {
   ForeignAddressError,
   NoSessionError,
@@ -579,6 +579,8 @@ program
       const p = readPause();
       if (p.all || p.addresses.length)
         console.log(`paused: ${pauseSummary(p)} (mbox resume to continue)`);
+      const ui = d ? await probeUiSocket() : null;
+      if (ui) console.log(`snapshots: ${ui} (GET /v1/snapshot?session=<id>)`);
       console.log(`log: ${deliverdLogPath()}`);
       process.exit(0);
     }
@@ -1287,34 +1289,27 @@ program
   .action(
     action(async (opts: { json?: boolean; since: string }) => {
       if (!opts.json) throw new UsageError('pass --json (the only output format)');
-      if (!/^\d+[smhd]$/.test(opts.since))
+      if (!SINCE_RE.test(opts.since))
         throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
       const lookback = sinceMs(opts.since);
       if (lookback > SNAPSHOT_SINCE_MAX_MS)
         throw new UsageError(`--since is at most 30d (got "${opts.since}")`);
       const { cfg, transport, sid, st } = await context();
-      const [peers, claims, deliveries] = await Promise.all([
-        transport.presence.list(),
-        transport.services.list().catch((): ServiceClaim[] => []),
-        // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
-        transport.poll(snapshotAddresses(st), { lookbackMs: lookback, max: Infinity }),
+      // The daemon's snapshot socket, when it serves this session: later polls need no process.
+      const registered = listRegistrations().some((r) => r.sid === sid);
+      const [snap, socket] = await Promise.all([
+        gatherSnapshot({
+          transport,
+          user: cfg.user,
+          sid,
+          state: st,
+          since: opts.since,
+          sinceMs: lookback,
+          socket: null,
+        }),
+        registered ? probeUiSocket() : Promise.resolve(null),
       ]);
-      const { repo, branch } = gitInfo(st.cwd);
-      const snap = buildSnapshot({
-        now: Date.now(),
-        since: opts.since,
-        sinceMs: lookback,
-        socket: null,
-        user: cfg.user,
-        sid,
-        state: st,
-        repo,
-        branch,
-        peers,
-        claims,
-        deliveries,
-        sent: readSentLog(sid),
-      });
+      snap.socket = socket;
       process.stdout.write(JSON.stringify(snap) + '\n');
     }),
   );

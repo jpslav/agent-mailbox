@@ -1,17 +1,20 @@
 // `mbox snapshot --json`: everything a side panel draws about one session, as one JSON object
-// (the Snapshot contract in types.ts, version 1). This module only assembles it from inputs the
-// caller gathered (the session's state, presence, service claims, received mail and the sent log),
-// so it is pure and the delivery daemon can build the same object from what it already holds.
+// (the Snapshot contract in types.ts, version 1). `buildSnapshot` assembles it from inputs the
+// caller gathered (the session's state, presence, service claims, received mail and the sent log)
+// and is pure; `gatherSnapshot` gathers them, for `mbox snapshot` and for the delivery daemon's
+// snapshot socket (uiserver.ts), which passes the presence it already holds.
 //
 // Every free-text field (bodies, subjects, titles, statuses) is untrusted and passed on as is (only
 // cut to length): whoever draws it must draw it as plain text.
 import { BROADCAST, parseAddr } from './addr.js';
 import { areaAddress, areaOf, checkOffers } from './areas.js';
 import { oneLine, parseDelivery } from './envelope.js';
-import { cutSubject, cutText, kindOf } from './sentlog.js';
+import { cutSubject, cutText, kindOf, readSentLog } from './sentlog.js';
+import { gitInfo } from './session-meta.js';
 import { parseService } from './services.js';
 import type {
   Delivery,
+  Env,
   PeerRelation,
   PresenceEntry,
   SentRecord,
@@ -23,6 +26,7 @@ import type {
   SnapshotPeer,
   SnapshotThread,
   SnapshotThreadMessage,
+  Transport,
 } from './types.js';
 
 /** A received body is cut to this many characters. */
@@ -31,6 +35,25 @@ export const SNAPSHOT_BODY_MAX = 2000;
 export const FIRST_LINE_MAX = 200;
 /** The default lookback. */
 export const SNAPSHOT_SINCE = '24h';
+/** What a lookback looks like: a number and a unit (30m, 2h, 1d). */
+export const SINCE_RE = /^\d{1,6}[smhd]$/;
+const UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+/** The milliseconds in a lookback that matches SINCE_RE. */
+export const sinceToMs = (since: string): number =>
+  parseInt(since, 10) * UNIT_MS[since.slice(-1) as keyof typeof UNIT_MS];
+/**
+ * One spelling per lookback, in hours where it is whole hours (`60m` and `3600s` are `1h`, `1d`
+ * is `24h`), else minutes, else seconds, so equal lookbacks share a cache entry.
+ */
+export function canonicalSince(since: string): string {
+  const ms = sinceToMs(since);
+  for (const [unit, n] of [
+    ['h', UNIT_MS.h],
+    ['m', UNIT_MS.m],
+  ] as const)
+    if (ms > 0 && ms % n === 0) return `${ms / n}${unit}`;
+  return `${ms / UNIT_MS.s}s`;
+}
 /** The longest lookback a snapshot accepts. */
 export const SNAPSHOT_SINCE_MAX_MS = 30 * 86400000;
 /** A snapshot lists at most this many received messages: the newest. */
@@ -324,4 +347,44 @@ export function snapshotAddresses(st: SessionState): string[] {
     BROADCAST,
     ...(st.offers ?? []).map(areaAddress),
   ];
+}
+
+export interface GatherInput {
+  transport: Pick<Transport, 'presence' | 'services' | 'poll'>;
+  user: string;
+  sid: string;
+  state: SessionState;
+  since: string;
+  sinceMs: number;
+  socket: string | null;
+  /** Presence and claims already at hand (else read from the transport). */
+  peers?: PresenceEntry[];
+  claims?: ServiceClaim[];
+  env?: Env;
+}
+
+/** Read what a snapshot needs (the server, the session's git checkout, its sent log) and build it. */
+export async function gatherSnapshot(i: GatherInput): Promise<Snapshot> {
+  const [peers, claims, deliveries] = await Promise.all([
+    i.peers ?? i.transport.presence.list(),
+    i.claims ?? i.transport.services.list().catch((): ServiceClaim[] => []),
+    // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
+    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs, max: Infinity }),
+  ]);
+  const { repo, branch } = gitInfo(i.state.cwd);
+  return buildSnapshot({
+    now: Date.now(),
+    since: i.since,
+    sinceMs: i.sinceMs,
+    socket: i.socket,
+    user: i.user,
+    sid: i.sid,
+    state: i.state,
+    repo,
+    branch,
+    peers,
+    claims,
+    deliveries,
+    sent: readSentLog(i.sid, i.env),
+  });
 }

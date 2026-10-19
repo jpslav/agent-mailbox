@@ -969,8 +969,8 @@ var require_command = __commonJS({
   "node_modules/commander/lib/command.js"(exports) {
     var EventEmitter = __require("node:events").EventEmitter;
     var childProcess = __require("node:child_process");
-    var path10 = __require("node:path");
-    var fs11 = __require("node:fs");
+    var path11 = __require("node:path");
+    var fs12 = __require("node:fs");
     var process2 = __require("node:process");
     var { Argument: Argument2, humanReadableArgName } = require_argument();
     var { CommanderError: CommanderError2 } = require_error();
@@ -1902,11 +1902,11 @@ Expecting one of '${allowedValues.join("', '")}'`);
         let launchWithNode = false;
         const sourceExt = [".js", ".ts", ".tsx", ".mjs", ".cjs"];
         function findFile(baseDir, baseName) {
-          const localBin = path10.resolve(baseDir, baseName);
-          if (fs11.existsSync(localBin)) return localBin;
-          if (sourceExt.includes(path10.extname(baseName))) return void 0;
+          const localBin = path11.resolve(baseDir, baseName);
+          if (fs12.existsSync(localBin)) return localBin;
+          if (sourceExt.includes(path11.extname(baseName))) return void 0;
           const foundExt = sourceExt.find(
-            (ext) => fs11.existsSync(`${localBin}${ext}`)
+            (ext) => fs12.existsSync(`${localBin}${ext}`)
           );
           if (foundExt) return `${localBin}${foundExt}`;
           return void 0;
@@ -1918,21 +1918,21 @@ Expecting one of '${allowedValues.join("', '")}'`);
         if (this._scriptPath) {
           let resolvedScriptPath;
           try {
-            resolvedScriptPath = fs11.realpathSync(this._scriptPath);
+            resolvedScriptPath = fs12.realpathSync(this._scriptPath);
           } catch (err) {
             resolvedScriptPath = this._scriptPath;
           }
-          executableDir = path10.resolve(
-            path10.dirname(resolvedScriptPath),
+          executableDir = path11.resolve(
+            path11.dirname(resolvedScriptPath),
             executableDir
           );
         }
         if (executableDir) {
           let localFile = findFile(executableDir, executableFile);
           if (!localFile && !subcommand._executableFile && this._scriptPath) {
-            const legacyName = path10.basename(
+            const legacyName = path11.basename(
               this._scriptPath,
-              path10.extname(this._scriptPath)
+              path11.extname(this._scriptPath)
             );
             if (legacyName !== this._name) {
               localFile = findFile(
@@ -1943,7 +1943,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
           }
           executableFile = localFile || executableFile;
         }
-        launchWithNode = sourceExt.includes(path10.extname(executableFile));
+        launchWithNode = sourceExt.includes(path11.extname(executableFile));
         let proc;
         if (process2.platform !== "win32") {
           if (launchWithNode) {
@@ -2783,7 +2783,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
        * @return {Command}
        */
       nameFromFilename(filename) {
-        this._name = path10.basename(filename, path10.extname(filename));
+        this._name = path11.basename(filename, path11.extname(filename));
         return this;
       }
       /**
@@ -2797,9 +2797,9 @@ Expecting one of '${allowedValues.join("', '")}'`);
        * @param {string} [path]
        * @return {(string|null|Command)}
        */
-      executableDir(path11) {
-        if (path11 === void 0) return this._executableDir;
-        this._executableDir = path11;
+      executableDir(path12) {
+        if (path12 === void 0) return this._executableDir;
+        this._executableDir = path12;
         return this;
       }
       /**
@@ -8680,22 +8680,22 @@ var require_nacl_fast = __commonJS({
         randombytes = fn;
       };
       (function() {
-        var crypto4 = typeof self !== "undefined" ? self.crypto || self.msCrypto : null;
-        if (crypto4 && crypto4.getRandomValues) {
+        var crypto5 = typeof self !== "undefined" ? self.crypto || self.msCrypto : null;
+        if (crypto5 && crypto5.getRandomValues) {
           var QUOTA = 65536;
           nacl.setPRNG(function(x, n) {
             var i, v = new Uint8Array(n);
             for (i = 0; i < n; i += QUOTA) {
-              crypto4.getRandomValues(v.subarray(i, i + Math.min(n - i, QUOTA)));
+              crypto5.getRandomValues(v.subarray(i, i + Math.min(n - i, QUOTA)));
             }
             for (i = 0; i < n; i++) x[i] = v[i];
             cleanup(v);
           });
         } else if (typeof __require !== "undefined") {
-          crypto4 = __require("crypto");
-          if (crypto4 && crypto4.randomBytes) {
+          crypto5 = __require("crypto");
+          if (crypto5 && crypto5.randomBytes) {
             nacl.setPRNG(function(x, n) {
-              var i, v = crypto4.randomBytes(n);
+              var i, v = crypto5.randomBytes(n);
               for (i = 0; i < n; i++) x[i] = v[i];
               cleanup(v);
             });
@@ -11780,7 +11780,7 @@ var require_ws_transport = __commonJS({
       let protocol;
       let port;
       const host = url.hostname;
-      const path10 = url.pathname;
+      const path11 = url.pathname;
       const search = url.search || "";
       switch (srcProto) {
         case "http:":
@@ -11800,7 +11800,7 @@ var require_ws_transport = __commonJS({
           protocol = encrypted === true ? "wss:" : "ws:";
           break;
       }
-      return `${protocol}//${host}:${port}${path10}${search}`;
+      return `${protocol}//${host}:${port}${path11}${search}`;
     }
     function wsconnect(opts = {}) {
       (0, transport_1.setTransportFactory)({
@@ -13645,11 +13645,11 @@ var require_jsmconsumer_api = __commonJS({
           consumerName2 = cfg.name ?? cfg.durable_name ?? "";
         }
         if (consumerName2 !== "") {
-          let fs11 = cfg.filter_subject ?? void 0;
-          if (fs11 === ">") {
-            fs11 = void 0;
+          let fs12 = cfg.filter_subject ?? void 0;
+          if (fs12 === ">") {
+            fs12 = void 0;
           }
-          subj = fs11 !== void 0 ? `${this.prefix}.CONSUMER.CREATE.${stream}.${consumerName2}.${fs11}` : `${this.prefix}.CONSUMER.CREATE.${stream}.${consumerName2}`;
+          subj = fs12 !== void 0 ? `${this.prefix}.CONSUMER.CREATE.${stream}.${consumerName2}.${fs12}` : `${this.prefix}.CONSUMER.CREATE.${stream}.${consumerName2}`;
         } else {
           subj = cfg.durable_name ? `${this.prefix}.CONSUMER.DURABLE.CREATE.${stream}.${cfg.durable_name}` : `${this.prefix}.CONSUMER.CREATE.${stream}`;
         }
@@ -17709,8 +17709,8 @@ var require_mod6 = __commonJS({
 });
 
 // src/cli.ts
-import fs10 from "node:fs";
-import path9 from "node:path";
+import fs11 from "node:fs";
+import path10 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/commander/esm.mjs
@@ -18959,7 +18959,7 @@ function checkEvent(payload, user, time) {
 }
 
 // src/core/deliverd.ts
-import fs8 from "node:fs";
+import fs10 from "node:fs";
 
 // src/core/pause.ts
 import fs5 from "node:fs";
@@ -19109,13 +19109,13 @@ function peerTree(peers) {
     walk(p, "", "", note);
   }
   for (let p = live.find((x) => !placed.has(x)); p; p = live.find((x) => !placed.has(x))) {
-    const path10 = [];
+    const path11 = [];
     let q = p;
-    while (q && !path10.includes(q)) {
-      path10.push(q);
+    while (q && !path11.includes(q)) {
+      path11.push(q);
       q = parentOf(q);
     }
-    const cycle = q ? path10.slice(path10.indexOf(q)) : path10;
+    const cycle = q ? path11.slice(path11.indexOf(q)) : path11;
     const first = cycle.reduce((a, b) => b.address < a.address ? b : a);
     walk(first, "", "", "parent cycle");
   }
@@ -19423,7 +19423,7 @@ import fs7 from "node:fs";
 import path7 from "node:path";
 
 // src/core/version.ts
-var BUILD_VERSION = true ? "0.8.0" : "0.0.0-dev";
+var BUILD_VERSION = true ? "0.9.0" : "0.0.0-dev";
 function ownVersion(env = process.env) {
   return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
 }
@@ -19654,6 +19654,640 @@ function ensureDeliverd(argv, env = process.env, { dropEnv = [], version, user =
   }
 }
 
+// src/core/uiserver.ts
+import crypto3 from "node:crypto";
+import fs9 from "node:fs";
+import http from "node:http";
+import net2 from "node:net";
+import path9 from "node:path";
+
+// src/core/sentlog.ts
+import fs8 from "node:fs";
+import path8 from "node:path";
+var SENT_KEEP = 500;
+var SENT_BODY_MAX = 2e3;
+var SUBJECT_MAX = 300;
+var SENT_COMPACT_BYTES = 2 * 1024 * 1024;
+var KINDS = ["direct", "broadcast", "ask", "service"];
+function kindOf(to) {
+  if (to === "all") return "broadcast";
+  if (areaOf(to) !== null) return "ask";
+  if (isService(to)) return "service";
+  return "direct";
+}
+function cutText(s, max) {
+  if (s.length <= max) return { text: s, isTruncated: false };
+  let text = s.slice(0, max);
+  if (/[\ud800-\udbff]$/.test(text)) text = text.slice(0, -1);
+  return { text, isTruncated: true };
+}
+var cutSubject = (s) => s === null ? null : cutText(s, SUBJECT_MAX).text;
+function sentRecord(m) {
+  const { text, isTruncated } = cutText(m.body, SENT_BODY_MAX);
+  return {
+    id: m.id,
+    to: m.to,
+    kind: kindOf(m.to),
+    area: areaOf(m.to),
+    subject: cutSubject(m.subject),
+    body: text,
+    isTruncated,
+    inReplyTo: m.inReplyTo,
+    time: m.time ?? Date.now()
+  };
+}
+function checkSentRecord(v) {
+  if (!v || typeof v !== "object") return null;
+  const o = v;
+  const str = (x) => typeof x === "string" ? x : null;
+  if (typeof o.id !== "string" || !o.id || typeof o.to !== "string" || !o.to) return null;
+  if (typeof o.body !== "string" || typeof o.time !== "number" || !Number.isFinite(o.time))
+    return null;
+  const kind = KINDS.find((k) => k === o.kind) ?? kindOf(o.to);
+  const { text, isTruncated } = cutText(o.body, SENT_BODY_MAX);
+  const field = (x) => cutText(x, 256).text;
+  return {
+    id: field(o.id),
+    to: field(o.to),
+    kind,
+    area: areaOf(o.to),
+    subject: cutSubject(str(o.subject)),
+    body: text,
+    isTruncated: isTruncated || o.isTruncated === true,
+    inReplyTo: str(o.inReplyTo) === null ? null : field(o.inReplyTo),
+    time: o.time
+  };
+}
+function parseLines(text) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const r = checkSentRecord(JSON.parse(line));
+      if (r) out.push(r);
+    } catch {
+    }
+  }
+  return out;
+}
+function readSentLog(sid, env = process.env) {
+  let text;
+  try {
+    text = fs8.readFileSync(sentLogPath(sid, env), "utf8");
+  } catch {
+    return [];
+  }
+  return parseLines(text).slice(-SENT_KEEP);
+}
+function endsWithNewline(file) {
+  let fd;
+  try {
+    fd = fs8.openSync(file, "r");
+  } catch {
+    return true;
+  }
+  try {
+    const size = fs8.fstatSync(fd).size;
+    if (size === 0) return true;
+    const last = Buffer.alloc(1);
+    fs8.readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 10;
+  } finally {
+    fs8.closeSync(fd);
+  }
+}
+function appendSentLog(sid, rec, env = process.env, {
+  compactBytes = SENT_COMPACT_BYTES,
+  keep = SENT_KEEP
+} = {}) {
+  const file = sentLogPath(sid, env);
+  mkdirp(path8.dirname(file));
+  withFileLock(`${file}.lock`, () => {
+    const lead = endsWithNewline(file) ? "" : "\n";
+    fs8.appendFileSync(file, lead + JSON.stringify(rec) + "\n", { mode: 384 });
+    if (fs8.statSync(file).size <= compactBytes) return;
+    const kept = parseLines(fs8.readFileSync(file, "utf8")).slice(-keep);
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs8.writeFileSync(tmp, kept.map((r) => JSON.stringify(r) + "\n").join(""), { mode: 384 });
+    fs8.renameSync(tmp, file);
+  });
+}
+
+// src/core/snapshot.ts
+var SNAPSHOT_BODY_MAX = 2e3;
+var FIRST_LINE_MAX = 200;
+var SNAPSHOT_SINCE = "24h";
+var SINCE_RE = /^\d{1,6}[smhd]$/;
+var UNIT_MS = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
+var sinceToMs = (since) => parseInt(since, 10) * UNIT_MS[since.slice(-1)];
+function canonicalSince(since) {
+  const ms = sinceToMs(since);
+  for (const [unit, n] of [
+    ["h", UNIT_MS.h],
+    ["m", UNIT_MS.m]
+  ])
+    if (ms > 0 && ms % n === 0) return `${ms / n}${unit}`;
+  return `${ms / UNIT_MS.s}s`;
+}
+var SNAPSHOT_SINCE_MAX_MS = 30 * 864e5;
+var SNAPSHOT_MAIL_MAX = 200;
+var FIELD_MAX = 256;
+var cutField = (s) => cutText(s, FIELD_MAX).text;
+var cutNullable = (s) => s === null ? null : cutField(s);
+function firstLine(body) {
+  const line = body.split(/\r\n?|\n/).map((l) => l.trim()).find((l) => l) ?? "";
+  return oneLine(line, FIRST_LINE_MAX);
+}
+function snapshotMail(input) {
+  const { state: st, user } = input;
+  const names = [st.address, ...st.aliases];
+  const cutoff = input.now - input.sinceMs;
+  const out = [];
+  for (const d of input.deliveries) {
+    const m = parseDelivery(d);
+    const kind = kindOf(d.to);
+    const shared = kind === "broadcast" || kind === "ask";
+    if (shared && m.sender === user && names.includes(m.from)) continue;
+    const time = m.time * 1e3;
+    if (time < cutoff) continue;
+    const { text, isTruncated } = cutText(m.body, SNAPSHOT_BODY_MAX);
+    const claimed = m.raw ? null : m.from.split(".")[0] ?? null;
+    out.push({
+      id: cutField(m.id),
+      from: cutField(m.from),
+      to: cutField(d.to),
+      kind,
+      area: areaOf(d.to),
+      subject: cutSubject(m.subject),
+      body: text,
+      isTruncated,
+      verifiedUser: m.sender,
+      isMismatch: !!m.sender && claimed !== null && claimed !== m.sender,
+      inReplyTo: cutNullable(m.inReplyTo),
+      sentAt: cutNullable(m.sentAt),
+      time
+    });
+  }
+  return out.sort((a, b) => a.time - b.time).slice(-SNAPSHOT_MAIL_MAX);
+}
+function senderKey(m) {
+  const addr = parseAddr(m.from);
+  return addr && m.verifiedUser && addr.user === m.verifiedUser ? m.from : `unverified:${m.verifiedUser ?? "?"}`;
+}
+function buildThreads(mail, sent) {
+  const items = [
+    ...mail.map((m) => ({
+      id: m.id,
+      dir: "in",
+      time: m.time,
+      subject: m.subject,
+      firstLine: firstLine(m.body),
+      inReplyTo: m.inReplyTo,
+      // Mail to one of my own service addresses is a conversation with its sender, as direct
+      // mail is: keyed by the service, every caller would share one thread.
+      base: m.kind === "direct" || m.kind === "service" ? senderKey(m) : m.to
+    })),
+    ...sent.map((s) => ({
+      id: s.id,
+      dir: "out",
+      time: s.time,
+      subject: s.subject,
+      firstLine: firstLine(s.body),
+      inReplyTo: s.inReplyTo,
+      base: s.to
+    }))
+  ].sort((a, b) => a.time - b.time || (a.dir === b.dir ? 0 : a.dir === "out" ? -1 : 1));
+  const byId = /* @__PURE__ */ new Map();
+  for (const it of items) if (!byId.has(it.id)) byId.set(it.id, it);
+  const keyOf = (it, seen = /* @__PURE__ */ new Set()) => {
+    seen.add(it);
+    const parent = it.inReplyTo ? byId.get(it.inReplyTo) : void 0;
+    return parent && !seen.has(parent) ? keyOf(parent, seen) : it.base;
+  };
+  const threads = /* @__PURE__ */ new Map();
+  for (const it of items) {
+    const key = keyOf(it);
+    const list = threads.get(key);
+    if (list) list.push(it);
+    else threads.set(key, [it]);
+  }
+  const out = [];
+  for (const [key, list] of threads) {
+    const last = list[list.length - 1];
+    out.push({
+      with: key,
+      kind: key.startsWith("unverified:") ? "direct" : kindOf(key),
+      lastAt: last.time,
+      count: list.length,
+      isAwaitingMe: last.dir === "in",
+      messages: list.map((m) => ({
+        id: m.id,
+        dir: m.dir,
+        time: m.time,
+        subject: m.subject,
+        firstLine: m.firstLine,
+        inReplyTo: m.inReplyTo
+      }))
+    });
+  }
+  return out.sort((a, b) => b.lastAt - a.lastAt);
+}
+function servicesOf(p, claims) {
+  return claims.filter((c) => c.session === p.session && parseService(c.service)?.user === p.user).map((c) => c.service).sort();
+}
+function peerRelations(self2, peers, threads, claims) {
+  const st = self2.state;
+  const selfKey = `${self2.user}
+${self2.sid}`;
+  const owner = /* @__PURE__ */ new Map();
+  for (const n of [st.address, ...st.aliases]) owner.set(n, selfKey);
+  for (const p of peers)
+    for (const n of [p.address, ...p.aliases])
+      if (!owner.has(n)) owner.set(n, `${p.user}
+${p.session}`);
+  const canon = (name) => name ? owner.get(name) ?? name : null;
+  const myParent = canon(st.parent);
+  const counterparts = new Set(threads.map((t) => t.with));
+  const out = /* @__PURE__ */ new Map();
+  for (const p of peers) {
+    const key = `${p.user}
+${p.session}`;
+    const theirParent = canon(p.parent);
+    const names = [p.address, ...p.aliases, ...servicesOf(p, claims)];
+    let rel;
+    if (myParent && myParent === key) rel = "parent";
+    else if (theirParent === selfKey) rel = "child";
+    else if (myParent && theirParent === myParent) rel = "sibling";
+    else if (self2.repo && p.repo === self2.repo) rel = "same-repo";
+    else if (names.some((n) => counterparts.has(n))) rel = "correspondent";
+    else if (p.user === self2.user) rel = "mine";
+    else rel = "other";
+    out.set(p, rel);
+  }
+  return out;
+}
+function snapshotAreas(mine, peers) {
+  const count = /* @__PURE__ */ new Map();
+  for (const a of mine) count.set(a, 1);
+  for (const p of peers) for (const a of p.offers) count.set(a, (count.get(a) ?? 0) + 1);
+  return [...count.entries()].map(([area, offeredBy]) => ({ area, offeredBy, isMine: mine.includes(area) })).sort((a, b) => a.area < b.area ? -1 : a.area > b.area ? 1 : 0);
+}
+function buildSnapshot(input) {
+  const { state: st, sid, user, sinceMs: sinceMs2, now } = input;
+  const cutoff = now - sinceMs2;
+  const others = input.peers.filter(
+    (p) => p.live && !(p.user === user && p.session === sid) && p.address !== st.address
+  );
+  const mail = snapshotMail(input);
+  const sent = input.sent.filter((s) => s.time >= cutoff).sort((a, b) => a.time - b.time);
+  const threads = buildThreads(mail, sent);
+  const offers = checkOffers(st.offers);
+  const relations = peerRelations(
+    { sid, user, state: st, repo: input.repo },
+    others,
+    threads,
+    input.claims
+  );
+  const peers = [...others].sort((a, b) => b.lastSeen - a.lastSeen).map((p) => ({
+    address: p.address,
+    aliases: p.aliases,
+    user: p.user,
+    host: p.host,
+    agent: p.agent,
+    title: p.title ?? null,
+    status: p.status,
+    role: p.role,
+    parent: p.parent,
+    repo: p.repo,
+    branch: p.branch,
+    offers: p.offers,
+    services: servicesOf(p, input.claims),
+    lastSeen: p.lastSeen,
+    relation: relations.get(p) ?? "other"
+  }));
+  return {
+    v: 1,
+    at: now,
+    since: input.since,
+    socket: input.socket,
+    self: {
+      address: st.address,
+      aliases: st.aliases,
+      user,
+      host: parseAddr(st.address)?.host ?? null,
+      title: st.title ?? null,
+      status: st.status ?? null,
+      role: st.role ?? null,
+      parent: st.parent ?? null,
+      offers,
+      services: st.services ?? [],
+      repo: input.repo,
+      branch: input.branch
+    },
+    peers,
+    mail,
+    sent,
+    threads,
+    areas: snapshotAreas(offers, others)
+  };
+}
+function snapshotAddresses(st) {
+  return [
+    st.address,
+    ...st.aliases,
+    ...st.services ?? [],
+    BROADCAST,
+    ...(st.offers ?? []).map(areaAddress)
+  ];
+}
+async function gatherSnapshot(i) {
+  const [peers, claims, deliveries] = await Promise.all([
+    i.peers ?? i.transport.presence.list(),
+    i.claims ?? i.transport.services.list().catch(() => []),
+    // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
+    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs, max: Infinity })
+  ]);
+  const { repo, branch } = gitInfo(i.state.cwd);
+  return buildSnapshot({
+    now: Date.now(),
+    since: i.since,
+    sinceMs: i.sinceMs,
+    socket: i.socket,
+    user: i.user,
+    sid: i.sid,
+    state: i.state,
+    repo,
+    branch,
+    peers,
+    claims,
+    deliveries,
+    sent: readSentLog(i.sid, i.env)
+  });
+}
+
+// src/core/uiserver.ts
+var uiSocketPath = (env = process.env) => path9.join(stateDir(env), "ui.sock");
+var SOCKET_PATH_MAX = 103;
+var PEERS_REFRESH_MS = 3e4;
+var MAX_AGE_MS = 5 * 6e4;
+var MAX_VARIANTS = 4;
+function stamp(file) {
+  try {
+    const st = fs9.statSync(file);
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return "";
+  }
+}
+var errName = (e) => {
+  const x = e;
+  return lenientString(x?.code ?? x?.message ?? "error").slice(0, 120);
+};
+function unsafeDir(dir) {
+  let st;
+  try {
+    st = fs9.lstatSync(dir);
+  } catch (e) {
+    return `cannot read ${dir} (${errName(e)})`;
+  }
+  if (!st.isDirectory()) return `${dir} is not a directory`;
+  if (typeof process.getuid === "function" && st.uid !== process.getuid())
+    return `${dir} belongs to another user`;
+  if (st.mode & 63)
+    return `${dir} is open to other users (mode ${(st.mode & 511).toString(8)}; chmod 700 it)`;
+  return null;
+}
+async function startUiServer(input) {
+  const { cfg, transport, env = process.env, served, log = () => {
+  } } = input;
+  const peersRefreshMs = input.peersRefreshMs ?? PEERS_REFRESH_MS;
+  const maxAgeMs = input.maxAgeMs ?? MAX_AGE_MS;
+  const file = uiSocketPath(env);
+  const notServing = (why) => {
+    log(`not serving snapshots: ${why}`);
+    return null;
+  };
+  if (Buffer.byteLength(file) > SOCKET_PATH_MAX)
+    return notServing(`the socket path is longer than ${SOCKET_PATH_MAX} bytes (${file})`);
+  const bad = unsafeDir(path9.dirname(file));
+  if (bad) return notServing(bad);
+  try {
+    const old = fs9.lstatSync(file);
+    if (!old.isSocket()) return notServing(`${file} exists and is not a socket`);
+    fs9.rmSync(file, { force: true });
+  } catch (e) {
+    if (e.code !== "ENOENT")
+      return notServing(`cannot replace ${file} (${errName(e)})`);
+  }
+  const sessions = /* @__PURE__ */ new Map();
+  let presence = null;
+  let presenceLoad = null;
+  async function loadPresence() {
+    const [peers, claims] = await Promise.all([
+      transport.presence.list(),
+      transport.services.list().catch(() => [])
+    ]);
+    const sig = JSON.stringify([
+      peers.map((p) => ({ ...p, lastSeen: 0 })),
+      claims.map((c) => [c.service, c.holder, c.session])
+    ]);
+    const gen = !presence ? 1 : presence.sig === sig ? presence.gen : presence.gen + 1;
+    presence = { at: Date.now(), peers, claims, sig, gen };
+    return presence;
+  }
+  function currentPresence() {
+    if (presence && Date.now() - presence.at < peersRefreshMs) return Promise.resolve(presence);
+    presenceLoad ??= loadPresence().finally(() => presenceLoad = null);
+    return presenceLoad;
+  }
+  function cacheOf(sid) {
+    let sc = sessions.get(sid);
+    if (!sc) {
+      sc = { mailGen: 0, variants: /* @__PURE__ */ new Map(), building: /* @__PURE__ */ new Map() };
+      sessions.set(sid, sc);
+    }
+    return sc;
+  }
+  async function build(sid, since, sc) {
+    const mailGen = sc.mailGen;
+    const pv = await currentPresence();
+    const fileStamp = `${stamp(statePath(sid, env))}|${stamp(sentLogPath(sid, env))}`;
+    const st = readState(sid, env);
+    if (!st) return null;
+    const snap = await gatherSnapshot({
+      transport,
+      user: cfg.user,
+      sid,
+      state: st,
+      since,
+      sinceMs: sinceToMs(since),
+      socket: file,
+      peers: pv.peers,
+      claims: pv.claims,
+      env
+    });
+    const body = JSON.stringify(snap);
+    const etag = `"${crypto3.createHash("sha256").update(JSON.stringify({ ...snap, at: 0 })).digest("hex").slice(0, 32)}"`;
+    const entry = {
+      body,
+      etag,
+      builtAt: Date.now(),
+      mailGen,
+      presenceGen: pv.gen,
+      stamp: fileStamp
+    };
+    if (sessions.get(sid) === sc) {
+      sc.variants.delete(since);
+      sc.variants.set(since, entry);
+      for (const k of sc.variants.keys()) {
+        if (sc.variants.size <= MAX_VARIANTS) break;
+        sc.variants.delete(k);
+      }
+    }
+    return entry;
+  }
+  async function snapshotFor(sid, since) {
+    const sc = cacheOf(sid);
+    const pv = await currentPresence();
+    const e = sc.variants.get(since);
+    if (e && e.mailGen === sc.mailGen && e.presenceGen === pv.gen && e.stamp === `${stamp(statePath(sid, env))}|${stamp(sentLogPath(sid, env))}` && Date.now() - e.builtAt < maxAgeMs)
+      return e;
+    const join = () => {
+      let p = sc.building.get(since);
+      if (!p) {
+        p = build(sid, since, sc).finally(() => sc.building.delete(since));
+        sc.building.set(since, p);
+      }
+      return p;
+    };
+    const got = await join();
+    return got && got.mailGen !== sc.mailGen ? join() : got;
+  }
+  const reply = (res, code, body, headers = {}) => {
+    res.writeHead(code, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-cache",
+      ...headers
+    });
+    res.end(body);
+  };
+  const error = (res, code, message) => reply(res, code, JSON.stringify({ error: message }) + "\n");
+  async function handle(req, res) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      error(res, 405, "only GET");
+      return;
+    }
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname !== "/v1/snapshot") {
+      error(res, 404, "not found; the endpoint is /v1/snapshot?session=<id>&since=24h");
+      return;
+    }
+    const asked = url.searchParams.get("since") ?? SNAPSHOT_SINCE;
+    if (!SINCE_RE.test(asked) || sinceToMs(asked) > SNAPSHOT_SINCE_MAX_MS) {
+      error(res, 400, "since must look like 30m, 2h or 1d, and be at most 30d");
+      return;
+    }
+    const since = canonicalSince(asked);
+    let sid;
+    try {
+      sid = validateSessionId(url.searchParams.get("session") ?? "");
+    } catch {
+      error(res, 400, "session must be a session id");
+      return;
+    }
+    if (!served(sid)) {
+      error(res, 404, "no session with that id is served here");
+      return;
+    }
+    let e;
+    try {
+      e = await snapshotFor(sid, since);
+    } catch (err) {
+      error(res, 503, transport.explainError(err));
+      return;
+    }
+    if (!e || !served(sid)) {
+      if (!served(sid)) sessions.delete(sid);
+      error(res, 404, "no session with that id is served here");
+      return;
+    }
+    if (req.headers["if-none-match"] === e.etag) {
+      res.writeHead(304, { ETag: e.etag, "Cache-Control": "no-cache" });
+      res.end();
+      return;
+    }
+    reply(res, 200, req.method === "HEAD" ? "" : e.body + "\n", { ETag: e.etag });
+  }
+  const server = http.createServer((req, res) => {
+    handle(req, res).catch((err) => {
+      if (!res.headersSent) error(res, 500, String(err?.message ?? err).slice(0, 200));
+      else res.destroy();
+    });
+  });
+  server.requestTimeout = 3e4;
+  server.headersTimeout = 1e4;
+  server.maxHeadersCount = 50;
+  let ino = 0;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(file, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    fs9.chmodSync(file, 384);
+    ino = fs9.lstatSync(file).ino;
+  } catch (e) {
+    server.close();
+    return notServing(`cannot listen on ${file} (${errName(e)})`);
+  }
+  server.on("error", (e) => log(`snapshot socket: ${errName(e)}`));
+  log(`serving snapshots on ${file}`);
+  let closing = null;
+  return {
+    path: file,
+    invalidate(sid) {
+      const sc = sessions.get(sid);
+      if (sc) sc.mailGen++;
+    },
+    drop(sid) {
+      sessions.delete(sid);
+    },
+    close() {
+      closing ??= new Promise((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }).then(() => {
+        try {
+          if (fs9.lstatSync(file).ino === ino) fs9.rmSync(file, { force: true });
+        } catch {
+        }
+      });
+      return closing;
+    }
+  };
+}
+async function probeUiSocket(env = process.env, timeoutMs = 500) {
+  const file = uiSocketPath(env);
+  try {
+    if (!fs9.lstatSync(file).isSocket()) return null;
+  } catch {
+    return null;
+  }
+  return new Promise((resolve) => {
+    const s = net2.connect(file);
+    const done = (ok) => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(ok ? file : null);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    s.once("connect", () => done(true));
+    s.once("error", () => done(false));
+  });
+}
+
 // src/core/deliverd.ts
 function deliverdOptions(env = process.env) {
   return {
@@ -19672,6 +20306,7 @@ function deliverdOptions(env = process.env) {
     // How long a newer daemon waits for an older one to hand over before killing it: above the
     // receivers' settle time (receiver.ts), so a delivery in flight can finish.
     handoverMs: Number(env.AGENT_MAILBOX_HANDOVER_MS) || 2e4,
+    uiSocket: env.AGENT_MAILBOX_UI_SOCKET !== "off",
     // test-only: "crash-after-deliver" | "crash-after-commit" | "ignore-sigterm" (a daemon that
     // will not hand over)
     fault: env.AGENT_MAILBOX_FAULT || ""
@@ -19683,10 +20318,10 @@ function fileLog(file, maxBytes = 256 * 1024) {
 `;
     try {
       try {
-        if (fs8.statSync(file).size + line.length > maxBytes) fs8.renameSync(file, `${file}.1`);
+        if (fs10.statSync(file).size + line.length > maxBytes) fs10.renameSync(file, `${file}.1`);
       } catch {
       }
-      fs8.appendFileSync(file, line, { mode: 384 });
+      fs10.appendFileSync(file, line, { mode: 384 });
     } catch {
     }
   };
@@ -19745,6 +20380,8 @@ async function runDeliverd({
   log(`mailbox user ${cfg.user}${profile ? `, profile ${profile}` : ""}`);
   mkdirp(registrationsDir(env));
   const workers = /* @__PURE__ */ new Map();
+  let ui = null;
+  let uiStarting = null;
   const noted = /* @__PURE__ */ new Set();
   const lost = /* @__PURE__ */ new Set();
   let idleSince = Date.now();
@@ -19812,6 +20449,7 @@ async function runDeliverd({
       schedule(0);
     }
     function onMessage(d, m, fresh) {
+      ui?.invalidate(sid);
       if (stopped) return { ackAfter: handled(new Error("not delivered")) };
       if (!fresh && !pending.length && !flushing) {
         rx.commit([{ delivery: d, message: m }]);
@@ -20002,7 +20640,10 @@ async function runDeliverd({
         lost.delete(sid);
         await receiving;
         sessLock?.release();
-        if (workers.get(sid) === w) workers.delete(sid);
+        if (workers.get(sid) === w) {
+          workers.delete(sid);
+          ui?.drop(sid);
+        }
         if (rx) log(`stopped serving ${addr()}${depart ? "" : " (still registered)"}`);
       })();
       return stopped;
@@ -20161,6 +20802,8 @@ async function runDeliverd({
     } catch {
     }
     await Promise.all([...workers.values()].map((w) => w.stop({ depart: false })));
+    await uiStarting;
+    await ui?.close();
     lock.release();
     await transport.close?.().catch(() => {
     });
@@ -20176,7 +20819,7 @@ async function runDeliverd({
   }
   let watcher = null;
   try {
-    watcher = fs8.watch(registrationsDir(env), () => scanSoon());
+    watcher = fs10.watch(registrationsDir(env), () => scanSoon());
     watcher.on("error", () => {
     });
   } catch {
@@ -20187,7 +20830,7 @@ async function runDeliverd({
     setInterval(() => {
       let sig;
       try {
-        sig = String(fs8.statSync(pausePath(env)).mtimeMs);
+        sig = String(fs10.statSync(pausePath(env)).mtimeMs);
       } catch {
         sig = "none";
       }
@@ -20221,6 +20864,8 @@ async function runDeliverd({
       void shutdown(sig);
     });
   scan();
+  if (opt.uiSocket)
+    uiStarting = startUiServer({ cfg, transport, env, served: (sid) => workers.has(sid), log }).then((u) => ui = u).catch((e) => log(`not serving snapshots: ${errCode(e)}`));
   return done;
 }
 function handoverTarget(version, env) {
@@ -20516,339 +21161,11 @@ function guideText(section = "overview") {
 ` : null;
 }
 
-// src/core/sentlog.ts
-import fs9 from "node:fs";
-import path8 from "node:path";
-var SENT_KEEP = 500;
-var SENT_BODY_MAX = 2e3;
-var SUBJECT_MAX = 300;
-var SENT_COMPACT_BYTES = 2 * 1024 * 1024;
-var KINDS = ["direct", "broadcast", "ask", "service"];
-function kindOf(to) {
-  if (to === "all") return "broadcast";
-  if (areaOf(to) !== null) return "ask";
-  if (isService(to)) return "service";
-  return "direct";
-}
-function cutText(s, max) {
-  if (s.length <= max) return { text: s, isTruncated: false };
-  let text = s.slice(0, max);
-  if (/[\ud800-\udbff]$/.test(text)) text = text.slice(0, -1);
-  return { text, isTruncated: true };
-}
-var cutSubject = (s) => s === null ? null : cutText(s, SUBJECT_MAX).text;
-function sentRecord(m) {
-  const { text, isTruncated } = cutText(m.body, SENT_BODY_MAX);
-  return {
-    id: m.id,
-    to: m.to,
-    kind: kindOf(m.to),
-    area: areaOf(m.to),
-    subject: cutSubject(m.subject),
-    body: text,
-    isTruncated,
-    inReplyTo: m.inReplyTo,
-    time: m.time ?? Date.now()
-  };
-}
-function checkSentRecord(v) {
-  if (!v || typeof v !== "object") return null;
-  const o = v;
-  const str = (x) => typeof x === "string" ? x : null;
-  if (typeof o.id !== "string" || !o.id || typeof o.to !== "string" || !o.to) return null;
-  if (typeof o.body !== "string" || typeof o.time !== "number" || !Number.isFinite(o.time))
-    return null;
-  const kind = KINDS.find((k) => k === o.kind) ?? kindOf(o.to);
-  const { text, isTruncated } = cutText(o.body, SENT_BODY_MAX);
-  const field = (x) => cutText(x, 256).text;
-  return {
-    id: field(o.id),
-    to: field(o.to),
-    kind,
-    area: areaOf(o.to),
-    subject: cutSubject(str(o.subject)),
-    body: text,
-    isTruncated: isTruncated || o.isTruncated === true,
-    inReplyTo: str(o.inReplyTo) === null ? null : field(o.inReplyTo),
-    time: o.time
-  };
-}
-function parseLines(text) {
-  const out = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const r = checkSentRecord(JSON.parse(line));
-      if (r) out.push(r);
-    } catch {
-    }
-  }
-  return out;
-}
-function readSentLog(sid, env = process.env) {
-  let text;
-  try {
-    text = fs9.readFileSync(sentLogPath(sid, env), "utf8");
-  } catch {
-    return [];
-  }
-  return parseLines(text).slice(-SENT_KEEP);
-}
-function endsWithNewline(file) {
-  let fd;
-  try {
-    fd = fs9.openSync(file, "r");
-  } catch {
-    return true;
-  }
-  try {
-    const size = fs9.fstatSync(fd).size;
-    if (size === 0) return true;
-    const last = Buffer.alloc(1);
-    fs9.readSync(fd, last, 0, 1, size - 1);
-    return last[0] === 10;
-  } finally {
-    fs9.closeSync(fd);
-  }
-}
-function appendSentLog(sid, rec, env = process.env, {
-  compactBytes = SENT_COMPACT_BYTES,
-  keep = SENT_KEEP
-} = {}) {
-  const file = sentLogPath(sid, env);
-  mkdirp(path8.dirname(file));
-  withFileLock(`${file}.lock`, () => {
-    const lead = endsWithNewline(file) ? "" : "\n";
-    fs9.appendFileSync(file, lead + JSON.stringify(rec) + "\n", { mode: 384 });
-    if (fs9.statSync(file).size <= compactBytes) return;
-    const kept = parseLines(fs9.readFileSync(file, "utf8")).slice(-keep);
-    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    fs9.writeFileSync(tmp, kept.map((r) => JSON.stringify(r) + "\n").join(""), { mode: 384 });
-    fs9.renameSync(tmp, file);
-  });
-}
-
-// src/core/snapshot.ts
-var SNAPSHOT_BODY_MAX = 2e3;
-var FIRST_LINE_MAX = 200;
-var SNAPSHOT_SINCE = "24h";
-var SNAPSHOT_SINCE_MAX_MS = 30 * 864e5;
-var SNAPSHOT_MAIL_MAX = 200;
-var FIELD_MAX = 256;
-var cutField = (s) => cutText(s, FIELD_MAX).text;
-var cutNullable = (s) => s === null ? null : cutField(s);
-function firstLine(body) {
-  const line = body.split(/\r\n?|\n/).map((l) => l.trim()).find((l) => l) ?? "";
-  return oneLine(line, FIRST_LINE_MAX);
-}
-function snapshotMail(input) {
-  const { state: st, user } = input;
-  const names = [st.address, ...st.aliases];
-  const cutoff = input.now - input.sinceMs;
-  const out = [];
-  for (const d of input.deliveries) {
-    const m = parseDelivery(d);
-    const kind = kindOf(d.to);
-    const shared = kind === "broadcast" || kind === "ask";
-    if (shared && m.sender === user && names.includes(m.from)) continue;
-    const time = m.time * 1e3;
-    if (time < cutoff) continue;
-    const { text, isTruncated } = cutText(m.body, SNAPSHOT_BODY_MAX);
-    const claimed = m.raw ? null : m.from.split(".")[0] ?? null;
-    out.push({
-      id: cutField(m.id),
-      from: cutField(m.from),
-      to: cutField(d.to),
-      kind,
-      area: areaOf(d.to),
-      subject: cutSubject(m.subject),
-      body: text,
-      isTruncated,
-      verifiedUser: m.sender,
-      isMismatch: !!m.sender && claimed !== null && claimed !== m.sender,
-      inReplyTo: cutNullable(m.inReplyTo),
-      sentAt: cutNullable(m.sentAt),
-      time
-    });
-  }
-  return out.sort((a, b) => a.time - b.time).slice(-SNAPSHOT_MAIL_MAX);
-}
-function senderKey(m) {
-  const addr = parseAddr(m.from);
-  return addr && m.verifiedUser && addr.user === m.verifiedUser ? m.from : `unverified:${m.verifiedUser ?? "?"}`;
-}
-function buildThreads(mail, sent) {
-  const items = [
-    ...mail.map((m) => ({
-      id: m.id,
-      dir: "in",
-      time: m.time,
-      subject: m.subject,
-      firstLine: firstLine(m.body),
-      inReplyTo: m.inReplyTo,
-      // Mail to one of my own service addresses is a conversation with its sender, as direct
-      // mail is: keyed by the service, every caller would share one thread.
-      base: m.kind === "direct" || m.kind === "service" ? senderKey(m) : m.to
-    })),
-    ...sent.map((s) => ({
-      id: s.id,
-      dir: "out",
-      time: s.time,
-      subject: s.subject,
-      firstLine: firstLine(s.body),
-      inReplyTo: s.inReplyTo,
-      base: s.to
-    }))
-  ].sort((a, b) => a.time - b.time || (a.dir === b.dir ? 0 : a.dir === "out" ? -1 : 1));
-  const byId = /* @__PURE__ */ new Map();
-  for (const it of items) if (!byId.has(it.id)) byId.set(it.id, it);
-  const keyOf = (it, seen = /* @__PURE__ */ new Set()) => {
-    seen.add(it);
-    const parent = it.inReplyTo ? byId.get(it.inReplyTo) : void 0;
-    return parent && !seen.has(parent) ? keyOf(parent, seen) : it.base;
-  };
-  const threads = /* @__PURE__ */ new Map();
-  for (const it of items) {
-    const key = keyOf(it);
-    const list = threads.get(key);
-    if (list) list.push(it);
-    else threads.set(key, [it]);
-  }
-  const out = [];
-  for (const [key, list] of threads) {
-    const last = list[list.length - 1];
-    out.push({
-      with: key,
-      kind: key.startsWith("unverified:") ? "direct" : kindOf(key),
-      lastAt: last.time,
-      count: list.length,
-      isAwaitingMe: last.dir === "in",
-      messages: list.map((m) => ({
-        id: m.id,
-        dir: m.dir,
-        time: m.time,
-        subject: m.subject,
-        firstLine: m.firstLine,
-        inReplyTo: m.inReplyTo
-      }))
-    });
-  }
-  return out.sort((a, b) => b.lastAt - a.lastAt);
-}
-function servicesOf(p, claims) {
-  return claims.filter((c) => c.session === p.session && parseService(c.service)?.user === p.user).map((c) => c.service).sort();
-}
-function peerRelations(self2, peers, threads, claims) {
-  const st = self2.state;
-  const selfKey = `${self2.user}
-${self2.sid}`;
-  const owner = /* @__PURE__ */ new Map();
-  for (const n of [st.address, ...st.aliases]) owner.set(n, selfKey);
-  for (const p of peers)
-    for (const n of [p.address, ...p.aliases])
-      if (!owner.has(n)) owner.set(n, `${p.user}
-${p.session}`);
-  const canon = (name) => name ? owner.get(name) ?? name : null;
-  const myParent = canon(st.parent);
-  const counterparts = new Set(threads.map((t) => t.with));
-  const out = /* @__PURE__ */ new Map();
-  for (const p of peers) {
-    const key = `${p.user}
-${p.session}`;
-    const theirParent = canon(p.parent);
-    const names = [p.address, ...p.aliases, ...servicesOf(p, claims)];
-    let rel;
-    if (myParent && myParent === key) rel = "parent";
-    else if (theirParent === selfKey) rel = "child";
-    else if (myParent && theirParent === myParent) rel = "sibling";
-    else if (self2.repo && p.repo === self2.repo) rel = "same-repo";
-    else if (names.some((n) => counterparts.has(n))) rel = "correspondent";
-    else if (p.user === self2.user) rel = "mine";
-    else rel = "other";
-    out.set(p, rel);
-  }
-  return out;
-}
-function snapshotAreas(mine, peers) {
-  const count = /* @__PURE__ */ new Map();
-  for (const a of mine) count.set(a, 1);
-  for (const p of peers) for (const a of p.offers) count.set(a, (count.get(a) ?? 0) + 1);
-  return [...count.entries()].map(([area, offeredBy]) => ({ area, offeredBy, isMine: mine.includes(area) })).sort((a, b) => a.area < b.area ? -1 : a.area > b.area ? 1 : 0);
-}
-function buildSnapshot(input) {
-  const { state: st, sid, user, sinceMs: sinceMs2, now } = input;
-  const cutoff = now - sinceMs2;
-  const others = input.peers.filter(
-    (p) => p.live && !(p.user === user && p.session === sid) && p.address !== st.address
-  );
-  const mail = snapshotMail(input);
-  const sent = input.sent.filter((s) => s.time >= cutoff).sort((a, b) => a.time - b.time);
-  const threads = buildThreads(mail, sent);
-  const offers = checkOffers(st.offers);
-  const relations = peerRelations(
-    { sid, user, state: st, repo: input.repo },
-    others,
-    threads,
-    input.claims
-  );
-  const peers = [...others].sort((a, b) => b.lastSeen - a.lastSeen).map((p) => ({
-    address: p.address,
-    aliases: p.aliases,
-    user: p.user,
-    host: p.host,
-    agent: p.agent,
-    title: p.title ?? null,
-    status: p.status,
-    role: p.role,
-    parent: p.parent,
-    repo: p.repo,
-    branch: p.branch,
-    offers: p.offers,
-    services: servicesOf(p, input.claims),
-    lastSeen: p.lastSeen,
-    relation: relations.get(p) ?? "other"
-  }));
-  return {
-    v: 1,
-    at: now,
-    since: input.since,
-    socket: input.socket,
-    self: {
-      address: st.address,
-      aliases: st.aliases,
-      user,
-      host: parseAddr(st.address)?.host ?? null,
-      title: st.title ?? null,
-      status: st.status ?? null,
-      role: st.role ?? null,
-      parent: st.parent ?? null,
-      offers,
-      services: st.services ?? [],
-      repo: input.repo,
-      branch: input.branch
-    },
-    peers,
-    mail,
-    sent,
-    threads,
-    areas: snapshotAreas(offers, others)
-  };
-}
-function snapshotAddresses(st) {
-  return [
-    st.address,
-    ...st.aliases,
-    ...st.services ?? [],
-    BROADCAST,
-    ...(st.offers ?? []).map(areaAddress)
-  ];
-}
-
 // src/core/transport/nats.ts
 var import_transport_node = __toESM(require_transport_node(), 1);
 var import_jetstream = __toESM(require_mod5(), 1);
 var import_kv = __toESM(require_mod6(), 1);
-import crypto3 from "node:crypto";
+import crypto4 from "node:crypto";
 var PREFIX = "mbx";
 var ALL_STREAM = "MBX_ALL";
 var BUCKET = "presence";
@@ -20873,7 +21190,7 @@ function parseAddr2(s) {
 }
 var streamFor = (user) => `${PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, "_")}`;
 var eventsStreamFor = (user) => `${EVT_PREFIX.toUpperCase()}_${user.toUpperCase().replace(/-/g, "_")}`;
-var areaToken = (area) => crypto3.createHash("sha256").update(area).digest("hex").slice(0, 32);
+var areaToken = (area) => crypto4.createHash("sha256").update(area).digest("hex").slice(0, 32);
 var serviceSubject = (user, name, fromUser) => `${PREFIX}.${user}.${SVC}.${name}.${fromUser}`;
 function subjectFor(to, fromUser) {
   if (!SEG_RE.test(fromUser || "")) throw new Error(`invalid sender user "${fromUser}"`);
@@ -20911,9 +21228,9 @@ function parseAskSubject(subject) {
 function consumerName(sid) {
   const s = String(sid);
   if (/^[A-Za-z0-9_-]{1,64}$/.test(s)) return s;
-  return `s-${crypto3.createHash("sha256").update(s).digest("hex").slice(0, 32)}`;
+  return `s-${crypto4.createHash("sha256").update(s).digest("hex").slice(0, 32)}`;
 }
-var sessionShort = (sid) => crypto3.createHash("sha256").update(String(sid)).digest("hex").slice(0, 12);
+var sessionShort = (sid) => crypto4.createHash("sha256").update(String(sid)).digest("hex").slice(0, 12);
 var presenceKey = (user, host, sid) => `${user}.${host}.${sessionShort(sid)}`;
 var claimKey = (service) => {
   const p = parseService(service);
@@ -21094,7 +21411,7 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
   }
   async function publish(to, envelope, { timeoutMs } = {}) {
     const subject = subjectFor(to, user);
-    const id = String(envelope.id || crypto3.randomUUID());
+    const id = String(envelope.id || crypto4.randomUUID());
     const s = await conn();
     try {
       await jsPublish(
@@ -21861,7 +22178,7 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
           s,
           `${EVT_PREFIX}.${user}.${host}`,
           new TextEncoder().encode(JSON.stringify(ev)),
-          crypto3.randomUUID(),
+          crypto4.randomUUID(),
           timeoutMs
         );
       } catch (e) {
@@ -21957,7 +22274,7 @@ function createTransport(cfg, { multiplex = false, faults = {} } = {}) {
     }
     try {
       const subject = `${PREFIX}.${user}.${host}.${DOCTOR_LABEL}.${user}`;
-      const id = `doctor-${crypto3.randomUUID()}`;
+      const id = `doctor-${crypto4.randomUUID()}`;
       const ack = await jsPublish(
         s,
         subject,
@@ -22349,11 +22666,11 @@ async function runWatch({
 // src/cli.ts
 var UsageError = class extends Error {
 };
-var here = path9.dirname(fileURLToPath(import.meta.url));
+var here = path10.dirname(fileURLToPath(import.meta.url));
 function launcherPath() {
   for (const rel of ["../bin/mbox", "../adapters/claude-code/bin/mbox"]) {
-    const p = path9.resolve(here, rel);
-    if (fs10.existsSync(p)) return p;
+    const p = path10.resolve(here, rel);
+    if (fs11.existsSync(p)) return p;
   }
   return "mbox";
 }
@@ -22684,7 +23001,7 @@ program2.command("deliverd").description(
       if (d.user) console.log(`user: ${d.user}${profileNote()}`);
       if (d.exe)
         console.log(
-          `executable: ${oneLine(d.exe, 300)}${fs10.existsSync(d.exe) ? "" : " (no longer exists; it runs from memory)"}`
+          `executable: ${oneLine(d.exe, 300)}${fs11.existsSync(d.exe) ? "" : " (no longer exists; it runs from memory)"}`
         );
       const cmp = compareVersions(mine, d.version);
       if (cmp > 0)
@@ -22706,6 +23023,8 @@ program2.command("deliverd").description(
     const p = readPause();
     if (p.all || p.addresses.length)
       console.log(`paused: ${pauseSummary(p)} (mbox resume to continue)`);
+    const ui = d ? await probeUiSocket() : null;
+    if (ui) console.log(`snapshots: ${ui} (GET /v1/snapshot?session=<id>)`);
     console.log(`log: ${deliverdLogPath()}`);
     process.exit(0);
   }
@@ -22731,7 +23050,7 @@ program2.command("deliverd").description(
     exe: bundlePath,
     log,
     restart() {
-      if (!fs10.existsSync(bundlePath)) throw new Error(`${bundlePath} no longer exists`);
+      if (!fs11.existsSync(bundlePath)) throw new Error(`${bundlePath} no longer exists`);
       startDeliverd();
     }
   });
@@ -23240,8 +23559,8 @@ program2.command("ask").description(
     console.log(res.id);
   })
 );
-var UNIT_MS = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
-var sinceMs = (since) => parseInt(since, 10) * UNIT_MS[since.slice(-1)];
+var UNIT_MS2 = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
+var sinceMs = (since) => parseInt(since, 10) * UNIT_MS2[since.slice(-1)];
 program2.command("inbox").description(
   "print recent messages (your addresses, the services you hold, broadcasts and asks in the areas you offer) without moving the watcher cursor"
 ).option("--since <dur>", "how far back (e.g. 30m, 2h, 1d)", "2h").action(
@@ -23277,34 +23596,26 @@ program2.command("snapshot").description(
 ).action(
   action(async (opts) => {
     if (!opts.json) throw new UsageError("pass --json (the only output format)");
-    if (!/^\d+[smhd]$/.test(opts.since))
+    if (!SINCE_RE.test(opts.since))
       throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
     const lookback = sinceMs(opts.since);
     if (lookback > SNAPSHOT_SINCE_MAX_MS)
       throw new UsageError(`--since is at most 30d (got "${opts.since}")`);
     const { cfg, transport, sid, st } = await context();
-    const [peers, claims, deliveries] = await Promise.all([
-      transport.presence.list(),
-      transport.services.list().catch(() => []),
-      // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
-      transport.poll(snapshotAddresses(st), { lookbackMs: lookback, max: Infinity })
+    const registered = listRegistrations().some((r) => r.sid === sid);
+    const [snap, socket] = await Promise.all([
+      gatherSnapshot({
+        transport,
+        user: cfg.user,
+        sid,
+        state: st,
+        since: opts.since,
+        sinceMs: lookback,
+        socket: null
+      }),
+      registered ? probeUiSocket() : Promise.resolve(null)
     ]);
-    const { repo, branch } = gitInfo(st.cwd);
-    const snap = buildSnapshot({
-      now: Date.now(),
-      since: opts.since,
-      sinceMs: lookback,
-      socket: null,
-      user: cfg.user,
-      sid,
-      state: st,
-      repo,
-      branch,
-      peers,
-      claims,
-      deliveries,
-      sent: readSentLog(sid)
-    });
+    snap.socket = socket;
     process.stdout.write(JSON.stringify(snap) + "\n");
   })
 );

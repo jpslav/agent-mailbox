@@ -18,6 +18,7 @@ import {
   SNAPSHOT_MAIL_MAX,
   buildSnapshot,
   buildThreads,
+  canonicalSince,
   firstLine,
   snapshotAddresses,
   type SnapshotInput,
@@ -263,6 +264,19 @@ describe('snapshot', () => {
     assert.equal(mail.threads[3]?.messages[0]?.firstLine, 'hello');
     assert.equal(mail.threads[0]?.lastAt, mail.mail.at(-1)?.time);
     assert.equal(mail.sent.length, 4);
+  });
+
+  it('spells equal lookbacks one way', () => {
+    assert.deepEqual(['60m', '3600s', '1h', '01h', '24h', '1d', '90s', '0m'].map(canonicalSince), [
+      '1h',
+      '1h',
+      '1h',
+      '1h',
+      '24h',
+      '24h',
+      '90s',
+      '0s',
+    ]);
   });
 
   it('mail to a service address this session holds is a thread per caller, not one per service', () => {

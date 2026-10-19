@@ -1,6 +1,6 @@
 {
   "name": "agent-mailbox",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "Agent mailbox: messages between agent sessions, brokered by a NATS JetStream server",
   "type": "module",
@@ -32,7 +32,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
-    "test:unit": "node --import tsx --test --test-concurrency=1 test/agents.test.ts test/golden.test.ts test/hook.test.ts test/launcher.test.ts test/snapshot.test.ts test/transport.test.ts test/unit.test.ts",
+    "test:unit": "node --import tsx --test --test-concurrency=1 test/agents.test.ts test/golden.test.ts test/hook.test.ts test/launcher.test.ts test/snapshot.test.ts test/transport.test.ts test/ui-server.test.ts test/unit.test.ts",
     "prepare": "node scripts/install-hooks.mjs"
   },
   "simple-git-hooks": {

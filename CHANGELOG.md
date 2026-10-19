@@ -12,6 +12,21 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-19
+
+### Added
+- The delivery daemon serves snapshots over HTTP on a unix socket, `ui.sock` in the state
+  directory: `GET /v1/snapshot?session=<id>&since=24h` returns what `mbox snapshot --json` prints
+  for a session it serves, with an `ETag`; an unchanged poll gets `304`. It caches one snapshot per
+  session, rebuilt when mail for the session arrives, presence changes (checked at most every
+  30 s), the session's state or sent log changes, or after five minutes. The socket is 0600 in a
+  directory that must be the user's alone (0700); `AGENT_MAILBOX_UI_SOCKET=off` turns it off.
+- `mbox snapshot --json` fills `socket` with that path when the daemon serves the session;
+  `mbox deliverd --status` prints it.
+
+### Upgrading
+- Nothing to do. The next session start hands delivery to a 0.9.0 daemon, which serves the socket.
+
 ## [0.8.0] - 2026-10-19
 
 ### Added

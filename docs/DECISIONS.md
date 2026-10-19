@@ -530,3 +530,37 @@ context, decision, why.
   200 received messages, over at most 30 days. The title is published to every mailbox user like the rest of
   presence; whether the hook should publish the agent's session title without being asked is the
   repo owner's call (it does in 0.8.0).
+
+## The snapshot socket: the delivery daemon serves snapshots over a local unix socket
+
+- **Date:** 2026-10
+- **Context:** Even one `mbox snapshot --json` per poll is a Node process start and a server
+  connection per session per minute, for an answer that has usually not changed. The delivery
+  daemon already holds a connection, receives every registered session's mail and knows when it
+  arrives.
+- **Decision:** The daemon serves `GET /v1/snapshot?session=<id>&since=<dur>` over HTTP on a
+  unix socket, `<state>/ui.sock`, for the sessions it serves (404 for any other), with the same
+  assembly as `mbox snapshot` (`gatherSnapshot`, `buildSnapshot`). It caches one snapshot per
+  session and lookback (at most four lookbacks per session, only for served sessions, dropped when
+  the session stops being served) and rebuilds it when the daemon received mail for the session,
+  when presence changed (no change feed in the transport, so re-read at most every 30 s, and a
+  heartbeat that only moves `lastSeen` does not count), when the session's state file or sent log
+  changed (size and mtime, checked per request), or after five minutes (the lookback window
+  moves). The `ETag` hashes the snapshot without its build time, and `If-None-Match` gets 304.
+  Only the lock holder serves: the server starts after the daemon lock is taken and is closed,
+  and its socket removed (only if it is still the same inode), before the lock is released, so a
+  newer daemon taking over binds after the old one let go; a socket left by a killed daemon is
+  replaced, anything else at that path is left alone and nothing is served. `mbox snapshot --json`
+  names the socket when the session is registered and something listens on it.
+- **Why:** HTTP over a unix socket needs nothing new on either side (Node's `http` with
+  `socketPath`), and ETags make an unchanged poll a few hundred bytes with no process; the server
+  is asked only for presence, at most every 30 s, and for mail only after a change. The boundary is the file system's, the same as for the files the daemon
+  already trusts: the socket is 0600 and its directory must belong to this user and be closed to
+  others (0700), checked before serving. Whoever passes that check could read the client config
+  (with the mailbox password), the registrations and the session files anyway, so the socket
+  widens nothing for them; there is no token, because a token would sit in the same directory.
+- **Limits:** any process running as this user can read every served session's recent mail
+  through it, as it could by running `mbox inbox` with the user's config. Presence changes reach a
+  cached snapshot up to 30 s late; the session's own repo and branch and the peers' `lastSeen`
+  up to five minutes. A state directory that is not 0700 (set up by hand) gets no
+  socket until it is fixed. Set `AGENT_MAILBOX_UI_SOCKET=off` to turn it off.
