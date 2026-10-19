@@ -53,7 +53,7 @@
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/kv": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
-    "@types/node": "20.19.43",
+    "@types/node": "26.6.4",
     "commander": "12.1.0",
     "esbuild": "0.28.2",
     "eslint": "10.12.0",
