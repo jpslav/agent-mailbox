@@ -19423,7 +19423,7 @@ import fs7 from "node:fs";
 import path7 from "node:path";
 
 // src/core/version.ts
-var BUILD_VERSION = true ? "0.9.0" : "0.0.0-dev";
+var BUILD_VERSION = true ? "0.10.0" : "0.0.0-dev";
 function ownVersion(env = process.env) {
   return env.AGENT_MAILBOX_FAKE_VERSION || BUILD_VERSION;
 }

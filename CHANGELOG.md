@@ -12,6 +12,8 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-19
+
 ### Added
 - The mailbox panel: `/mbox` opens the mailbox in a pane (a side panel in the desktop app and the
   terminal's fullscreen layout) with this session's address, status, title sharing and help
@@ -23,6 +25,11 @@ treat them as approximate.
   default: turn on the plugin's `band` option.
 - With "Share session titles with peers" off (in the panel; on by default), the session's title is
   cleared from presence at the first prompt after each start, resume or compaction.
+
+### Upgrading
+- Nothing to do. Restart Claude Code (or start a new session) after the plugin updates, then run
+  `/mbox`. On Claude Code older than 2.1.299, `/mbox` says it needs a newer build; messaging is
+  unchanged.
 
 ## [0.9.0] - 2026-10-19
 
