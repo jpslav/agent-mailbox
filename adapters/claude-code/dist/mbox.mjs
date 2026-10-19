@@ -19783,7 +19783,6 @@ var sinceToMs = (since) => parseInt(since, 10) * UNIT_MS[since.slice(-1)];
 function canonicalSince(since) {
   const ms = sinceToMs(since);
   for (const [unit, n] of [
-    ["d", UNIT_MS.d],
     ["h", UNIT_MS.h],
     ["m", UNIT_MS.m]
   ])

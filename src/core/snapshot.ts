@@ -42,13 +42,12 @@ const UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
 export const sinceToMs = (since: string): number =>
   parseInt(since, 10) * UNIT_MS[since.slice(-1) as keyof typeof UNIT_MS];
 /**
- * One spelling per lookback, in the largest unit that divides it (`60m` and `3600s` are `1h`), so
- * equal lookbacks share a cache entry.
+ * One spelling per lookback, in hours where it is whole hours (`60m` and `3600s` are `1h`, `1d`
+ * is `24h`), else minutes, else seconds, so equal lookbacks share a cache entry.
  */
 export function canonicalSince(since: string): string {
   const ms = sinceToMs(since);
   for (const [unit, n] of [
-    ['d', UNIT_MS.d],
     ['h', UNIT_MS.h],
     ['m', UNIT_MS.m],
   ] as const)
