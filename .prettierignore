@@ -1,3 +1,4 @@
 dist
 node_modules
 CHANGELOG.md
+adapters/claude-code/.claude-plugin/types

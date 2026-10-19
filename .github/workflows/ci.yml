@@ -108,6 +108,21 @@ jobs:
       - name: Type check (tsc)
         run: npm run typecheck
 
+      # The mailbox panel is a hooks module Claude Code loads itself, not part of the bundle:
+      # `claude plugin validate --strict` and `claude plugin test` from the official npm package,
+      # pinned with its platform packages by integrity hash in ci/claude-code/package-lock.json
+      # (at least the module's MIN_VERSION). Both are local checks: no account, no model calls.
+      - name: Plugin hooks module (claude plugin validate and test)
+        shell: bash
+        env:
+          DISABLE_AUTOUPDATER: '1'
+          DISABLE_TELEMETRY: '1'
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+        run: |
+          set -euo pipefail
+          npm ci --prefix ci/claude-code --no-audit --no-fund
+          CLAUDE_BIN="$PWD/ci/claude-code/node_modules/.bin/claude" npm run test:plugin
+
       - run: npm test
 
       # The plugin ships dist/mbox.mjs as a committed build: it must match src/.

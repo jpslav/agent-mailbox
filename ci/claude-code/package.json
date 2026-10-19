@@ -1,0 +1,8 @@
+{
+  "name": "agent-mailbox-ci-claude-code",
+  "private": true,
+  "description": "The Claude Code that CI runs claude plugin validate and claude plugin test with (npm run test:plugin); package-lock.json pins it and its platform packages by integrity hash. At least the hooks module's MIN_VERSION.",
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.299"
+  }
+}

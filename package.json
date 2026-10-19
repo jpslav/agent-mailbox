@@ -28,11 +28,13 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
+    "typecheck:plugin": "node scripts/plugin-module.mjs typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "test:unit": "node --import tsx --test --test-concurrency=1 test/agents.test.ts test/golden.test.ts test/hook.test.ts test/launcher.test.ts test/snapshot.test.ts test/transport.test.ts test/ui-server.test.ts test/unit.test.ts",
+    "test:plugin": "node scripts/plugin-module.mjs test",
     "prepare": "node scripts/install-hooks.mjs"
   },
   "simple-git-hooks": {
@@ -40,7 +42,7 @@
     "pre-push": "npm run typecheck && npm run test:unit"
   },
   "lint-staged": {
-    "*.{ts,mjs}": [
+    "*.{ts,tsx,mjs}": [
       "prettier --write",
       "eslint --fix --no-warn-ignored"
     ],

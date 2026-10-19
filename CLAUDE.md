@@ -28,6 +28,16 @@ The source is strict TypeScript (`src/`, `test/`); `esbuild` bundles it, `tsc` o
   `scripts/check-versions.mjs` is the CI version check.
 - `adapters/<agent>/`: that agent's integration files (`claude-code/`: plugin manifest, hooks,
   skill, `bin/mbox` POSIX-sh launcher, committed `dist/mbox.mjs`).
+- `adapters/claude-code/hooks/register.tsx` (with `model.ts`, `types/index.d.ts` and
+  `tests/*.test.tsx`): the mailbox panel, a Claude Code hooks module that Claude Code loads
+  itself (`"modules"` in `hooks/hooks.json`), not part of the esbuild bundle. It draws
+  `mbox snapshot --json` and runs the plugin's own `bin/mbox`. Its API is Claude Code's early-access
+  function hooks; the declarations are not in the repo (the engine lays them, git-ignored, in
+  `adapters/claude-code/.claude-plugin/types/`). `npm run typecheck:plugin` type-checks it where
+  they are laid; `npm run test:plugin` runs `claude plugin validate --strict` and
+  `claude plugin test` on it (Claude Code 2.1.299 or newer, or `CLAUDE_BIN`); CI runs it with the
+  Claude Code pinned in `ci/claude-code/package-lock.json`. ESLint lints it without type
+  information.
 - `server/`: `mbox-admin.sh` (users, streams, permissions), `install.sh` (prints install steps),
   `nats-server.conf.example`, `systemd/` and `launchd/` service files.
 - `test/`: `node:test` suites in TypeScript, run through `tsx`; the integration ones start a real
@@ -275,6 +285,7 @@ README.md ("Adding an agent adapter") has the details.
 ## Validation before finishing
 
 `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build && npm test`,
+`npm run test:plugin` and `npm run typecheck:plugin` (when the hooks module changed),
 `claude plugin validate ./adapters/claude-code --strict`,
 `claude plugin validate . --strict`, `sh -n` on every shell script (`adapters/claude-code/bin/mbox`
 and `server/*.sh`), `node scripts/check-versions.mjs`, and the public-repo grep (maintainer names,

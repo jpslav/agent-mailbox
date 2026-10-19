@@ -1,0 +1,4 @@
+{
+  "//": "Type-checks the hooks module (hooks/, types/, tests/) against the Claude Code API that the engine lays in .claude-plugin/types/ (git-ignored) when it loads this folder with --plugin-dir; npm run typecheck:plugin runs it.",
+  "extends": "./.claude-plugin/types/tsconfig.json"
+}

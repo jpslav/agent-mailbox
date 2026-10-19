@@ -14,3 +14,6 @@ admin.creds
 users.conf
 users.d/
 .claude/settings.local.json
+# the Claude Code API declarations the engine lays beside the plugin when it loads it with
+# --plugin-dir (npm run typecheck:plugin reads them)
+adapters/claude-code/.claude-plugin/types/
