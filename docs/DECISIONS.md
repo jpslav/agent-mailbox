@@ -587,7 +587,9 @@ context, decision, why.
   every session is a cost (a row of the screen, and polling) that a person should choose.
   Command hooks are unaffected by the module: builds before hooks modules strip the unknown
   `modules` key (their hooks.json schema is a plain object), and a hook that throws is skipped
-  without touching the others.
+  without touching the others. The new manifest keys (`types`, `userConfig`) cost no build that
+  loaded the plugin before: from 2.1.76 the loader strips keys it does not know, and up to 2.1.75
+  its manifest schema is strict and already refuses the plugin's `displayName`.
 - **Limits:** the function-hooks API is early access and may change between releases; a release
   that breaks the panel leaves messaging alone. The API declarations are not in the repo (the
   engine writes them, about 1 MB per build), so CI checks the module with
