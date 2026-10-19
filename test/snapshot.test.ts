@@ -24,7 +24,13 @@ import {
 } from '../src/core/snapshot.js';
 import { TITLE_MAX, checkTitle } from '../src/core/session-meta.js';
 import { sentLogPath } from '../src/core/state.js';
-import type { Delivery, PresenceEntry, SentRecord, SessionState } from '../src/core/types.js';
+import type {
+  Delivery,
+  PresenceEntry,
+  SentRecord,
+  SessionState,
+  SnapshotMail,
+} from '../src/core/types.js';
 import { describe, it } from './suite.js';
 
 const NOW = Date.parse('2026-10-19T12:00:00.000Z');
@@ -259,6 +265,32 @@ describe('snapshot', () => {
     assert.equal(mail.sent.length, 4);
   });
 
+  it('mail to a service address this session holds is a thread per caller, not one per service', () => {
+    const toService = (id: string, from: string, user: string, time: number): SnapshotMail => ({
+      id,
+      from,
+      to: 'alice.helpdesk',
+      kind: 'service',
+      area: null,
+      subject: null,
+      body: id,
+      isTruncated: false,
+      verifiedUser: user,
+      isMismatch: false,
+      inReplyTo: null,
+      sentAt: null,
+      time,
+    });
+    const threads = buildThreads(
+      [toService('q1', 'bob.desk.x', 'bob', 1), toService('q2', 'carol.h.l', 'carol', 2)],
+      [sent('bob.desk.x', 0, { id: 'a1', inReplyTo: 'q1' })],
+    );
+    assert.deepEqual(threads.map((t) => [t.with, t.messages.map((m) => m.id).sort()]).sort(), [
+      ['bob.desk.x', ['a1', 'q1']],
+      ['carol.h.l', ['q2']],
+    ]);
+  });
+
   it('a forged or odd from never joins another thread; a reply joins its parent whatever the clocks say', () => {
     const snap = buildSnapshot(
       input({
@@ -453,6 +485,14 @@ describe('sent log', () => {
       ['a', 'b'],
     );
     assert.equal(fs.statSync(sentLogPath('s1', e)).mode & 0o777, 0o600);
+    // A torn last record (a crash mid-append) costs only itself, not the next one.
+    const file = sentLogPath('s1', e);
+    fs.truncateSync(file, fs.statSync(file).size - 8);
+    appendSentLog('s1', sent('all', 1, { id: 'c' }), e);
+    assert.deepEqual(
+      readSentLog('s1', e).map((r) => r.id),
+      ['a', 'c'],
+    );
     assert.equal(checkSentRecord({ id: 'q', to: 'all', body: 1, time: 1 }), null);
     assert.equal(checkSentRecord(null), null);
   });

@@ -20594,6 +20594,23 @@ function readSentLog(sid, env = process.env) {
   }
   return parseLines(text).slice(-SENT_KEEP);
 }
+function endsWithNewline(file) {
+  let fd;
+  try {
+    fd = fs9.openSync(file, "r");
+  } catch {
+    return true;
+  }
+  try {
+    const size = fs9.fstatSync(fd).size;
+    if (size === 0) return true;
+    const last = Buffer.alloc(1);
+    fs9.readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 10;
+  } finally {
+    fs9.closeSync(fd);
+  }
+}
 function appendSentLog(sid, rec, env = process.env, {
   compactBytes = SENT_COMPACT_BYTES,
   keep = SENT_KEEP
@@ -20601,7 +20618,8 @@ function appendSentLog(sid, rec, env = process.env, {
   const file = sentLogPath(sid, env);
   mkdirp(path8.dirname(file));
   withFileLock(`${file}.lock`, () => {
-    fs9.appendFileSync(file, JSON.stringify(rec) + "\n", { mode: 384 });
+    const lead = endsWithNewline(file) ? "" : "\n";
+    fs9.appendFileSync(file, lead + JSON.stringify(rec) + "\n", { mode: 384 });
     if (fs9.statSync(file).size <= compactBytes) return;
     const kept = parseLines(fs9.readFileSync(file, "utf8")).slice(-keep);
     const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -20668,7 +20686,9 @@ function buildThreads(mail, sent) {
       subject: m.subject,
       firstLine: firstLine(m.body),
       inReplyTo: m.inReplyTo,
-      base: m.kind === "direct" ? senderKey(m) : m.to
+      // Mail to one of my own service addresses is a conversation with its sender, as direct
+      // mail is: keyed by the service, every caller would share one thread.
+      base: m.kind === "direct" || m.kind === "service" ? senderKey(m) : m.to
     })),
     ...sent.map((s) => ({
       id: s.id,

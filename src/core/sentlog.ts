@@ -124,6 +124,25 @@ export function readSentLog(sid: string, env: Env = process.env): SentRecord[] {
   return parseLines(text).slice(-SENT_KEEP);
 }
 
+/** True for a missing or empty file and for one whose last byte is a newline. */
+function endsWithNewline(file: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch {
+    return true;
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size === 0) return true;
+    const last = Buffer.alloc(1);
+    fs.readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 0x0a;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * Append `rec` to the session's sent log, compacting it when it grew past SENT_COMPACT_BYTES.
  * Throws when the state directory cannot be written; the caller only warns (the message is sent).
@@ -140,7 +159,10 @@ export function appendSentLog(
   const file = sentLogPath(sid, env);
   mkdirp(path.dirname(file));
   withFileLock(`${file}.lock`, () => {
-    fs.appendFileSync(file, JSON.stringify(rec) + '\n', { mode: 0o600 });
+    // A crash mid-append leaves a last line without its newline: start on a fresh line, so only
+    // the torn record is lost and not this one too.
+    const lead = endsWithNewline(file) ? '' : '\n';
+    fs.appendFileSync(file, lead + JSON.stringify(rec) + '\n', { mode: 0o600 });
     if (fs.statSync(file).size <= compactBytes) return;
     const kept = parseLines(fs.readFileSync(file, 'utf8')).slice(-keep);
     const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;

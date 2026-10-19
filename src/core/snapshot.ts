@@ -128,9 +128,9 @@ function senderKey(m: SnapshotMail): string {
 }
 
 /**
- * Pair received and sent mail into one thread per counterpart. Mail to 'all', to an area or to a
- * service address belongs to that address's thread; other received mail to its sender's thread
- * (senderKey), other sent mail to its recipient's. A message that answers (inReplyTo) one in the
+ * Pair received and sent mail into one thread per counterpart. Received mail to 'all' or to an
+ * area belongs to that address's thread; received direct mail, and mail to a service address this
+ * session holds, to its sender's thread (senderKey); sent mail to its recipient's. A message that answers (inReplyTo) one in the
  * snapshot joins that message's thread instead, so the replies to an ask or a broadcast stay with
  * it (whatever the clocks of sender and server say about their order).
  */
@@ -144,7 +144,9 @@ export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): Snapshot
       subject: m.subject,
       firstLine: firstLine(m.body),
       inReplyTo: m.inReplyTo,
-      base: m.kind === 'direct' ? senderKey(m) : m.to,
+      // Mail to one of my own service addresses is a conversation with its sender, as direct
+      // mail is: keyed by the service, every caller would share one thread.
+      base: m.kind === 'direct' || m.kind === 'service' ? senderKey(m) : m.to,
     })),
     ...sent.map((s) => ({
       id: s.id,
