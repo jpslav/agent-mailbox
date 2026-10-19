@@ -98,6 +98,11 @@ export interface SessionState {
   parent?: string | null;
   /** One line about what the session is doing (`mbox status`). */
   status?: string | null;
+  /**
+   * The session's title (`mbox title`, or the agent's own session title from its session-start
+   * hook): self-asserted, display only.
+   */
+  title?: string | null;
   /** The help areas this session offers (`mbox offer`), sorted; absent until set. */
   offers?: string[];
   /**
@@ -210,6 +215,8 @@ export interface PresenceRecord {
   status: string | null;
   /** The help areas the session offers (`mbox offer`), sorted. */
   offers: string[];
+  /** The session's title, one line (`mbox title`); added in 0.8.0, after `offers`. */
+  title: string | null;
 }
 
 /** A live session as `presence.list()` reports it. */
@@ -233,9 +240,139 @@ export interface PresenceEntry {
   status: string | null;
   /** Well-formed areas only, sorted, at most MAX_OFFERS (areas.ts). */
   offers: string[];
+  /** One line, like `status`; null when absent (entries written before 0.8.0). */
+  title: string | null;
   /** When the entry was last refreshed (ms since the epoch). */
   lastSeen: number;
   live: true;
+}
+
+// ---------------------------------------------------------------- sent log and snapshot
+
+/** How a message travelled: to a session, to everyone, to a help area, or to a service address. */
+export type MailKind = 'direct' | 'broadcast' | 'ask' | 'service';
+
+/**
+ * One line of a session's sent log (`<state>/sessions/<sid>.sent.jsonl`, sentlog.ts): a message
+ * this session sent. Local only: sent mail lands in the recipient's stream, which the sender cannot
+ * read back.
+ */
+export interface SentRecord {
+  id: string;
+  /** The recipient: a session or service address, 'all', or `area:<area>`. */
+  to: string;
+  kind: MailKind;
+  /** The area of an ask, else null. */
+  area: string | null;
+  subject: string | null;
+  /** Cut to SENT_BODY_MAX characters. */
+  body: string;
+  isTruncated: boolean;
+  inReplyTo: string | null;
+  /** When it was sent (ms since the epoch). */
+  time: number;
+}
+
+/** `mbox snapshot --json`: the session as a side panel draws it (snapshot.ts). Version 1. */
+export interface Snapshot {
+  v: 1;
+  /** When it was built (ms since the epoch). */
+  at: number;
+  /** The lookback, as given (`24h`). */
+  since: string;
+  /** The delivery daemon's snapshot socket, or null when none serves this session. */
+  socket: string | null;
+  self: SnapshotSelf;
+  peers: SnapshotPeer[];
+  mail: SnapshotMail[];
+  sent: SnapshotSent[];
+  threads: SnapshotThread[];
+  areas: SnapshotArea[];
+}
+
+export interface SnapshotSelf {
+  address: string;
+  aliases: string[];
+  user: string;
+  host: string | null;
+  title: string | null;
+  status: string | null;
+  role: Role | null;
+  parent: string | null;
+  offers: string[];
+  services: string[];
+  repo: string | null;
+  branch: string | null;
+}
+
+/** How a peer relates to this session; the first that applies, in this order. */
+export type PeerRelation =
+  'parent' | 'child' | 'sibling' | 'same-repo' | 'correspondent' | 'mine' | 'other';
+
+export interface SnapshotPeer {
+  address: string;
+  aliases: string[];
+  user: string;
+  host: string;
+  agent: string | null;
+  title: string | null;
+  status: string | null;
+  role: Role | null;
+  parent: string | null;
+  repo: string | null;
+  branch: string | null;
+  offers: string[];
+  services: string[];
+  lastSeen: number;
+  relation: PeerRelation;
+}
+
+export interface SnapshotMail {
+  id: string;
+  from: string;
+  to: string;
+  kind: MailKind;
+  area: string | null;
+  subject: string | null;
+  body: string;
+  isTruncated: boolean;
+  /** The sender's user as the server verified it; null when unknown. */
+  verifiedUser: string | null;
+  /** The envelope's `from` names another user than the verified one. */
+  isMismatch: boolean;
+  inReplyTo: string | null;
+  sentAt: string | null;
+  /** When the server stored it (ms since the epoch). */
+  time: number;
+}
+
+export type SnapshotSent = SentRecord;
+
+export interface SnapshotThreadMessage {
+  id: string;
+  dir: 'in' | 'out';
+  time: number;
+  subject: string | null;
+  firstLine: string;
+  inReplyTo: string | null;
+}
+
+export interface SnapshotThread {
+  /** The counterpart: a session or service address, 'all' or `area:<area>`. */
+  with: string;
+  kind: MailKind;
+  lastAt: number;
+  count: number;
+  /** The last message in it is incoming. */
+  isAwaitingMe: boolean;
+  messages: SnapshotThreadMessage[];
+}
+
+export interface SnapshotArea {
+  area: string;
+  /** How many live sessions offer it (this one included). */
+  offeredBy: number;
+  isMine: boolean;
 }
 
 // ---------------------------------------------------------------- events feed

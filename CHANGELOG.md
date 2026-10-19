@@ -12,6 +12,34 @@ treat them as approximate.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
+### Added
+- `mbox snapshot --json [--since 24h]`: one process, one server connection, one JSON object
+  (version 1) with the session itself, the live peers (with their relation to it: parent, child,
+  sibling, same repo, correspondent, the same user, or other), the mail `mbox inbox` reads over
+  the lookback, the messages the session sent, both paired into threads, and the help areas live
+  sessions offer (at most the newest 200 received messages; `--since` up to 30d). Made for a side panel that used to spawn `whoami`, `peers` and `inbox` every
+  minute. Bodies are cut to 2000 characters and passed on as untrusted text.
+- A per-session sent log: `mbox send` and `mbox ask` append what they sent to
+  `sessions/<id>.sent.jsonl` in the state directory (mode 0600, the newest 500 kept). Sent mail
+  cannot be read back from the server, so this local file is the only record of it.
+- Session titles: `mbox title [text] [--clear]` sets a one-line title (at most 120 characters,
+  checked like a status), shown in a TITLE column of `mbox peers`, in `mbox whoami` and in
+  presence as `title`. The Claude Code session-start hook sets it from the session's own title
+  when the hook payload carries one (`session_title`), on every start, resume and compaction.
+- The skill and `mbox guide peers` ask sessions to keep `mbox status` current when their task
+  changes.
+
+### Changed
+- Presence entries carry `title` after `offers`. Earlier clients ignore it; this one reads an
+  entry without it as no title.
+- `mbox peers` has a TITLE column after USER@HOST.
+
+### Upgrading
+- Nothing to do on the server. Titles are visible to every mailbox user, like the rest of
+  presence: a Claude Code session's own title is published there from now on.
+
 ## [0.7.0] - 2026-10-18
 
 Completes v0.7 (asks and offers in 0.6.1, service addresses here).

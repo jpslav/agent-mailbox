@@ -1,4 +1,5 @@
-// Session metadata shown in presence: what a session says about itself (role, parent, status)
+// Session metadata shown in presence: what a session says about itself (role, parent, status,
+// title)
 // and what it is working on (repo and branch of its working directory). All of it is display
 // only. Role and parent are self-asserted and never grant authority; peers check every field for
 // shape (`checkRole`, `checkParent`, `checkStatus`, ...) because any user can write anything into
@@ -40,6 +41,12 @@ export function checkStatus(v: unknown): string | null {
   const chars = [...t];
   return chars.length > STATUS_MAX ? chars.slice(0, STATUS_MAX - 1).join('') + '…' : t;
 }
+
+/** The longest title `mbox title` accepts; checked exactly like a status. */
+export const TITLE_MAX = STATUS_MAX;
+
+/** A session's title (`mbox title`): one line of at most TITLE_MAX characters, or null. */
+export const checkTitle = (v: unknown): string | null => checkStatus(v);
 
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export const checkRepo = (v: unknown): string | null =>

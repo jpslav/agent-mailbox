@@ -37,10 +37,18 @@ describe('adapter registry', () => {
   it('claude-code hookInput / canWait', () => {
     assert.deepEqual(
       claudeCode.hookInput({ session_id: 's-1', cwd: '/w', hook_event_name: 'Stop' }),
-      { sessionId: 's-1', cwd: '/w' },
+      { sessionId: 's-1', cwd: '/w', title: null },
     );
-    assert.deepEqual(claudeCode.hookInput(null), { sessionId: null, cwd: null });
-    assert.deepEqual(claudeCode.hookInput({ session_id: 7 }), { sessionId: null, cwd: null });
+    assert.deepEqual(
+      claudeCode.hookInput({ session_id: 's-1', cwd: '/w', session_title: 'Fix login' }),
+      { sessionId: 's-1', cwd: '/w', title: 'Fix login' },
+    );
+    assert.deepEqual(claudeCode.hookInput(null), { sessionId: null, cwd: null, title: null });
+    assert.deepEqual(claudeCode.hookInput({ session_id: 7, session_title: 3 }), {
+      sessionId: null,
+      cwd: null,
+      title: null,
+    });
     assert.equal(claudeCode.canWait({}), true);
     assert.equal(claudeCode.canWait({ CLAUDE_CODE_ENTRYPOINT: 'cli' }), true);
     assert.equal(claudeCode.canWait({ CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }), false); // a running hook there queues the user's input

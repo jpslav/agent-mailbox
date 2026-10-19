@@ -38,6 +38,7 @@ export function presenceRecord(
     parent: st.parent ?? null,
     status: st.status ?? null,
     offers: checkOffers(st.offers),
+    title: st.title ?? null,
   };
 }
 

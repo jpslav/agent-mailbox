@@ -498,3 +498,35 @@ context, decision, why.
   nothing). The receiver drops a service whose claim it finds gone while its subscription runs (a
   claim that lapsed during a long stall without a reconnect) even if nobody took it; claiming it
   again brings it back.
+
+## Snapshot for a side panel: one process, a local sent log, titles in presence
+
+- **Date:** 2026-10
+- **Context:** A Claude Code side panel shows the mailbox next to a session: who is around and how
+  they relate to it, recent mail and the conversations it belongs to. It spawned `mbox whoami`,
+  `mbox peers --tree` and `mbox inbox` every minute and parsed their tables: three processes and
+  three server connections per poll, a format made for people, and no record of what the session
+  itself had sent.
+- **Decision:** `mbox snapshot --json` prints one JSON object (version 1) built in one process
+  over one connection. The assembly (relations, threads, areas, cutting to length) is a pure
+  module (`src/core/snapshot.ts`) fed by the CLI, so another process holding the same inputs builds
+  the same object. Mail is the set `mbox inbox` reads. `mbox send` and `mbox ask` append each
+  sent message to a per-session local file, `sessions/<sid>.sent.jsonl` (0600, append-only under a
+  lock file, compacted to the newest 500 records, corrupt lines skipped), and threads pair it with
+  received mail by counterpart, a reply joining the thread of the message it answers. Presence
+  carries a new `title` (one line, checked exactly like `status`), set by `mbox title` or, for
+  Claude Code, by the session-start hook from the session's own title (`session_title`).
+- **Why:** Sent mail cannot be read back from the server by design: it is stored for its
+  recipients (their stream, the broadcasts, the asks), and a user may read only their own stream
+  (see "Per-user accounts"). Granting a sender read access to what it sent would widen exactly the
+  boundary that keeps users apart, so the sender keeps its own copy, locally, where only it can
+  read it. Building the object in core keeps it agent- and broker-neutral and testable without a
+  server. The title is what a person recognises a session by; status says what it is doing now.
+- **Limits:** the sent log records what this session sent through `mbox`, on this machine only;
+  a session moved to another machine starts a new log, and a lost state directory loses it.
+  Threads are a display aid: `inReplyTo` is self-asserted, so a forged reply can appear in
+  another thread; received mail whose `from` is not an address of its verified user is kept in an
+  `unverified:<user>` thread rather than the thread it claims. A snapshot lists at most the newest
+  200 received messages, over at most 30 days. The title is published to every mailbox user like the rest of
+  presence; whether the hook should publish the agent's session title without being asked is the
+  repo owner's call (it does in 0.8.0).

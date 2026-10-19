@@ -46,11 +46,21 @@ import {
 import {
   ROLES,
   STATUS_MAX,
+  TITLE_MAX,
   checkParent,
   checkRole,
+  checkTitle,
+  gitInfo,
   statusLength,
   statusLine,
 } from './core/session-meta.js';
+import { appendSentLog, readSentLog, sentRecord } from './core/sentlog.js';
+import {
+  SNAPSHOT_SINCE,
+  SNAPSHOT_SINCE_MAX_MS,
+  buildSnapshot,
+  snapshotAddresses,
+} from './core/snapshot.js';
 import {
   ForeignAddressError,
   NoSessionError,
@@ -64,6 +74,7 @@ import {
 import { createTransport, explainError, validateServer } from './core/transport/nats.js'; // composition root: the only place that picks the broker
 import type {
   Config,
+  Envelope,
   EventKind,
   FeedEntry,
   PresenceEntry,
@@ -287,7 +298,7 @@ async function recordEvent(
 program
   .command('whoami')
   .description(
-    "print this session's mailbox address (and aliases, role, parent, status, offers, services); --role/--parent set them",
+    "print this session's mailbox address (and aliases, role, parent, title, status, offers, services); --role/--parent set them",
   )
   .option('--role <role>', `this session's role: ${ROLES.join(', ')} or none (display only)`)
   .option('--parent <address>', 'the address of the session that spawned this one, or none')
@@ -322,6 +333,7 @@ program
       if (st.aliases.length) console.log(`aliases: ${st.aliases.join(', ')}`);
       if (st.role) console.log(`role: ${st.role}`);
       if (st.parent) console.log(`parent: ${st.parent}`);
+      if (st.title) console.log(`title: ${st.title}`);
       if (st.status) console.log(`status: ${st.status}`);
       if (st.offers?.length) console.log(`offers: ${st.offers.join(', ')}`);
       if (st.services?.length) console.log(`services: ${st.services.join(', ')}`);
@@ -354,15 +366,38 @@ program
   );
 
 /** A status line from the command line, or a usage error saying what is wrong with it. */
-function checkedStatus(text: string | undefined): string {
+function checkedStatus(text: string | undefined, what = 'status', max = STATUS_MAX): string {
   const status = statusLine(text);
-  if (!status) throw new UsageError('empty status: use --clear to remove it');
-  if (statusLength(status) > STATUS_MAX)
+  if (!status) throw new UsageError(`empty ${what}: use --clear to remove it`);
+  if (statusLength(status) > max)
     throw new UsageError(
-      `status is ${statusLength(status)} characters; the limit is ${STATUS_MAX}. Shorten it.`,
+      `${what} is ${statusLength(status)} characters; the limit is ${max}. Shorten it.`,
     );
   return status;
 }
+
+// ---------------------------------------------------------------- title
+program
+  .command('title')
+  .description(
+    `set this session's title (one line, max ${TITLE_MAX} characters) shown in mbox peers; the session-start hook sets it from the agent's own session title`,
+  )
+  .argument('[text]', 'the new title; omitted prints the current one')
+  .option('--clear', 'remove the title')
+  .action(
+    action(async (text: string | undefined, opts: { clear?: boolean }) => {
+      const ctx = await context();
+      if (opts.clear && text !== undefined)
+        throw new UsageError('pass either a title or --clear, not both');
+      if (!opts.clear && text === undefined) {
+        console.log(ctx.st.title ?? '(no title)');
+        return;
+      }
+      const title = opts.clear ? null : checkedStatus(text, 'title', TITLE_MAX);
+      const next = await saveAndAnnounce(ctx, (s) => ({ ...s, title }));
+      console.log(next.title ?? '(no title)');
+    }),
+  );
 
 // ---------------------------------------------------------------- done
 program
@@ -712,6 +747,26 @@ async function serviceLive(
   }
 }
 
+/** Add a sent message to the session's sent log; a failure is a warning (the message is sent). */
+function recordSent(sid: string, envelope: Envelope): void {
+  try {
+    appendSentLog(
+      sid,
+      sentRecord({
+        id: envelope.id,
+        to: envelope.to,
+        subject: envelope.subject,
+        body: envelope.body,
+        inReplyTo: envelope.inReplyTo,
+      }),
+    );
+  } catch (e) {
+    process.stderr.write(
+      `warning: could not add the message to this session's sent log (${errMessage(e)})\n`,
+    );
+  }
+}
+
 program
   .command('send')
   .description(
@@ -727,7 +782,7 @@ program
   .action(
     action(
       async (to: string, text: string | undefined, opts: { subject?: string; re?: string }) => {
-        const { cfg, transport, st, agent } = await context();
+        const { cfg, transport, sid, st, agent } = await context();
         let body = text;
         if (body === '-' || (body === undefined && !process.stdin.isTTY))
           body = await readStdin(body === undefined ? 3000 : 0);
@@ -769,6 +824,7 @@ program
           );
         }
         const res = await transport.publish(target.to, envelope);
+        recordSent(sid, envelope);
         if (service && !serviceKnown) {
           process.stderr.write(
             `warning: could not check whether a live session holds ${to}; the message is stored on the server either way.\n`,
@@ -831,6 +887,7 @@ program
           'ALIASES',
           'AGENT',
           'USER@HOST',
+          'TITLE',
           'ROLE',
           'REPO',
           'BRANCH',
@@ -847,6 +904,7 @@ program
           p.aliases.length ? p.aliases.map((a) => oneLine(a, 60)).join(',') : '-',
           oneLine(p.agent ?? '-', 30),
           `${oneLine(p.user ?? '?', 30)}@${oneLine(p.host ?? '?', 30)}`,
+          oneLine(p.title ?? '-', 60),
           p.role ?? '-',
           p.repo ?? '-',
           oneLine(p.branch ?? '-', 40),
@@ -1160,6 +1218,7 @@ program
           `question is ${size} bytes as an envelope but your configured limit (AGENT_MAILBOX_MAX_BYTES / "maxMessageBytes") is ${cfg.maxBytes}. Shorten it or raise the limit.`,
         );
       const res = await transport.publish(areaAddress(area), envelope);
+      recordSent(sid, envelope);
       try {
         const helpers = (await transport.presence.list()).filter(
           (p) => p.live && p.offers.includes(area) && p.session !== sid,
@@ -1210,6 +1269,53 @@ program
         n++;
       }
       if (!n) console.log(`no messages in the last ${opts.since}`);
+    }),
+  );
+
+// ---------------------------------------------------------------- snapshot
+program
+  .command('snapshot')
+  .description(
+    'print this session, live peers, recent mail, sent messages, threads and help areas as one JSON object (for a side panel)',
+  )
+  .option('--json', 'JSON output (required: the only format)')
+  .option(
+    '--since <dur>',
+    'how far back for mail and sent messages (e.g. 30m, 2h, 1d)',
+    SNAPSHOT_SINCE,
+  )
+  .action(
+    action(async (opts: { json?: boolean; since: string }) => {
+      if (!opts.json) throw new UsageError('pass --json (the only output format)');
+      if (!/^\d+[smhd]$/.test(opts.since))
+        throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
+      const lookback = sinceMs(opts.since);
+      if (lookback > SNAPSHOT_SINCE_MAX_MS)
+        throw new UsageError(`--since is at most 30d (got "${opts.since}")`);
+      const { cfg, transport, sid, st } = await context();
+      const [peers, claims, deliveries] = await Promise.all([
+        transport.presence.list(),
+        transport.services.list().catch((): ServiceClaim[] => []),
+        // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
+        transport.poll(snapshotAddresses(st), { lookbackMs: lookback, max: Infinity }),
+      ]);
+      const { repo, branch } = gitInfo(st.cwd);
+      const snap = buildSnapshot({
+        now: Date.now(),
+        since: opts.since,
+        sinceMs: lookback,
+        socket: null,
+        user: cfg.user,
+        sid,
+        state: st,
+        repo,
+        branch,
+        peers,
+        claims,
+        deliveries,
+        sent: readSentLog(sid),
+      });
+      process.stdout.write(JSON.stringify(snap) + '\n');
     }),
   );
 
@@ -1522,6 +1628,16 @@ program
           return { state, replaced };
         },
         endSession: (sid) => endSession({ sid, ...configured(), agent: adapter.id }),
+        // The state file only: the session's receiver sees it change and announces it (a
+        // presence write here could hold the hook up on a slow server).
+        setTitle: (sid, text) => {
+          const title = checkTitle(text);
+          try {
+            if (title) updateState(sid, (s) => ({ ...s, title }));
+          } catch {
+            /* display only */
+          }
+        },
         event: async (sid, event) => {
           const st = readState(sid);
           if (!st || !cfg || !transport) return;

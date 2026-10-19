@@ -597,6 +597,7 @@ describe('peer resolution', () => {
     parent: null,
     status: null,
     offers: [],
+    title: null,
     lastSeen: 0,
   }); // `live: false` is a deliberately non-live entry
   const peers = [
@@ -792,6 +793,7 @@ describe('session metadata', () => {
       parent,
       status: null,
       offers: [],
+      title: null,
       lastSeen: 0,
       live: true,
     });

@@ -302,8 +302,8 @@ export async function openReceiver({
 
   // ---- housekeeping timers ----
   /**
-   * Take in what `mbox name`, `mbox offer`, `mbox whoami` and `mbox status` wrote to the state
-   * file: a new alias or offer resubscribes, role, parent and status only change what presence
+   * Take in what `mbox name`, `mbox offer`, `mbox whoami`, `mbox status` and `mbox title` wrote to
+   * the state file: a new alias or offer resubscribes, role, parent, status and title only change what presence
    * says (offers show there too). Returns whether anything changed.
    */
   const adoptState = (): boolean => {
@@ -318,7 +318,10 @@ export async function openReceiver({
       JSON.stringify(next.offers ?? []) !== JSON.stringify(st.offers ?? []) ||
       JSON.stringify(next.services ?? []) !== JSON.stringify(st.services ?? []);
     const metaChanged =
-      next.role !== st.role || next.parent !== st.parent || next.status !== st.status;
+      next.role !== st.role ||
+      next.parent !== st.parent ||
+      next.status !== st.status ||
+      next.title !== st.title;
     if (!aliasesChanged && !metaChanged) return false;
     st = next;
     if (aliasesChanged) {

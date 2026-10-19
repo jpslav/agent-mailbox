@@ -19,6 +19,7 @@ import {
   fromRelease,
   makeEnv,
   mbox,
+  parseJson,
   projectDir,
   sleep,
   type MachineEnv,
@@ -785,6 +786,60 @@ describe(
         0,
       );
       await w.waitFor(/after init/, 30000);
+    });
+  },
+);
+
+const CLIENT_070 = fromRelease('v0.7.0', BUNDLE);
+describe(
+  'presence titles (0.8.0) beside a v0.7.0 client',
+  { skip: SERVER.skip ?? CLIENT_070.skip },
+  () => {
+    let b: Broker | null = null;
+    const watchers: Watcher[] = [];
+    after(async () => {
+      await Promise.all(watchers.map((w) => w.stop().catch(() => {})));
+      await b?.stop();
+    });
+
+    it('the v0.7.0 client lists an entry with a title; this one reads an entry without one as null', async () => {
+      b = new Broker(SERVER);
+      const broker = b;
+      await broker.init(['alice', 'bob']);
+      const aliceEnv = makeEnv(broker, 'alice');
+      const bobEnv = makeEnv(broker, 'bob');
+      const dir = projectDir('title-upgrade');
+      const old = CLIENT_070.path;
+      const run = (bundle: string | undefined, env: MachineEnv, s: string, args: string[]) =>
+        mbox(args, {
+          env: { ...env, AGENT_MAILBOX_SESSION: s },
+          cwd: dir,
+          ...(bundle ? { bundle } : {}),
+        });
+
+      // A new client's entry, with a title.
+      const nw = new Watcher(aliceEnv, { cwd: dir, session: 'a-new' });
+      watchers.push(nw);
+      const [, aliceAddr = ''] = await nw.waitFor(/online as ([a-z0-9.-]*[a-z0-9])/);
+      assert.equal(run(undefined, aliceEnv, 'a-new', ['title', 'Alice title']).code, 0);
+      // An old client's entry, without one.
+      const ow = new Watcher(bobEnv, { cwd: dir, session: 'b-old', bundle: old });
+      watchers.push(ow);
+      const [, bobAddr = ''] = await ow.waitFor(/online as ([a-z0-9.-]*[a-z0-9])/);
+
+      const oldPeers = run(old, bobEnv, 'b-old', ['peers']);
+      assert.equal(oldPeers.code, 0, oldPeers.stderr);
+      assert.equal(oldPeers.stdout.split(aliceAddr).length - 1, 1, oldPeers.stdout);
+      assert.doesNotMatch(oldPeers.stdout, /Alice title/);
+
+      const peers = run(undefined, aliceEnv, 'a-new', ['peers']);
+      assert.equal(peers.code, 0, peers.stderr);
+      assert.match(peers.stdout, new RegExp(`${bobAddr.replace(/\./g, '\\.')}.*bob@\\S+\\s+-\\s`));
+      assert.match(peers.stdout, /Alice title/);
+      const snap = parseJson<{ peers: Array<{ address: string; title: string | null }> }>(
+        run(undefined, aliceEnv, 'a-new', ['snapshot', '--json']).stdout,
+      );
+      assert.equal(snap.peers.find((p) => p.address === bobAddr)?.title, null);
     });
   },
 );

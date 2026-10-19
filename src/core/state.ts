@@ -7,13 +7,14 @@
 //   <sid>.lock         single-receiver pidfile (`mbox watch`, or `mbox deliverd` serving the session)
 //   <sid>.wait.lock    current hook waiter (`mbox wait`); the newest claim wins
 //   <sid>.ended        the session's `ended` event was written (claimEnded); `started` removes it
+//   <sid>.sent.jsonl   the messages this session sent, newest last (sentlog.ts; local only)
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaultLabel, fitLabel, parseAddr, shortHost } from './addr.js';
 import { checkOffers } from './areas.js';
 import { checkServices } from './services.js';
 import { profileName, xdgDir } from './config.js';
-import { checkParent, checkRole, checkStatus } from './session-meta.js';
+import { checkParent, checkRole, checkStatus, checkTitle } from './session-meta.js';
 import type { Config, CursorFile, Env, Role, SessionState, Transport } from './types.js';
 
 export class NoSessionError extends Error {
@@ -53,6 +54,9 @@ export const waitLockPath = (sid: string, env: Env = process.env): string =>
 /** Present once the session's `ended` event was claimed; `started` removes it (see events.ts). */
 export const endedPath = (sid: string, env: Env = process.env): string =>
   path.join(sessionsDir(env), `${sid}.ended`);
+/** The session's sent log (sentlog.ts). */
+export const sentLogPath = (sid: string, env: Env = process.env): string =>
+  path.join(sessionsDir(env), `${validSid(sid)}.sent.jsonl`);
 
 /**
  * Claim writing the session's `ended` event: true for the first caller since the session last
@@ -158,6 +162,7 @@ export function readState(sid: string, env: Env = process.env): SessionState | n
     role: checkRole(s.role),
     parent: checkParent(s.parent),
     status: checkStatus(s.status),
+    title: checkTitle(s.title),
     ...(offers !== undefined && { offers: checkOffers(offers) }),
     // Only the address's own user's services: a claim is made with that user's credentials.
     ...(services !== undefined && {
@@ -344,18 +349,27 @@ export function updateState(
   fn: (st: SessionState) => SessionState | void,
   env: Env = process.env,
 ): SessionState {
-  const lockFile = `${statePath(sid, env)}.lock`;
+  return withFileLock(`${statePath(sid, env)}.lock`, () => {
+    const st = readState(sid, env);
+    if (!st) throw new Error(`no state for session ${sid}`);
+    const next = fn({ ...st, aliases: [...st.aliases] }) || st;
+    atomicWriteJson(statePath(sid, env), next);
+    return next;
+  });
+}
+
+/**
+ * Run `fn` holding the pidfile lock `lockFile` (its directory must exist). Waits up to about 2 s
+ * for the lock, then runs anyway: a stuck lock must not block commands.
+ */
+export function withFileLock<T>(lockFile: string, fn: () => T): T {
   let lock = acquireFileLock(lockFile);
   for (let i = 0; !lock.ok && i < 200; i++) {
     sleepSync(10);
     lock = acquireFileLock(lockFile);
   }
   try {
-    const st = readState(sid, env);
-    if (!st) throw new Error(`no state for session ${sid}`);
-    const next = fn({ ...st, aliases: [...st.aliases] }) || st;
-    atomicWriteJson(statePath(sid, env), next);
-    return next;
+    return fn();
   } finally {
     if (lock.ok) lock.release();
   }
