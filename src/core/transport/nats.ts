@@ -144,7 +144,14 @@ import { SEG_RE } from '../addr.js';
 import { AREA_PREFIX, areaAddress, areaOf, checkOffers } from '../areas.js';
 import { checkEvent } from '../events.js';
 import { isService, parseService } from '../services.js';
-import { checkBranch, checkParent, checkRepo, checkRole, checkStatus } from '../session-meta.js';
+import {
+  checkBranch,
+  checkParent,
+  checkRepo,
+  checkRole,
+  checkStatus,
+  checkTitle,
+} from '../session-meta.js';
 import type {
   Cursor,
   Delivery,
@@ -471,6 +478,7 @@ interface UntrustedPresence {
   parent?: unknown;
   status?: unknown;
   offers?: unknown;
+  title?: unknown;
 }
 
 /**
@@ -1452,6 +1460,7 @@ export function createTransport(
           parent: checkParent(j.parent),
           status: checkStatus(j.status),
           offers: checkOffers(j.offers),
+          title: checkTitle(j.title), // 0.8.0; absent (null) in older entries
           lastSeen: m.time.getTime(),
           live: true,
         });

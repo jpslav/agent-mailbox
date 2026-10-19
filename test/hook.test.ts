@@ -133,6 +133,28 @@ describe('hook session-start', () => {
     assert.equal(st.parent, undefined);
   });
 
+  it("takes the session's title from session_title, as one checked line; no title leaves it alone", () => {
+    const env = {
+      ...baseEnv(),
+      AGENT_MAILBOX_SERVERS: 'nats://127.0.0.1:9',
+      AGENT_MAILBOX_USER: 'zed',
+      AGENT_MAILBOX_PASSWORD: 'pw-x',
+    };
+    const file = path.join(env.AGENT_MAILBOX_STATE_DIR, 'sessions', 'hooksess-1234.json');
+    const start = (extra: Record<string, unknown>): Record<string, unknown> => {
+      const input = JSON.stringify({ ...parseJson<object>(stdin), ...extra });
+      const r = mbox(['hook', 'claude-code', 'session-start'], { env, input });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(parseJson<HookOutput>(r.stdout).hookSpecificOutput.additionalContext, /zed\./);
+      return parseJson<Record<string, unknown>>(fs.readFileSync(file, 'utf8'));
+    };
+    assert.equal(start({}).title, undefined);
+    assert.equal(start({ session_title: 'Fix\nthe login' }).title, 'Fix the login');
+    assert.equal(start({ source: 'compact' }).title, 'Fix the login');
+    assert.equal(start({ session_title: 'y'.repeat(300) }).title, 'y'.repeat(119) + '…');
+    assert.equal(start({ session_title: 42 }).title, 'y'.repeat(119) + '…');
+  });
+
   it('never fails: garbage stdin, no session id, unknown agent or event all exit 0', () => {
     assert.equal(
       mbox(['hook', 'claude-code', 'session-start'], { env: baseEnv(), input: 'not json' }).code,

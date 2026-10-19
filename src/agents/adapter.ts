@@ -12,10 +12,12 @@ import type {
 
 export type { DeliveryCapability, DeliveryMeta } from '../core/types.js';
 
-/** What a hook payload says: the session and the directory it works in. */
+/** What a hook payload says: the session, the directory it works in and, maybe, its title. */
 export interface HookInput {
   sessionId: string | null;
   cwd: string | null;
+  /** The agent's own title for the session, when the payload carries one (untrusted text). */
+  title?: string | null;
 }
 
 /** What HookContext.ensure found. */
@@ -43,6 +45,11 @@ export interface HookContext {
   ensure(sid: string, cwd: string): Promise<EnsuredSession>;
   /** The session ended: write `ended` to the user's events feed and remove its presence entry. */
   endSession(sid: string): Promise<void>;
+  /**
+   * Set the session's title (`ensure` it first): one line, cut to the title limit, in its state;
+   * its receiver publishes it in presence (display only). Never throws.
+   */
+  setTitle(sid: string, title: string): void;
   /** Write an event about the session (`ensure` it first) to the user's feed; never throws. */
   event(sid: string, event: EventKind): Promise<void>;
   /** Register the session for push delivery (writes its registration file). */

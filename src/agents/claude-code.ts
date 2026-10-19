@@ -6,6 +6,8 @@
 //     (CLAUDE_CODE_MESSAGING_SOCKET, see claude-inbox.ts) for the delivery daemon, and starts that
 //     daemon (`mbox deliverd`, one per profile and machine) if it is not running. The daemon posts
 //     each batch of mail into the session's inbox socket; an idle session starts a turn with it.
+//     When the payload carries the session's title (`session_title`), the hook publishes it as
+//     the session's mailbox title (`mbox title`), on every start, resume and compaction.
 //   - SessionEnd runs `mbox hook claude-code session-end` to remove the registration (also on
 //     /clear, so a cleared conversation does not get the old session's mail).
 // The two hooks also write `started` (not on a compaction) and `ended` to the user's events feed.
@@ -53,15 +55,17 @@ const adapter = {
     return Number.isInteger(n) && n > 0 ? n : null;
   },
 
-  /** Session id and working directory from a hook's stdin JSON. */
+  /** Session id, working directory and session title (SessionStart) from a hook's stdin JSON. */
   hookInput(input): HookInput {
     const o = (input && typeof input === 'object' ? input : {}) as {
       session_id?: unknown;
       cwd?: unknown;
+      session_title?: unknown;
     };
     return {
       sessionId: typeof o.session_id === 'string' && o.session_id ? o.session_id : null,
       cwd: typeof o.cwd === 'string' && o.cwd ? o.cwd : null,
+      title: typeof o.session_title === 'string' && o.session_title ? o.session_title : null,
     };
   },
 
@@ -99,6 +103,7 @@ const adapter = {
       if (!sid) return '';
       const cwd = hook.cwd || process.cwd();
       const { state: st, replaced } = await ctx.ensure(sid, cwd);
+      if (hook.title) ctx.setTitle(sid, hook.title);
       // A compaction restarts the hook inside a running session: not a start.
       if (startSource(input) !== 'compact') await ctx.event(sid, 'started');
       const endpoint = adapter.delivery.endpointFromHook(input, ctx.env);

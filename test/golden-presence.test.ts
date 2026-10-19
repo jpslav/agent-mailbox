@@ -23,7 +23,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
   after(() => b?.stop());
 
   // 0.5.6 added repo, branch, role, parent and status after pid (#15), 0.6.1 offers after status
-  // (#18); older readers ignore them.
+  // (#18), 0.8.0 title after offers; older readers ignore them (test/upgrade.test.ts).
   it('the stored value is the presence record plus "at", under key <user>.<host>.<12 hex of sha256(session)>', async () => {
     const t = createTransport({ servers: [b.url], user: 'alice', password: b.password('alice') });
     const nc = await b.conn('admin'); // a user may not read raw KV entries; the test inspects them as the admin
@@ -38,6 +38,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
           parent: 'alice.laptop.mgr-9c8d',
           status: 'running the tests',
           offers: ['repo:github.com/acme/web', 'lang:ts'],
+          title: 'Fix the login page',
         },
         {
           sid: 'sess-1',
@@ -57,7 +58,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
       assert.ok(at, raw);
       assert.equal(
         raw,
-        `{"address":"alice.laptop.web-1a2b","aliases":["alice.laptop.front"],"session":"sess-1","agent":"claude-code","user":"alice","host":"laptop","cwd":"/work/web","pid":4242,"repo":"acme/web","branch":"feat/login","role":"worker","parent":"alice.laptop.mgr-9c8d","status":"running the tests","offers":["lang:ts","repo:github.com/acme/web"],"at":"${at[1]}"}`,
+        `{"address":"alice.laptop.web-1a2b","aliases":["alice.laptop.front"],"session":"sess-1","agent":"claude-code","user":"alice","host":"laptop","cwd":"/work/web","pid":4242,"repo":"acme/web","branch":"feat/login","role":"worker","parent":"alice.laptop.mgr-9c8d","status":"running the tests","offers":["lang:ts","repo:github.com/acme/web"],"title":"Fix the login page","at":"${at[1]}"}`,
       );
       // ...and the listing built from it
       const [peer] = await t.presence.list();
@@ -77,6 +78,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
         'parent',
         'status',
         'offers',
+        'title',
         'lastSeen',
         'live',
       ]);
@@ -97,6 +99,7 @@ describe('golden: presence KV entry', { skip: SERVER.skip }, () => {
           parent: 'alice.laptop.mgr-9c8d',
           status: 'running the tests',
           offers: ['lang:ts', 'repo:github.com/acme/web'],
+          title: 'Fix the login page',
           lastSeen: 0,
           live: true,
         },
