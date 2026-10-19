@@ -19705,15 +19705,16 @@ function checkSentRecord(v) {
     return null;
   const kind = KINDS.find((k) => k === o.kind) ?? kindOf(o.to);
   const { text, isTruncated } = cutText(o.body, SENT_BODY_MAX);
+  const field = (x) => cutText(x, 256).text;
   return {
-    id: o.id,
-    to: o.to,
+    id: field(o.id),
+    to: field(o.to),
     kind,
     area: areaOf(o.to),
     subject: cutSubject(str(o.subject)),
     body: text,
     isTruncated: isTruncated || o.isTruncated === true,
-    inReplyTo: str(o.inReplyTo),
+    inReplyTo: str(o.inReplyTo) === null ? null : field(o.inReplyTo),
     time: o.time
   };
 }
@@ -19761,6 +19762,11 @@ var SNAPSHOT_SINCE = "24h";
 var SINCE_RE = /^\d{1,6}[smhd]$/;
 var UNIT_MS = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
 var sinceToMs = (since) => parseInt(since, 10) * UNIT_MS[since.slice(-1)];
+var SNAPSHOT_SINCE_MAX_MS = 30 * 864e5;
+var SNAPSHOT_MAIL_MAX = 200;
+var FIELD_MAX = 256;
+var cutField = (s) => cutText(s, FIELD_MAX).text;
+var cutNullable = (s) => s === null ? null : cutField(s);
 function firstLine(body) {
   const line = body.split(/\r\n?|\n/).map((l) => l.trim()).find((l) => l) ?? "";
   return oneLine(line, FIRST_LINE_MAX);
@@ -19780,9 +19786,9 @@ function snapshotMail(input) {
     const { text, isTruncated } = cutText(m.body, SNAPSHOT_BODY_MAX);
     const claimed = m.raw ? null : m.from.split(".")[0] ?? null;
     out.push({
-      id: m.id,
-      from: m.from,
-      to: d.to,
+      id: cutField(m.id),
+      from: cutField(m.from),
+      to: cutField(d.to),
       kind,
       area: areaOf(d.to),
       subject: cutSubject(m.subject),
@@ -19790,12 +19796,16 @@ function snapshotMail(input) {
       isTruncated,
       verifiedUser: m.sender,
       isMismatch: !!m.sender && claimed !== null && claimed !== m.sender,
-      inReplyTo: m.inReplyTo,
-      sentAt: m.sentAt,
+      inReplyTo: cutNullable(m.inReplyTo),
+      sentAt: cutNullable(m.sentAt),
       time
     });
   }
-  return out.sort((a, b) => a.time - b.time);
+  return out.sort((a, b) => a.time - b.time).slice(-SNAPSHOT_MAIL_MAX);
+}
+function senderKey(m) {
+  const addr = parseAddr(m.from);
+  return addr && m.verifiedUser && addr.user === m.verifiedUser ? m.from : `unverified:${m.verifiedUser ?? "?"}`;
 }
 function buildThreads(mail, sent) {
   const items = [
@@ -19806,7 +19816,7 @@ function buildThreads(mail, sent) {
       subject: m.subject,
       firstLine: firstLine(m.body),
       inReplyTo: m.inReplyTo,
-      base: m.kind === "direct" ? m.from : m.to
+      base: m.kind === "direct" ? senderKey(m) : m.to
     })),
     ...sent.map((s) => ({
       id: s.id,
@@ -19818,12 +19828,16 @@ function buildThreads(mail, sent) {
       base: s.to
     }))
   ].sort((a, b) => a.time - b.time || (a.dir === b.dir ? 0 : a.dir === "out" ? -1 : 1));
-  const threadOf = /* @__PURE__ */ new Map();
+  const byId = /* @__PURE__ */ new Map();
+  for (const it of items) if (!byId.has(it.id)) byId.set(it.id, it);
+  const keyOf = (it, seen = /* @__PURE__ */ new Set()) => {
+    seen.add(it);
+    const parent = it.inReplyTo ? byId.get(it.inReplyTo) : void 0;
+    return parent && !seen.has(parent) ? keyOf(parent, seen) : it.base;
+  };
   const threads = /* @__PURE__ */ new Map();
   for (const it of items) {
-    const parent = it.inReplyTo ? threadOf.get(it.inReplyTo) : void 0;
-    const key = parent ?? it.base;
-    if (!threadOf.has(it.id)) threadOf.set(it.id, key);
+    const key = keyOf(it);
     const list = threads.get(key);
     if (list) list.push(it);
     else threads.set(key, [it]);
@@ -19833,7 +19847,7 @@ function buildThreads(mail, sent) {
     const last = list[list.length - 1];
     out.push({
       with: key,
-      kind: kindOf(key),
+      kind: key.startsWith("unverified:") ? "direct" : kindOf(key),
       lastAt: last.time,
       count: list.length,
       isAwaitingMe: last.dir === "in",
@@ -19961,7 +19975,8 @@ async function gatherSnapshot(i) {
   const [peers, claims, deliveries] = await Promise.all([
     i.peers ?? i.transport.presence.list(),
     i.claims ?? i.transport.services.list().catch(() => []),
-    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs })
+    // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
+    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs, max: Infinity })
   ]);
   const { repo, branch } = gitInfo(i.state.cwd);
   return buildSnapshot({
@@ -20108,12 +20123,16 @@ async function startUiServer(input) {
     const e = sc.variants.get(since);
     if (e && e.mailGen === sc.mailGen && e.presenceGen === pv.gen && e.stamp === `${stamp(statePath(sid, env))}|${stamp(sentLogPath(sid, env))}` && Date.now() - e.builtAt < maxAgeMs)
       return e;
-    let p = sc.building.get(since);
-    if (!p) {
-      p = build(sid, since, sc).finally(() => sc.building.delete(since));
-      sc.building.set(since, p);
-    }
-    return p;
+    const join = () => {
+      let p = sc.building.get(since);
+      if (!p) {
+        p = build(sid, since, sc).finally(() => sc.building.delete(since));
+        sc.building.set(since, p);
+      }
+      return p;
+    };
+    const got = await join();
+    return got && got.mailGen !== sc.mailGen ? join() : got;
   }
   const reply = (res, code, body, headers = {}) => {
     res.writeHead(code, {
@@ -20135,8 +20154,8 @@ async function startUiServer(input) {
       return;
     }
     const since = url.searchParams.get("since") ?? SNAPSHOT_SINCE;
-    if (!SINCE_RE.test(since)) {
-      error(res, 400, "since must look like 30m, 2h or 1d");
+    if (!SINCE_RE.test(since) || sinceToMs(since) > SNAPSHOT_SINCE_MAX_MS) {
+      error(res, 400, "since must look like 30m, 2h or 1d, and be at most 30d");
       return;
     }
     let sid;
@@ -23549,6 +23568,9 @@ program2.command("snapshot").description(
     if (!opts.json) throw new UsageError("pass --json (the only output format)");
     if (!SINCE_RE.test(opts.since))
       throw new UsageError(`--since must look like 30m, 2h or 1d (got "${opts.since}")`);
+    const lookback = sinceMs(opts.since);
+    if (lookback > SNAPSHOT_SINCE_MAX_MS)
+      throw new UsageError(`--since is at most 30d (got "${opts.since}")`);
     const { cfg, transport, sid, st } = await context();
     const registered = listRegistrations().some((r) => r.sid === sid);
     const [snap, socket] = await Promise.all([
@@ -23558,7 +23580,7 @@ program2.command("snapshot").description(
         sid,
         state: st,
         since: opts.since,
-        sinceMs: sinceMs(opts.since),
+        sinceMs: lookback,
         socket: null
       }),
       registered ? probeUiSocket() : Promise.resolve(null)

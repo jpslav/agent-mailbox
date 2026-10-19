@@ -85,15 +85,16 @@ export function checkSentRecord(v: unknown): SentRecord | null {
     return null;
   const kind = KINDS.find((k) => k === o.kind) ?? kindOf(o.to);
   const { text, isTruncated } = cutText(o.body, SENT_BODY_MAX);
+  const field = (x: string): string => cutText(x, 256).text;
   return {
-    id: o.id,
-    to: o.to,
+    id: field(o.id),
+    to: field(o.to),
     kind,
     area: areaOf(o.to),
     subject: cutSubject(str(o.subject)),
     body: text,
     isTruncated: isTruncated || o.isTruncated === true,
-    inReplyTo: str(o.inReplyTo),
+    inReplyTo: str(o.inReplyTo) === null ? null : field(o.inReplyTo as string),
     time: o.time,
   };
 }

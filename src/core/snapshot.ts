@@ -41,6 +41,14 @@ const UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
 /** The milliseconds in a lookback that matches SINCE_RE. */
 export const sinceToMs = (since: string): number =>
   parseInt(since, 10) * UNIT_MS[since.slice(-1) as keyof typeof UNIT_MS];
+/** The longest lookback a snapshot accepts. */
+export const SNAPSHOT_SINCE_MAX_MS = 30 * 86400000;
+/** A snapshot lists at most this many received messages: the newest. */
+export const SNAPSHOT_MAIL_MAX = 200;
+/** Ids, addresses and timestamps from the wire are cut to this many characters. */
+const FIELD_MAX = 256;
+const cutField = (s: string): string => cutText(s, FIELD_MAX).text;
+const cutNullable = (s: string | null): string | null => (s === null ? null : cutField(s));
 
 export interface SnapshotInput {
   /** When it is built (ms since the epoch). */
@@ -80,7 +88,10 @@ export function firstLine(body: string): string {
   return oneLine(line, FIRST_LINE_MAX);
 }
 
-/** The received mail as the snapshot lists it, own broadcasts and asks skipped (as inbox does). */
+/**
+ * The received mail as the snapshot lists it, own broadcasts and asks skipped (as inbox does): the
+ * newest SNAPSHOT_MAIL_MAX, oldest first.
+ */
 export function snapshotMail(input: SnapshotInput): SnapshotMail[] {
   const { state: st, user } = input;
   const names = [st.address, ...st.aliases];
@@ -96,9 +107,9 @@ export function snapshotMail(input: SnapshotInput): SnapshotMail[] {
     const { text, isTruncated } = cutText(m.body, SNAPSHOT_BODY_MAX);
     const claimed = m.raw ? null : (m.from.split('.')[0] ?? null);
     out.push({
-      id: m.id,
-      from: m.from,
-      to: d.to,
+      id: cutField(m.id),
+      from: cutField(m.from),
+      to: cutField(d.to),
       kind,
       area: areaOf(d.to),
       subject: cutSubject(m.subject),
@@ -106,19 +117,32 @@ export function snapshotMail(input: SnapshotInput): SnapshotMail[] {
       isTruncated,
       verifiedUser: m.sender,
       isMismatch: !!m.sender && claimed !== null && claimed !== m.sender,
-      inReplyTo: m.inReplyTo,
-      sentAt: m.sentAt,
+      inReplyTo: cutNullable(m.inReplyTo),
+      sentAt: cutNullable(m.sentAt),
       time,
     });
   }
-  return out.sort((a, b) => a.time - b.time);
+  return out.sort((a, b) => a.time - b.time).slice(-SNAPSHOT_MAIL_MAX);
+}
+
+/**
+ * The thread of received direct mail: its sender's address, when that is a session address of the
+ * user the server verified; otherwise `unverified:<user>`, so a forged `from` can neither join
+ * another session's thread nor pose as 'all' or an area.
+ */
+function senderKey(m: SnapshotMail): string {
+  const addr = parseAddr(m.from);
+  return addr && m.verifiedUser && addr.user === m.verifiedUser
+    ? m.from
+    : `unverified:${m.verifiedUser ?? '?'}`;
 }
 
 /**
  * Pair received and sent mail into one thread per counterpart. Mail to 'all', to an area or to a
- * service address belongs to that address's thread; other received mail to its sender's thread,
- * other sent mail to its recipient's. A message that answers (inReplyTo) one already in a thread
- * joins that thread instead, so the replies to an ask or a broadcast stay with it.
+ * service address belongs to that address's thread; other received mail to its sender's thread
+ * (senderKey), other sent mail to its recipient's. A message that answers (inReplyTo) one in the
+ * snapshot joins that message's thread instead, so the replies to an ask or a broadcast stay with
+ * it (whatever the clocks of sender and server say about their order).
  */
 export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): SnapshotThread[] {
   type Item = SnapshotThreadMessage & { base: string };
@@ -130,7 +154,7 @@ export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): Snapshot
       subject: m.subject,
       firstLine: firstLine(m.body),
       inReplyTo: m.inReplyTo,
-      base: m.kind === 'direct' ? m.from : m.to,
+      base: m.kind === 'direct' ? senderKey(m) : m.to,
     })),
     ...sent.map((s) => ({
       id: s.id,
@@ -142,12 +166,16 @@ export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): Snapshot
       base: s.to,
     })),
   ].sort((a, b) => a.time - b.time || (a.dir === b.dir ? 0 : a.dir === 'out' ? -1 : 1));
-  const threadOf = new Map<string, string>(); // message id -> thread
+  const byId = new Map<string, Item>();
+  for (const it of items) if (!byId.has(it.id)) byId.set(it.id, it);
+  const keyOf = (it: Item, seen = new Set<Item>()): string => {
+    seen.add(it);
+    const parent = it.inReplyTo ? byId.get(it.inReplyTo) : undefined;
+    return parent && !seen.has(parent) ? keyOf(parent, seen) : it.base;
+  };
   const threads = new Map<string, Item[]>();
   for (const it of items) {
-    const parent = it.inReplyTo ? threadOf.get(it.inReplyTo) : undefined;
-    const key = parent ?? it.base;
-    if (!threadOf.has(it.id)) threadOf.set(it.id, key);
+    const key = keyOf(it);
     const list = threads.get(key);
     if (list) list.push(it);
     else threads.set(key, [it]);
@@ -157,7 +185,7 @@ export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): Snapshot
     const last = list[list.length - 1]!; // every thread has at least one message
     out.push({
       with: key,
-      kind: kindOf(key),
+      kind: key.startsWith('unverified:') ? 'direct' : kindOf(key),
       lastAt: last.time,
       count: list.length,
       isAwaitingMe: last.dir === 'in',
@@ -325,7 +353,8 @@ export async function gatherSnapshot(i: GatherInput): Promise<Snapshot> {
   const [peers, claims, deliveries] = await Promise.all([
     i.peers ?? i.transport.presence.list(),
     i.claims ?? i.transport.services.list().catch((): ServiceClaim[] => []),
-    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs }),
+    // Everything in the window, so the newest are among it (buildSnapshot keeps the newest).
+    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs, max: Infinity }),
   ]);
   const { repo, branch } = gitInfo(i.state.cwd);
   return buildSnapshot({

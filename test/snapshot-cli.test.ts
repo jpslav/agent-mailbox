@@ -137,6 +137,9 @@ describe('snapshot and titles', { skip: SERVER.skip }, () => {
       run(aliceEnv, 'sa', aliceDir, ['snapshot', '--json', '--since', '1s']).stdout,
     );
     assert.equal(narrow.since, '1s');
+    const far = run(aliceEnv, 'sa', aliceDir, ['snapshot', '--json', '--since', '31d']);
+    assert.equal(far.code, 2);
+    assert.match(far.stderr, /at most 30d/);
     const plain = run(aliceEnv, 'sa', aliceDir, ['snapshot']);
     assert.equal(plain.code, 2);
     assert.match(plain.stderr, /--json/);

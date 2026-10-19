@@ -137,6 +137,7 @@ describe('snapshot socket', () => {
       assert.equal((await get(ui.path, '/v1/snapshot?session=other')).status, 404);
       assert.equal((await get(ui.path, '/v1/snapshot?session=..%2Fx')).status, 400);
       assert.equal((await get(ui.path, '/v1/snapshot?session=sess-1&since=1y')).status, 400);
+      assert.equal((await get(ui.path, '/v1/snapshot?session=sess-1&since=31d')).status, 400);
       assert.equal((await get(ui.path, '/v2/anything')).status, 404);
       const ok = await get(ui.path, '/v1/snapshot?session=sess-1');
       assert.equal(ok.status, 200, ok.body);

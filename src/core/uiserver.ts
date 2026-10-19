@@ -18,7 +18,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
-import { SINCE_RE, gatherSnapshot, sinceToMs, SNAPSHOT_SINCE } from './snapshot.js';
+import {
+  SINCE_RE,
+  SNAPSHOT_SINCE,
+  SNAPSHOT_SINCE_MAX_MS,
+  gatherSnapshot,
+  sinceToMs,
+} from './snapshot.js';
 import { sentLogPath, readState, stateDir, statePath, validateSessionId } from './state.js';
 import { lenientString } from './text.js';
 import type { Config, Env, PresenceEntry, ServiceClaim, Snapshot, Transport } from './types.js';
@@ -229,12 +235,17 @@ export async function startUiServer(input: UiServerInput): Promise<UiServer | nu
       Date.now() - e.builtAt < maxAgeMs
     )
       return e;
-    let p = sc.building.get(since);
-    if (!p) {
-      p = build(sid, since, sc).finally(() => sc.building.delete(since));
-      sc.building.set(since, p);
-    }
-    return p;
+    const join = (): Promise<Entry | null> => {
+      let p = sc.building.get(since);
+      if (!p) {
+        p = build(sid, since, sc).finally(() => sc.building.delete(since));
+        sc.building.set(since, p);
+      }
+      return p;
+    };
+    const got = await join();
+    // A build that began before mail came in may not show it: build once more for this request.
+    return got && got.mailGen !== sc.mailGen ? join() : got;
   }
 
   const reply = (
@@ -264,8 +275,8 @@ export async function startUiServer(input: UiServerInput): Promise<UiServer | nu
       return;
     }
     const since = url.searchParams.get('since') ?? SNAPSHOT_SINCE;
-    if (!SINCE_RE.test(since)) {
-      error(res, 400, 'since must look like 30m, 2h or 1d');
+    if (!SINCE_RE.test(since) || sinceToMs(since) > SNAPSHOT_SINCE_MAX_MS) {
+      error(res, 400, 'since must look like 30m, 2h or 1d, and be at most 30d');
       return;
     }
     let sid: string;

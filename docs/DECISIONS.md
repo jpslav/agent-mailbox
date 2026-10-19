@@ -524,8 +524,10 @@ context, decision, why.
   server. The title is what a person recognises a session by; status says what it is doing now.
 - **Limits:** the sent log records what this session sent through `mbox`, on this machine only;
   a session moved to another machine starts a new log, and a lost state directory loses it.
-  Threads are a display aid: `inReplyTo` and `from` are self-asserted, so a forged reply can
-  appear in another thread. The title is published to every mailbox user like the rest of
+  Threads are a display aid: `inReplyTo` is self-asserted, so a forged reply can appear in
+  another thread; received mail whose `from` is not an address of its verified user is kept in an
+  `unverified:<user>` thread rather than the thread it claims. A snapshot lists at most the newest
+  200 received messages, over at most 30 days. The title is published to every mailbox user like the rest of
   presence; whether the hook should publish the agent's session title without being asked is the
   repo owner's call (it does in 0.8.0).
 
@@ -559,5 +561,6 @@ context, decision, why.
   widens nothing for them; there is no token, because a token would sit in the same directory.
 - **Limits:** any process running as this user can read every served session's recent mail
   through it, as it could by running `mbox inbox` with the user's config. Presence changes reach a
-  cached snapshot up to 30 s late. A state directory that is not 0700 (set up by hand) gets no
+  cached snapshot up to 30 s late; the session's own repo and branch and the peers' `lastSeen`
+  up to five minutes. A state directory that is not 0700 (set up by hand) gets no
   socket until it is fixed. Set `AGENT_MAILBOX_UI_SOCKET=off` to turn it off.

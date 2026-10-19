@@ -642,8 +642,9 @@ untrusted as any other. Readers keep only well-formed values.
 server connection, everything a side panel draws about the session as one JSON object: the session
 itself, the live peers (each with its relation to this session: parent, child, sibling, same
 repo, correspondent, the same user, or other), the mail `mbox inbox` would print over the
-lookback, the messages the session sent, both paired into threads by counterpart (replies, by
-`--re`, join the thread of what they answer), and the help areas live sessions offer. Bodies are
+lookback (the newest 200; `--since` at most 30d), the messages the session sent, both paired into threads by counterpart (replies, by
+`--re`, join the thread of what they answer; mail whose `from` is not an address of its verified
+sender's user goes to a thread `unverified:<user>`), and the help areas live sessions offer. Bodies are
 cut to 2000 characters and passed on as they are: untrusted text, to be drawn as plain text.
 Sent mail cannot be read back from the server (it is stored for its recipients), so `mbox send`
 and `mbox ask` append each message they send to the session's sent log,
@@ -656,7 +657,8 @@ session it does not serve, `400` for a malformed parameter), an `ETag`, and `304
 `If-None-Match` still matches, so an unchanged poll costs no process and at most a presence read
 every 30 s. The daemon keeps one snapshot per session and rebuilds it only when mail for the session
 arrived, presence changed (re-read at most every 30 s; a heartbeat alone does not count), the
-session's state or sent log changed, or it is five minutes old. `mbox snapshot --json` puts the
+session's state or sent log changed, or it is five minutes old (so the session's own repo and
+branch, and the peers' `lastSeen`, can lag by that much). `mbox snapshot --json` puts the
 socket's path in `socket` when the daemon serves it, so a client learns it from one spawn. From
 Node: `http.get({ socketPath, path: '/v1/snapshot?session=' + id })`. Access is the file
 system's: the socket is 0600 and the state directory must be this user's alone (0700), or the
