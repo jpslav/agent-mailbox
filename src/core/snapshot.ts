@@ -1,17 +1,20 @@
 // `mbox snapshot --json`: everything a side panel draws about one session, as one JSON object
-// (the Snapshot contract in types.ts, version 1). This module only assembles it from inputs the
-// caller gathered (the session's state, presence, service claims, received mail and the sent log),
-// so it is pure and the delivery daemon can build the same object from what it already holds.
+// (the Snapshot contract in types.ts, version 1). `buildSnapshot` assembles it from inputs the
+// caller gathered (the session's state, presence, service claims, received mail and the sent log)
+// and is pure; `gatherSnapshot` gathers them, for `mbox snapshot` and for the delivery daemon's
+// snapshot socket (uiserver.ts), which passes the presence it already holds.
 //
 // Every free-text field (bodies, subjects, titles, statuses) is untrusted and passed on as is (only
 // cut to length): whoever draws it must draw it as plain text.
 import { BROADCAST, parseAddr } from './addr.js';
 import { areaAddress, areaOf, checkOffers } from './areas.js';
 import { oneLine, parseDelivery } from './envelope.js';
-import { cutSubject, cutText, kindOf } from './sentlog.js';
+import { cutSubject, cutText, kindOf, readSentLog } from './sentlog.js';
+import { gitInfo } from './session-meta.js';
 import { parseService } from './services.js';
 import type {
   Delivery,
+  Env,
   PeerRelation,
   PresenceEntry,
   SentRecord,
@@ -23,6 +26,7 @@ import type {
   SnapshotPeer,
   SnapshotThread,
   SnapshotThreadMessage,
+  Transport,
 } from './types.js';
 
 /** A received body is cut to this many characters. */
@@ -31,6 +35,12 @@ export const SNAPSHOT_BODY_MAX = 2000;
 export const FIRST_LINE_MAX = 200;
 /** The default lookback. */
 export const SNAPSHOT_SINCE = '24h';
+/** What a lookback looks like: a number and a unit (30m, 2h, 1d). */
+export const SINCE_RE = /^\d{1,6}[smhd]$/;
+const UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+/** The milliseconds in a lookback that matches SINCE_RE. */
+export const sinceToMs = (since: string): number =>
+  parseInt(since, 10) * UNIT_MS[since.slice(-1) as keyof typeof UNIT_MS];
 
 export interface SnapshotInput {
   /** When it is built (ms since the epoch). */
@@ -138,7 +148,9 @@ export function buildThreads(mail: SnapshotMail[], sent: SentRecord[]): Snapshot
     const parent = it.inReplyTo ? threadOf.get(it.inReplyTo) : undefined;
     const key = parent ?? it.base;
     if (!threadOf.has(it.id)) threadOf.set(it.id, key);
-    threads.set(key, [...(threads.get(key) ?? []), it]);
+    const list = threads.get(key);
+    if (list) list.push(it);
+    else threads.set(key, [it]);
   }
   const out: SnapshotThread[] = [];
   for (const [key, list] of threads) {
@@ -292,4 +304,43 @@ export function snapshotAddresses(st: SessionState): string[] {
     BROADCAST,
     ...(st.offers ?? []).map(areaAddress),
   ];
+}
+
+export interface GatherInput {
+  transport: Pick<Transport, 'presence' | 'services' | 'poll'>;
+  user: string;
+  sid: string;
+  state: SessionState;
+  since: string;
+  sinceMs: number;
+  socket: string | null;
+  /** Presence and claims already at hand (else read from the transport). */
+  peers?: PresenceEntry[];
+  claims?: ServiceClaim[];
+  env?: Env;
+}
+
+/** Read what a snapshot needs (the server, the session's git checkout, its sent log) and build it. */
+export async function gatherSnapshot(i: GatherInput): Promise<Snapshot> {
+  const [peers, claims, deliveries] = await Promise.all([
+    i.peers ?? i.transport.presence.list(),
+    i.claims ?? i.transport.services.list().catch((): ServiceClaim[] => []),
+    i.transport.poll(snapshotAddresses(i.state), { lookbackMs: i.sinceMs }),
+  ]);
+  const { repo, branch } = gitInfo(i.state.cwd);
+  return buildSnapshot({
+    now: Date.now(),
+    since: i.since,
+    sinceMs: i.sinceMs,
+    socket: i.socket,
+    user: i.user,
+    sid: i.sid,
+    state: i.state,
+    repo,
+    branch,
+    peers,
+    claims,
+    deliveries,
+    sent: readSentLog(i.sid, i.env),
+  });
 }

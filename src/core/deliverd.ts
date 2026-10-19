@@ -20,6 +20,11 @@
 //     it back. `mbox pause` holds delivery entirely (pause.ts) until `mbox resume`.
 //   - Exits after idleExitMs without registrations. A second instance of the same or an older
 //     version exits at once (pidfile lock, which records each daemon's version and bundle path).
+//   - Snapshots for a side panel (uiserver.ts): HTTP on the unix socket `<state>/ui.sock`, for the
+//     sessions this daemon serves; mail it receives for a session invalidates that session's cached
+//     snapshot. Only the lock holder serves it: it starts after the lock is taken and is closed
+//     (and the socket removed) before the lock is released. AGENT_MAILBOX_UI_SOCKET=off turns it
+//     off.
 //   - Version takeover: a newer daemon (started by a newer session-start hook, see ensureDeliverd)
 //     waits for the older one to hand over, and terminates it after handoverMs if it does not. The
 //     old one hands over gracefully on SIGTERM: it stops taking messages, finishes the delivery in
@@ -63,6 +68,8 @@ import {
   waiterPid,
 } from './state.js';
 import type { HeldLock } from './state.js';
+import { startUiServer } from './uiserver.js';
+import type { UiServer } from './uiserver.js';
 import { compareVersions } from './version.js';
 import type {
   Config,
@@ -87,6 +94,8 @@ export interface DeliverdOptions {
   rateWindowMs: number;
   pausePollMs: number;
   handoverMs: number;
+  /** Serve snapshots on `<state>/ui.sock` (uiserver.ts). */
+  uiSocket: boolean;
   fault: string;
 }
 
@@ -105,6 +114,7 @@ export function deliverdOptions(env: Env = process.env): DeliverdOptions {
     // How long a newer daemon waits for an older one to hand over before killing it: above the
     // receivers' settle time (receiver.ts), so a delivery in flight can finish.
     handoverMs: Number(env.AGENT_MAILBOX_HANDOVER_MS) || 20000,
+    uiSocket: env.AGENT_MAILBOX_UI_SOCKET !== 'off',
     // test-only: "crash-after-deliver" | "crash-after-commit" | "ignore-sigterm" (a daemon that
     // will not hand over)
     fault: env.AGENT_MAILBOX_FAULT || '',
@@ -233,6 +243,9 @@ export async function runDeliverd({
   mkdirp(registrationsDir(env));
 
   const workers = new Map<string, Worker>();
+  // Started below, once the workers exist; closed by shutdown() before the lock is released.
+  let ui: UiServer | null = null;
+  let uiStarting: Promise<unknown> | null = null;
   const noted = new Set<string>(); // one-time log notes
   const lost = new Set<string>(); // sids whose connection is down (log transitions once)
   let idleSince: number | null = Date.now();
@@ -309,6 +322,7 @@ export async function runDeliverd({
     }
 
     function onMessage(d: Delivery, m: Message, fresh: boolean): DeliveryResult {
+      ui?.invalidate(sid); // it is on the server now: the next snapshot shows it
       if (stopped) return { ackAfter: handled(new Error('not delivered')) };
       // Nothing waiting and nothing to show (a redelivery, our own broadcast): record, ack now.
       if (!fresh && !pending.length && !flushing) {
@@ -508,7 +522,10 @@ export async function runDeliverd({
         lost.delete(sid);
         await receiving;
         sessLock?.release();
-        if (workers.get(sid) === w) workers.delete(sid);
+        if (workers.get(sid) === w) {
+          workers.delete(sid);
+          ui?.drop(sid);
+        }
         if (rx) log(`stopped serving ${addr()}${depart ? '' : ' (still registered)'}`);
       })();
       return stopped;
@@ -687,6 +704,8 @@ export async function runDeliverd({
       /* */
     }
     await Promise.all([...workers.values()].map((w) => w.stop({ depart: false })));
+    await uiStarting; // never rejects; then closed before the lock: a successor binds after taking it
+    await ui?.close();
     lock.release();
     await transport.close?.().catch(() => {});
     log(`stopped (pid ${process.pid}, version ${version})`);
@@ -757,6 +776,10 @@ export async function runDeliverd({
       void shutdown(sig);
     });
   scan();
+  if (opt.uiSocket)
+    uiStarting = startUiServer({ cfg, transport, env, served: (sid) => workers.has(sid), log })
+      .then((u) => (ui = u))
+      .catch((e: unknown) => log(`not serving snapshots: ${errCode(e)}`));
   return done;
 }
 
