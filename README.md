@@ -491,6 +491,8 @@ mbox services                     every claimed service address and the session 
 mbox guide [section]              short help: overview, send, reply, peers, asks, services, events,
                                   workers, names, inbox, security, fallback, troubleshooting
 mbox peers --tree                 who spawned whom      mbox status "<one line>"   (--clear)
+mbox title "<one line>"           this session's title in peers (--clear); set from the agent's title at start
+mbox snapshot --json [--since 24h]  self, peers, recent mail, sent mail, threads, areas as one JSON object
 mbox whoami --role worker --parent <address>      describe this session (display only)
 mbox events [--user <u>|--all] [--since 1d]       what happened to sessions (events feed)
 mbox done "<summary>"             say this session finished (sets the status, writes "done")
@@ -625,8 +627,9 @@ bucket, and ignore records whose address does not belong to the user that wrote 
 
 **Session metadata.** Each record also carries `repo` (`owner/name` of the git remote of the
 session's working directory, `origin` first), `branch`, `role` (`manager`, `worker` or none),
-`parent` (the address of the session that spawned it) and `status` (one line, at most 120
-characters). Repo and branch are read from git's files (no `git` process runs) on every
+`parent` (the address of the session that spawned it), `status` (one line, at most 120
+characters) and `title` (the same limits; `mbox title`, and Claude Code's session-start hook sets
+it from the session's own title, `session_title`, each time it runs). Repo and branch are read from git's files (no `git` process runs) on every
 heartbeat. Role and parent come from `AGENT_MAILBOX_ROLE` and `AGENT_MAILBOX_PARENT` in the
 session's environment when the session is new (a resume or a compaction does not reapply them),
 or from `mbox whoami --role/--parent`;
@@ -634,6 +637,17 @@ status from `mbox status`. Changes reach `mbox peers` at once. `mbox peers --tre
 under their parents; one whose parent is not live is shown at the top level and marked. All of it
 is self-asserted and display only: a "parent" or "manager" has no authority, and its mail is as
 untrusted as any other. Readers keep only well-formed values.
+
+**Snapshot and sent log.** `mbox snapshot --json [--since 24h]` prints, in one process with one
+server connection, everything a side panel draws about the session as one JSON object: the session
+itself, the live peers (each with its relation to this session: parent, child, sibling, same
+repo, correspondent, the same user, or other), the mail `mbox inbox` would print over the
+lookback, the messages the session sent, both paired into threads by counterpart (replies, by
+`--re`, join the thread of what they answer), and the help areas live sessions offer. Bodies are
+cut to 2000 characters and passed on as they are: untrusted text, to be drawn as plain text.
+Sent mail cannot be read back from the server (it is stored for its recipients), so `mbox send`
+and `mbox ask` append each message they send to the session's sent log,
+`sessions/<id>.sent.jsonl` (0600, the newest 500 kept); that file is the only record of it.
 
 **Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended` (the
 session hooks; a compaction is not a start; when a session's process dies without its session-end
@@ -680,7 +694,7 @@ SERVICES column of `mbox peers` show who holds what.
 
 Session files live in `$AGENT_MAILBOX_STATE_DIR/sessions/` (for a named profile,
 `$AGENT_MAILBOX_STATE_DIR/profiles/<name>/sessions/`): `<id>.json` (address, aliases, cwd,
-role, parent, status, offers, services),
+role, parent, status, title, offers, services), `<id>.sent.jsonl` (the messages it sent),
 `<id>.cursor.json` (saved stream positions and recently delivered ids, written by the receiver
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
 (the current waiter) and `<id>.ended` (its `ended` event was written; removed by `started`). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
@@ -711,9 +725,10 @@ daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon bein
   same rules for helpers as an ask.
 - **Reading is isolated by stream.** Users can read only their own stream, broadcasts, asks, the
   presence bucket and the events feeds the admin shares with the team (their own always).
-  Presence records (address, cwd, host, pid, repo, branch, role, parent and status) are visible
-  to every user, whatever the feed's sharing: `private` hides a user's event history and `done`
-  summaries, not their live sessions.
+  Presence records (address, cwd, host, pid, repo, branch, role, parent, status, title and
+  offers) are visible to every user, whatever the feed's sharing: `private` hides a user's event history and `done`
+  summaries, not their live sessions. Claude Code sessions publish their session title there
+  (the session-start hook copies it): it says what the session works on to every mailbox user.
 - **The server admin can read everything**; streams hold plain text for 180 days. Use a host you
   trust, on a tailnet. Passwords are stored as bcrypt hashes on the server and in a 0600 file on
   clients, and travel only inside the NATS connection (encrypted by the tailnet, not by NATS TLS).

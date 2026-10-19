@@ -261,6 +261,7 @@ token):
   "parent": "alice.laptop.mgr-9c8d",
   "status": "running the tests",
   "offers": ["lang:ts", "repo:github.com/acme/web"],
+  "title": "Fix the login page",
   "at": "2026-10-17T12:00:00.000Z"
 }
 ```
@@ -273,11 +274,13 @@ token):
 | `parent` | the address of the session that spawned this one, or `null`; need not be live                                                                                              |
 | `status` | one line, at most 120 characters, or `null`                                                                                                                                |
 | `offers` | the help areas the session offers (`mbox offer`), sorted; `[]` when none                                                                                                   |
+| `title`  | the session's title (`mbox title`, or the agent's own session title), one line, at most 120 characters, or `null`                                                          |
 
-`repo`, `branch`, `role`, `parent` and `status` were added in 0.5.6, after `pid`, and `offers` in
-0.6.1, after `status`; readers before that ignore them, and readers since then treat a missing one
-as `null` (`offers`: `[]`). Readers keep a field only when it has that shape
-(`src/core/session-meta.ts`; offers: well-formed areas, de-duplicated, sorted, at most 20), and
+`repo`, `branch`, `role`, `parent` and `status` were added in 0.5.6, after `pid`, `offers` in
+0.6.1, after `status`, and `title` in 0.8.0, after `offers`; readers before that ignore them, and
+readers since then treat a missing one as `null` (`offers`: `[]`). Readers keep a field only when
+it has that shape (`src/core/session-meta.ts`; `title` is checked exactly like `status`; offers:
+well-formed areas, de-duplicated, sorted, at most 20), and
 only addresses and aliases that belong to `U`. All of them are display only: nothing in the mailbox grants a `parent` or a `manager` anything. The exact bytes
 are pinned by `test/golden-presence.test.ts`.
 

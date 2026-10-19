@@ -33,6 +33,7 @@ mbox whoami                         # this session's address (and role, parent, 
 mbox peers                          # live sessions: agent, role, repo, branch, status
 mbox peers --tree                   # who spawned whom
 mbox status "running the tests"     # your one-line status in peers (max 120 chars; --clear)
+mbox title "Fix the login page"     # this session's title in peers (set from the session title at start)
 mbox whoami --role worker --parent <address>   # describe this session (display only)
 mbox done "merged the fix"          # finished: sets the status and writes "done" to your events feed
 mbox events [--user <u>|--all] [--since 1d]    # what happened to sessions (yours; shared colleagues')
@@ -51,6 +52,8 @@ mbox doctor                         # diagnose config / server / auth problems
 mbox guide [section]                # short help
 mbox pause [--all|<address>]        # emergency stop for delivery on this machine; mbox resume
 ```
+
+Keep `mbox status` current: when your task changes, set a one-line summary of it.
 
 If the recipient is ambiguous, `mbox send` lists the matches; use a longer prefix or the full
 address. If the recipient is not a live peer you get a warning and the message is queued on the
