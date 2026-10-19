@@ -86,14 +86,19 @@ type Run = { ok: boolean; stdout: string; stderr: string };
 
 // ---------------------------------------------------------------- running mbox
 
-/** The plugin's own mbox (bin/mbox beside this folder), as the session itself: no PATH search. */
-async function run($: Engine, args: string[]): Promise<Run> {
+/**
+ * The plugin's own mbox (bin/mbox beside this folder), as the session itself: no PATH search.
+ * Arguments that come from a person or another session follow `--`, and message bodies go on
+ * stdin (`-`), so no text is read as an option.
+ */
+async function run($: Engine, args: string[], stdin?: string): Promise<Run> {
   stats.spawns += 1;
   const env = { CLAUDE_CODE_SESSION_ID: await $.session.id() };
   try {
     const r = await $.process.run([`${$.plugin.root}/bin/mbox`, ...args], {
       env,
       timeoutMs: 15_000,
+      ...(stdin === undefined ? {} : { stdin }),
     });
     return { ok: r.exitCode === 0, stdout: r.stdout, stderr: r.stderr.trim() };
   } catch (err) {
@@ -194,8 +199,8 @@ async function tick($: Engine): Promise<void> {
 // ---------------------------------------------------------------- actions
 
 /** A command the person asked for from the panel; its outcome becomes the notice line. */
-async function act($: Engine, args: string[], done: string): Promise<void> {
-  const r = await run($, args);
+async function act($: Engine, args: string[], done: string, stdin?: string): Promise<void> {
+  const r = await run($, args, stdin);
   const said = r.ok ? done : `mbox ${args[0] ?? ''} failed: ${clean(r.stderr).slice(0, 200)}`;
   await $.state.set(NOTICE, said);
   if (r.ok) await refresh($);
@@ -232,7 +237,8 @@ async function toggleShare($: Engine, share: boolean): Promise<void> {
 /**
  * Keeps the session's title in presence as the toggle says: published when it changed while
  * sharing is on; cleared once while it is off (again after each start, resume or compaction,
- * where the command hook published it).
+ * where the command hook published it). Each is tried once: an mbox that fails (no mailbox set
+ * up on this machine) is not run again at every prompt.
  */
 function syncTitle($: Engine, title: string | undefined): Promise<void> {
   titleQueue = titleQueue.then(() => syncTitleNow($, title)).catch(() => undefined);
@@ -243,14 +249,14 @@ async function syncTitleNow($: Engine, title: string | undefined): Promise<void>
   const { value: share = false } = await $.state.get(SHARE_TITLE);
   if (!share) {
     if (publishedTitle === null) return;
-    const r = await run($, ['title', '--clear']);
-    if (r.ok) publishedTitle = null;
+    publishedTitle = null;
+    await run($, ['title', '--clear']);
     return;
   }
   const t = [...clean(title ?? '')].slice(0, 120).join('');
   if (!t || t === publishedTitle) return;
-  const r = await run($, ['title', t]);
-  if (r.ok) publishedTitle = t;
+  publishedTitle = t;
+  await run($, ['title', '--', t]);
 }
 
 async function openPane($: Engine): Promise<string> {
@@ -275,7 +281,7 @@ async function setOpen($: Engine, ids: string[], isOpen: boolean): Promise<void>
   );
 }
 
-/** This build's version, for the message on a build without `$.state`. */
+/** This build's version, for /mbox's answer on a build older than MIN_VERSION. */
 async function version($: Engine): Promise<string> {
   try {
     return (await $.session.version()).version;
@@ -448,7 +454,12 @@ function threadBody($: Engine, el: El, s: Snapshot, t: Thread, now: number): Ren
             submitLabel="Send"
             onSubmit={(text) => {
               if (text.trim())
-                void act($, ['send', t.with, '--re', lastIn.id, text], `Sent to ${t.with}`);
+                void act(
+                  $,
+                  ['send', `--re=${lastIn.id}`, '--', t.with, '-'],
+                  `Sent to ${t.with}`,
+                  text,
+                );
             }}
           />,
         )}
@@ -571,7 +582,8 @@ function peerTile(
                 placeholder={`Message this session…`}
                 submitLabel="Send"
                 onSubmit={(text) => {
-                  if (text.trim()) void act($, ['send', p.address, text], `Sent to ${p.address}`);
+                  if (text.trim())
+                    void act($, ['send', '--', p.address, '-'], `Sent to ${p.address}`, text);
                 }}
               />,
             )}
@@ -714,7 +726,7 @@ function sessionCard(
             submitLabel="Set"
             onSubmit={(v) => {
               void (v.trim()
-                ? act($, ['status', v], 'Status set')
+                ? act($, ['status', '--', v], 'Status set')
                 : act($, ['status', '--clear'], 'Status cleared'));
             }}
           />,
@@ -739,14 +751,14 @@ function sessionCard(
             <Button
               key={`unoffer:${a}`}
               label={`${a}  ✕`}
-              onPress={() => act($, ['unoffer', a], `Stopped offering ${a}`)}
+              onPress={() => act($, ['unoffer', '--', a], `Stopped offering ${a}`)}
             />
           ))}
           {repoArea && !s.self.offers.includes(repoArea) && (
             <Button
               key="offer-repo"
               label={`+ ${repoArea}`}
-              onPress={() => act($, ['offer', repoArea], `Offering ${repoArea}`)}
+              onPress={() => act($, ['offer', '--', repoArea], `Offering ${repoArea}`)}
             />
           )}
           <Button
@@ -773,7 +785,7 @@ function sessionCard(
                 label: `${a.area} (${a.offeredBy} offering)`,
               }))}
               onSelect={(v) => {
-                void act($, ['offer', v], `Offering ${v}`);
+                void act($, ['offer', '--', v], `Offering ${v}`);
               }}
             />,
           )}
@@ -812,7 +824,7 @@ function sessionCard(
                   const m = /^([a-z0-9][a-z0-9._:/@+-]*):\s+(.+)$/s.exec(q.trim());
                   const area = target ?? m?.[1];
                   const text = target ? q.trim() : m?.[2];
-                  if (area && text) void act($, ['ask', area, text], `Asked in ${area}`);
+                  if (area && text) void act($, ['ask', '--', area, '-'], `Asked in ${area}`, text);
                 }}
               />,
             )}

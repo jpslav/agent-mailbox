@@ -129,8 +129,9 @@ const BAND_PROPS = {
 function world(
   on: On,
   version = '2.1.299',
-): { spawned: string[][]; bins: string[]; copies: string[] } {
+): { spawned: string[][]; bins: string[]; copies: string[]; stdins: string[] } {
   const spawned: string[][] = [];
+  const stdins: string[] = [];
   const bins: string[] = [];
   const copies: string[] = [];
   mock.store(on);
@@ -138,6 +139,7 @@ function world(
     bins.push(e.argv[0] ?? '');
     const args = e.argv.slice(1);
     spawned.push([...args]);
+    if (e.init?.stdin !== undefined) stdins.push(e.init.stdin);
     if (args[0] === 'snapshot') return { value: ok(JSON.stringify(SNAPSHOT)) };
     return { value: ok('') };
   });
@@ -154,7 +156,7 @@ function world(
     copies.push(`${e.surface}:${e.text}`);
     return { value: { isCopied: true as const } };
   });
-  return { spawned, bins, copies };
+  return { spawned, bins, copies, stdins };
 }
 
 test('model: snapshot checks and peer groups', () => {
@@ -311,7 +313,7 @@ test('title sharing: published as it changes, cleared once when turned off', asy
   await $.classic.UserPromptSubmit({ prompt: 'a', session_title: 'Port the panel' });
   await $.classic.UserPromptSubmit({ prompt: 'b', session_title: 'Port the panel' });
   await clock.settle();
-  expect(spawned).toEqual([['title', 'Port the panel']]);
+  expect(spawned).toEqual([['title', '--', 'Port the panel']]);
 
   await $.command.run(MBOX);
   await clock.settle();
@@ -328,7 +330,7 @@ test('title sharing: published as it changes, cleared once when turned off', asy
   await clock.settle();
   const titles = spawned.filter((a) => a[0] === 'title');
   expect(titles).toEqual([
-    ['title', 'Port the panel'],
+    ['title', '--', 'Port the panel'],
     ['title', '--clear'],
   ]);
 
@@ -337,4 +339,26 @@ test('title sharing: published as it changes, cleared once when turned off', asy
   await $.classic.UserPromptSubmit({ prompt: 'd', session_title: 'Port the panel' });
   await clock.settle();
   expect(spawned.filter((a) => a[0] === 'title').length).toBe(3);
+});
+
+test('typed text never reaches mbox as an option: bodies on stdin, operands after --', async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 });
+  const { spawned, stdins } = world(on);
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  await $.command.run(MBOX);
+  await clock.settle();
+  const pane = await $.ui.mount({
+    plugin: 'agent-mailbox',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'mbox',
+    props: PANE_PROPS,
+  });
+  await pane.press({ key: 't:bob.desk.helper-9f9f' });
+  await pane.input({ key: 'reply:bob.desk.helper-9f9f', text: '--subject x -' });
+  await pane.input({ key: 'status', text: '--clear me' });
+  await pane.unmount();
+  expect(spawned).toContainEqual(['send', '--re=m1', '--', 'bob.desk.helper-9f9f', '-']);
+  expect(stdins).toEqual(['--subject x -']);
+  expect(spawned).toContainEqual(['status', '--', '--clear me']);
 });
