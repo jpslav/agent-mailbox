@@ -7,7 +7,13 @@ import prettier from 'eslint-config-prettier';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
-  { ignores: ['adapters/claude-code/dist/**', 'node_modules/**'] },
+  {
+    ignores: [
+      'adapters/claude-code/dist/**',
+      'adapters/claude-code/.claude-plugin/types/**',
+      'node_modules/**',
+    ],
+  },
   js.configs.recommended,
   tseslint.configs.recommendedTypeChecked,
   {
@@ -20,6 +26,14 @@ export default defineConfig(
     files: ['**/*.mjs'],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: { console: 'readonly', process: 'readonly' } },
+  },
+  {
+    // The plugin's hooks module (hooks/, types/, tests/), which Claude Code loads itself: its
+    // types are the API declarations the engine lays in .claude-plugin/types/ (git-ignored, so
+    // absent in CI). Linted without type information here; `npm run typecheck:plugin` type-checks
+    // it where they are laid, and `npm run test:plugin` validates and tests it.
+    files: ['adapters/claude-code/**/*.{ts,tsx}'],
+    extends: [tseslint.configs.disableTypeChecked],
   },
   prettier,
 );

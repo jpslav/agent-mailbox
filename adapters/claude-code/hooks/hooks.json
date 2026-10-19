@@ -1,5 +1,6 @@
 {
-  "description": "Agent mailbox: tell the session its address and register its inbox socket with the local delivery daemon (started if needed); remove the registration when the session ends",
+  "description": "Agent mailbox: tell the session its address and register its inbox socket with the local delivery daemon (started if needed); remove the registration when the session ends. The hooks module draws the mailbox panel (/mbox) and the optional band above the prompt",
+  "modules": ["./register.tsx"],
   "hooks": {
     "SessionStart": [
       {
