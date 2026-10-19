@@ -649,6 +649,20 @@ Sent mail cannot be read back from the server (it is stored for its recipients),
 and `mbox ask` append each message they send to the session's sent log,
 `sessions/<id>.sent.jsonl` (0600, the newest 500 kept); that file is the only record of it.
 
+**Snapshot socket.** The delivery daemon serves the same object over HTTP on a unix socket,
+`ui.sock` in the state directory (for a named profile, in the profile's), for the sessions it
+serves: `GET /v1/snapshot?session=<session id>&since=24h` answers with the JSON (`404` for a
+session it does not serve, `400` for a malformed parameter), an `ETag`, and `304` to a request whose
+`If-None-Match` still matches, so an unchanged poll costs no process and at most a presence read
+every 30 s. The daemon keeps one snapshot per session and rebuilds it only when mail for the session
+arrived, presence changed (re-read at most every 30 s; a heartbeat alone does not count), the
+session's state or sent log changed, or it is five minutes old. `mbox snapshot --json` puts the
+socket's path in `socket` when the daemon serves it, so a client learns it from one spawn. From
+Node: `http.get({ socketPath, path: '/v1/snapshot?session=' + id })`. Access is the file
+system's: the socket is 0600 and the state directory must be this user's alone (0700), or the
+daemon does not serve it (`deliverd.log` says why). `AGENT_MAILBOX_UI_SOCKET=off` in the daemon's
+environment turns it off.
+
 **Events feed.** Each user has a feed of what happens to their sessions: `started` and `ended` (the
 session hooks; a compaction is not a start; when a session's process dies without its session-end
 hook, the delivery daemon writes `ended`, once per start whoever comes first), `status-changed`
@@ -699,7 +713,8 @@ role, parent, status, title, offers, services), `<id>.sent.jsonl` (the messages 
 only), `<id>.lock` (the watcher, or the daemon while it serves the session) and `<id>.wait.lock`
 (the current waiter) and `<id>.ended` (its `ended` event was written; removed by `started`). Next to them: `registrations/` (0700, files 0600), `deliverd.lock` (the
 daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon being started),
-`deliverd.log`, `deliverd.out` (crash traces) and `paused.json`.
+`deliverd.log`, `deliverd.out` (crash traces), `paused.json` and `ui.sock` (the snapshot socket,
+0600, while the daemon runs).
 
 ## Security model and limits
 
@@ -729,6 +744,10 @@ daemon's pid, version, bundle path and user), `deliverd.starting` (a daemon bein
   offers) are visible to every user, whatever the feed's sharing: `private` hides a user's event history and `done`
   summaries, not their live sessions. Claude Code sessions publish their session title there
   (the session-start hook copies it): it says what the session works on to every mailbox user.
+- **The snapshot socket is as private as the state directory.** The daemon serves every session it
+  serves, mail included, to whoever can connect to `ui.sock`: only the same local user (the
+  daemon makes the socket 0600 and serves only from a directory that is this user's and 0700).
+  A process running as that user can already read the client config and the session files.
 - **The server admin can read everything**; streams hold plain text for 180 days. Use a host you
   trust, on a tailnet. Passwords are stored as bcrypt hashes on the server and in a 0600 file on
   clients, and travel only inside the NATS connection (encrypted by the tailnet, not by NATS TLS).
