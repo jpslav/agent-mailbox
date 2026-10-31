@@ -56,13 +56,13 @@
     "@types/node": "20.19.43",
     "commander": "12.1.0",
     "esbuild": "0.28.2",
-    "eslint": "10.12.0",
+    "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "lint-staged": "16.4.0",
-    "prettier": "3.9.9",
+    "prettier": "3.9.10",
     "simple-git-hooks": "2.14.0",
     "tsx": "4.23.15",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.71.0"
+    "typescript-eslint": "8.71.2"
   }
 }
